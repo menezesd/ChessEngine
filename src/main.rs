@@ -1100,43 +1100,46 @@ impl Board {
         // Piece square tables (unchanged)
         const PAWN_TABLE: [[i32; 8]; 8] = [
             [0, 0, 0, 0, 0, 0, 0, 0],
-            [50, 50, 50, 50, 50, 50, 50, 50],
-            [10, 10, 20, 30, 30, 20, 10, 10],
-            [5, 5, 10, 25, 25, 10, 5, 5],
-            [0, 0, 0, 20, 20, 0, 0, 0],
-            [5, -5, -10, 0, 0, -10, -5, 5],
-            [5, 10, 10, -20, -20, 10, 10, 5],
+            [78, 83, 86, 73, 102, 82, 85, 90],
+            [7, 29, 21, 44, 40, 31, 44, 7],
+            [-17, 16, -2, 15, 14, 0, 15, -13],
+            [-26, 3, 10, 9, 6, 1, 0, -23],
+            [-22, 9, 5, -11, -10, -2, 3, -19],
+            [-31, 8, -7, -37, -36, -14, 3, -31],
             [0, 0, 0, 0, 0, 0, 0, 0],
         ];
+
         const KNIGHT_TABLE: [[i32; 8]; 8] = [
-            [-50, -40, -30, -30, -30, -30, -40, -50],
-            [-40, -20, 0, 0, 0, 0, -20, -40],
-            [-30, 0, 10, 15, 15, 10, 0, -30],
-            [-30, 5, 15, 20, 20, 15, 5, -30],
-            [-30, 0, 15, 20, 20, 15, 0, -30],
-            [-30, 5, 10, 15, 15, 10, 5, -30],
-            [-40, -20, 0, 5, 5, 0, -20, -40],
-            [-50, -40, -30, -30, -30, -30, -40, -50],
+            [-66, -53, -75, -75, -10, -55, -58, -70],
+            [-3, -6, 100, -36, 4, 62, -4, -14],
+            [10, 67, 1, 74, 73, 27, 62, -2],
+            [24, 24, 45, 37, 33, 41, 25, 17],
+            [-1, 5, 31, 21, 22, 35, 2, 0],
+            [-18, 10, 13, 22, 18, 15, 11, -14],
+            [-23, -15, 2, 0, 2, 0, -23, -20],
+            [-74, -23, -26, -24, -19, -35, -22, -69],
         ];
+
         const BISHOP_TABLE: [[i32; 8]; 8] = [
-            [-20, -10, -10, -10, -10, -10, -10, -20],
-            [-10, 0, 0, 0, 0, 0, 0, -10],
-            [-10, 0, 10, 10, 10, 10, 0, -10],
-            [-10, 5, 5, 10, 10, 5, 5, -10],
-            [-10, 0, 5, 10, 10, 5, 0, -10],
-            [-10, 5, 5, 5, 5, 5, 5, -10],
-            [-10, 0, 5, 0, 0, 5, 0, -10],
-            [-20, -10, -10, -10, -10, -10, -10, -20],
+            [-59, -78, -82, -76, -23, -107, -37, -50],
+            [-11, 20, 35, -42, -39, 31, 2, -22],
+            [-9, 39, -32, 41, 52, -10, 28, -14],
+            [25, 17, 20, 34, 26, 25, 15, 10],
+            [13, 10, 17, 23, 17, 16, 0, 7],
+            [14, 25, 24, 15, 8, 25, 20, 15],
+            [19, 20, 11, 6, 7, 6, 20, 16],
+            [-7, 2, -15, -12, -14, -15, -10, -10],
         ];
+
         const ROOK_TABLE: [[i32; 8]; 8] = [
-            [0, 0, 0, 0, 0, 0, 0, 0],
-            [5, 10, 10, 10, 10, 10, 10, 5],
-            [-5, 0, 0, 0, 0, 0, 0, -5],
-            [-5, 0, 0, 0, 0, 0, 0, -5],
-            [-5, 0, 0, 0, 0, 0, 0, -5],
-            [-5, 0, 0, 0, 0, 0, 0, -5],
-            [-5, 0, 0, 0, 0, 0, 0, -5],
-            [0, 0, 0, 5, 5, 0, 0, 0],
+            [35, 29, 33, 4, 37, 33, 56, 50],
+            [55, 29, 56, 67, 55, 62, 34, 60],
+            [19, 35, 28, 33, 45, 27, 25, 15],
+            [0, 5, 16, 13, 18, -4, -9, -6],
+            [-28, -35, -16, -21, -13, -29, -46, -30],
+            [-42, -28, -42, -25, -25, -35, -26, -46],
+            [-53, -38, -31, -26, -29, -43, -44, -53],
+            [-30, -24, -18, 5, -2, -18, -31, -3],
         ];
         const QUEEN_TABLE: [[i32; 8]; 8] = [
             [-20, -10, -10, -5, -5, -10, -10, -20],
@@ -1748,7 +1751,7 @@ fn main() {
             // Make the validated human move
             let chosen_move = human_move.unwrap(); // We know it's Some by now
             println!(
-                "You moved: {} to {:?} (Promo: {:?}, Castle: {}, EP: {}, Capture: {:?})",
+                "You moved: {} to {} (Promo: {:?}, Castle: {}, EP: {}, Capture: {:?})",
                 format_square(chosen_move.from),
                 format_square(chosen_move.to),
                 chosen_move.promotion,
@@ -1792,4 +1795,121 @@ fn main() {
     } // End game loop
 
     println!("Game finished.");
+}
+
+use std::time::Instant;
+
+#[cfg(test)]
+mod perft_tests {
+    use super::*;
+
+    struct TestPosition {
+        name: &'static str,
+        fen: &'static str,
+        depths: &'static [(usize, u64)], // (depth, expected node count)
+    }
+
+    // Common test positions with known perft results
+    const TEST_POSITIONS: &[TestPosition] = &[
+        // Initial position
+        TestPosition {
+            name: "Initial Position",
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            depths: &[
+                (1, 20),      // 20 possible moves from initial position
+                (2, 400),     // 400 positions after 2 plies
+                (3, 8902),    // 8,902 positions after 3 plies
+                (4, 197281),  // 197,281 positions after 4 plies
+                (5, 4865609), // 4,865,609 positions after 5 plies
+            ],
+        },
+        // Position 2 (Kiwipete)
+        TestPosition {
+            name: "Kiwipete",
+            fen: "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            depths: &[(1, 48), (2, 2039), (3, 97862), (4, 4085603)],
+        },
+        // Position 3
+        TestPosition {
+            name: "Position 3",
+            fen: "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            depths: &[(1, 14), (2, 191), (3, 2812), (4, 43238), (5, 674624)],
+        },
+        // Position 4
+        TestPosition {
+            name: "Position 4",
+            fen: "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            depths: &[(1, 6), (2, 264), (3, 9467), (4, 422333)],
+        },
+        // Position 5
+        TestPosition {
+            name: "Position 5",
+            fen: "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            depths: &[(1, 44), (2, 1486), (3, 62379), (4, 2103487)],
+        },
+        // Position 6 (Win at Chess)
+        TestPosition {
+            name: "Position 6 (Win at Chess)",
+            fen: "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+            depths: &[
+                (1, 46),
+                (2, 2079),
+                (3, 89890),
+                //(4, 3894594), // Commented out as it may take too long
+            ],
+        },
+        // Additional edge cases
+        TestPosition {
+            name: "En Passant Capture",
+            fen: "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3",
+            depths: &[
+                (1, 31), // Includes en passant capture
+                (2, 707),
+                (3, 21637),
+            ],
+        },
+        TestPosition {
+            name: "Promotion",
+            fen: "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+            depths: &[
+                (1, 24), // Many promotion options
+                (2, 496),
+                (3, 9483),
+            ],
+        },
+        TestPosition {
+            name: "Castling",
+            fen: "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            depths: &[
+                (1, 26), // Both sides can castle in both directions
+                (2, 568),
+                (3, 13744),
+            ],
+        },
+    ];
+
+    #[test]
+    fn test_all_perft_positions() {
+        for position in TEST_POSITIONS {
+            println!("Testing position: {}", position.name);
+            println!("FEN: {}", position.fen);
+
+            let mut board = Board::from_fen(position.fen);
+
+            for &(depth, expected) in position.depths {
+                let start = Instant::now();
+                let nodes = board.perft(depth);
+                let duration = start.elapsed();
+
+                println!("  Depth {}: {} nodes in {:?}", depth, nodes, duration);
+
+                assert_eq!(
+                    nodes, expected,
+                    "Perft failed for position '{}' at depth {}. Expected: {}, Got: {}",
+                    position.name, depth, expected, nodes
+                );
+            }
+            println!("------------------------------");
+        }
+    }
 }
