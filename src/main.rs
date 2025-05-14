@@ -141,7 +141,6 @@ struct Move {
     captured_piece: Option<Piece>,
 }
 
-
 #[derive(Clone, Debug)]
 struct UnmakeInfo {
     captured_piece_info: Option<(Color, Piece)>,
@@ -235,6 +234,28 @@ impl TranspositionTable {
                 best_move, // Pass ownership/clone
             });
         }
+    }
+}
+
+fn piece_value(piece: Piece) -> i32 {
+    match piece {
+        Piece::Pawn => 100,
+        Piece::Knight => 300,
+        Piece::Bishop => 300,
+        Piece::Rook => 500,
+        Piece::Queen => 900,
+        Piece::King => 10000, // Usually not used in MVV-LVA since king captures are illegal
+    }
+}
+
+fn mvv_lva_score(m: &Move, board: &Board) -> i32 {
+    if let Some(victim) = m.captured_piece {
+        let attacker = board.squares[m.from.0][m.from.1].unwrap().1;
+        let victim_value = piece_value(victim);
+        let attacker_value = piece_value(attacker);
+        victim_value * 10 - attacker_value // prioritize more valuable victims, less valuable attackers
+    } else {
+        0 // Non-captures get low priority
     }
 }
 
@@ -1488,6 +1509,7 @@ impl Board {
 
         // --- Generate Moves ---
         let mut legal_moves = self.generate_moves(); // Needs &mut self
+        legal_moves.sort_by_key(|m| -mvv_lva_score(m, self));
 
         // --- Check for Checkmate / Stalemate ---
         if legal_moves.is_empty() {
@@ -1564,7 +1586,8 @@ impl Board {
         alpha = alpha.max(stand_pat_score); // Update lower bound
 
         // --- Generate Only Tactical Moves ---
-        let tactical_moves = self.generate_tactical_moves();
+        let mut tactical_moves = self.generate_tactical_moves();
+        tactical_moves.sort_by_key(|m| -mvv_lva_score(m, self));
 
         // TODO: Add move ordering for tactical moves (e.g., MVV-LVA)
 
@@ -1851,7 +1874,6 @@ fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     None // No matching legal move found
 }
 
-
 fn find_best_move(board: &mut Board, tt: &mut TranspositionTable, max_depth: u32) -> Option<Move> {
     let mut best_move: Option<Move> = None;
     let mut best_score = -MATE_SCORE * 2;
@@ -1901,17 +1923,14 @@ fn find_best_move(board: &mut Board, tt: &mut TranspositionTable, max_depth: u32
                 root_moves.swap(0, pos);
             }
         }
-
     }
 
     best_move
 }
 
-
 fn format_square(sq: Square) -> String {
     format!("{}{}", (sq.1 as u8 + b'a') as char, sq.0 + 1)
 }
-
 
 fn parse_position_command(board: &mut Board, parts: &[&str]) {
     let mut i = 1;
@@ -1962,7 +1981,9 @@ fn find_best_move_with_time(
 
     // Iterative deepening
     while start_time.elapsed() < max_time {
-        let time_remaining = max_time.checked_sub(start_time.elapsed()).unwrap_or_default();
+        let time_remaining = max_time
+            .checked_sub(start_time.elapsed())
+            .unwrap_or_default();
 
         // Optional: Add a time margin to safely bail before the hard limit
         if time_remaining < Duration::from_millis(5) {
@@ -1974,7 +1995,7 @@ fn find_best_move_with_time(
         let beta = MATE_SCORE * 2;
         let mut best_score = -MATE_SCORE * 2;
         let mut legal_moves = board.generate_moves();
-
+        legal_moves.sort_by_key(|m| -mvv_lva_score(m, board));
         if legal_moves.is_empty() {
             return None;
         }
@@ -2019,8 +2040,6 @@ fn find_best_move_with_time(
     best_move
 }
 
-
-
 fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -2031,7 +2050,7 @@ fn main() {
     let mut time_left = Duration::from_secs(5); // fallback
     let mut inc = Duration::ZERO;
     let mut movetime: Option<Duration> = None;
-    
+
     for line in stdin.lock().lines() {
         let line = line.unwrap();
         let parts: Vec<&str> = line.trim().split_whitespace().collect();
@@ -2055,8 +2074,7 @@ fn main() {
                 parse_position_command(&mut board, &parts);
             }
             "go" => {
-
-let mut i = 1;
+                let mut i = 1;
                 while i < parts.len() {
                     match parts[i] {
                         "wtime" if board.white_to_move => {
@@ -2076,7 +2094,8 @@ let mut i = 1;
                             i += 2;
                         }
                         "movetime" => {
-                            movetime = Some(Duration::from_millis(parts[i + 1].parse().unwrap_or(100)));
+                            movetime =
+                                Some(Duration::from_millis(parts[i + 1].parse().unwrap_or(100)));
                             i += 2;
                         }
                         _ => i += 1,
@@ -2086,7 +2105,9 @@ let mut i = 1;
                 let max_time = movetime.unwrap_or_else(|| time_left / 30 + inc);
                 let start = Instant::now();
 
-                if let Some(best_move) = find_best_move_with_time(&mut board, &mut tt, max_time, start) {
+                if let Some(best_move) =
+                    find_best_move_with_time(&mut board, &mut tt, max_time, start)
+                {
                     let uci_move = format_uci_move(&best_move);
                     println!("bestmove {}", uci_move);
                 } else {
