@@ -1970,6 +1970,7 @@ fn format_uci_move(mv: &Move) -> String {
     s
 }
 
+
 fn find_best_move_with_time(
     board: &mut Board,
     tt: &mut TranspositionTable,
@@ -1978,29 +1979,36 @@ fn find_best_move_with_time(
 ) -> Option<Move> {
     let mut best_move: Option<Move> = None;
     let mut depth = 1;
+    let mut last_depth_time = Duration::from_millis(1); // Prevent div-by-zero on first estimate
 
-    // Iterative deepening
-    while start_time.elapsed() < max_time {
+    const SAFETY_MARGIN: Duration = Duration::from_millis(5);
+    const TIME_GROWTH_FACTOR: f32 = 2.0; // Each depth takes ~2× longer
+
+    while start_time.elapsed() + SAFETY_MARGIN < max_time {
+        let elapsed = start_time.elapsed();
         let time_remaining = max_time
-            .checked_sub(start_time.elapsed())
+            .checked_sub(elapsed)
             .unwrap_or_default();
 
-        // Optional: Add a time margin to safely bail before the hard limit
-        if time_remaining < Duration::from_millis(5) {
-            break;
+        // Estimate whether we have enough time for the next depth
+        let estimated_next_time = last_depth_time.mul_f32(TIME_GROWTH_FACTOR);
+        if estimated_next_time + SAFETY_MARGIN > time_remaining {
+            break; // Not enough time for another full depth
         }
 
-        // Do a full-depth search
+        let depth_start = Instant::now();
+
         let mut alpha = -MATE_SCORE * 2;
         let beta = MATE_SCORE * 2;
         let mut best_score = -MATE_SCORE * 2;
         let mut legal_moves = board.generate_moves();
-        legal_moves.sort_by_key(|m| -mvv_lva_score(m, board));
+
         if legal_moves.is_empty() {
             return None;
         }
 
-        // Move ordering using TT
+        // MVV-LVA and TT move ordering
+        legal_moves.sort_by_key(|m| -mvv_lva_score(m, board));
         if let Some(entry) = tt.probe(board.hash) {
             if let Some(hm) = &entry.best_move {
                 if let Some(pos) = legal_moves.iter().position(|m| m == hm) {
@@ -2012,8 +2020,8 @@ fn find_best_move_with_time(
         let mut new_best_move = None;
 
         for m in &legal_moves {
-            if start_time.elapsed() >= max_time {
-                break; // stop search if out of time
+            if start_time.elapsed() + SAFETY_MARGIN >= max_time {
+                break;
             }
 
             let info = board.make_move(m);
@@ -2028,13 +2036,14 @@ fn find_best_move_with_time(
             alpha = alpha.max(best_score);
         }
 
-        if start_time.elapsed() < max_time {
+        // Only update result if completed full depth in time
+        if start_time.elapsed() + SAFETY_MARGIN < max_time {
             best_move = new_best_move;
+            last_depth_time = depth_start.elapsed();
+            depth += 1;
         } else {
             break;
         }
-
-        depth += 1;
     }
 
     best_move
