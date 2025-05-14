@@ -1,7 +1,9 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::io;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::mem; // For size_of
+use std::time::{Duration, Instant};
 
 // --- Crates ---
 use once_cell::sync::Lazy;
@@ -129,7 +131,7 @@ enum Color {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Square(usize, usize); // (rank, file)
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Move {
     from: Square,
     to: Square,
@@ -138,6 +140,7 @@ struct Move {
     promotion: Option<Piece>,
     captured_piece: Option<Piece>,
 }
+
 
 #[derive(Clone, Debug)]
 struct UnmakeInfo {
@@ -181,8 +184,6 @@ impl TranspositionTable {
         if num_entries == 0 {
             num_entries = 1024;
         } // Minimum size fallback
-
-        println!("TT Size: {} MB, Entries: {}", size_mb, num_entries);
 
         TranspositionTable {
             table: vec![None; num_entries],
@@ -1850,193 +1851,257 @@ fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     None // No matching legal move found
 }
 
-// --- Root Search Function (Modified for TT) ---
-fn find_best_move(board: &mut Board, tt: &mut TranspositionTable, depth: u32) -> Option<Move> {
-    let mut alpha = -MATE_SCORE * 2;
-    let beta = MATE_SCORE * 2;
+
+fn find_best_move(board: &mut Board, tt: &mut TranspositionTable, max_depth: u32) -> Option<Move> {
+    let mut best_move: Option<Move> = None;
     let mut best_score = -MATE_SCORE * 2;
-    let mut best_move: Option<Move> = None; // Use Option<Move> directly
 
-    let mut legal_moves = board.generate_moves();
-
+    let legal_moves = board.generate_moves();
     if legal_moves.is_empty() {
         return None;
     }
 
-    // --- Move Ordering at Root (Optional but good) ---
-    // Can try moves from TT if the root position was previously searched to some depth
-    if let Some(entry) = tt.probe(board.hash) {
-        if let Some(hm) = &entry.best_move {
-            if let Some(pos) = legal_moves.iter().position(|m| m == hm) {
-                legal_moves.swap(0, pos); // Try hash move first
+    let mut root_moves = legal_moves.clone(); // Reuse for move ordering
+
+    // Iterative Deepening Loop
+    for depth in 1..=max_depth {
+        let mut alpha = -MATE_SCORE * 2;
+        let beta = MATE_SCORE * 2;
+        let mut current_best_score = -MATE_SCORE * 2;
+        let mut current_best_move: Option<Move> = None;
+
+        // Optional: order moves using hash move from TT
+        if let Some(entry) = tt.probe(board.hash) {
+            if let Some(hm) = &entry.best_move {
+                if let Some(pos) = root_moves.iter().position(|m| m == hm) {
+                    root_moves.swap(0, pos);
+                }
             }
         }
-    }
 
-    for m in legal_moves {
-        let info = board.make_move(&m);
-        // Initial call to negamax with the TT
-        let score = -board.negamax(tt, depth - 1, -beta, -alpha);
-        board.unmake_move(&m, info);
+        for m in &root_moves {
+            let info = board.make_move(m);
+            let score = -board.negamax(tt, depth - 1, -beta, -alpha);
+            board.unmake_move(m, info);
 
-        // println!("Root Move: {:?}-{:?}, Score: {}", format_square(m.from), format_square(m.to), score); // Debugging
+            if score > current_best_score {
+                current_best_score = score;
+                current_best_move = Some(*m);
+            }
 
-        if score > best_score {
-            best_score = score;
-            best_move = Some(m); // Store the best move found
+            alpha = alpha.max(current_best_score);
         }
 
-        // Update alpha at root - helps prune sibling nodes if using iterative deepening
-        alpha = alpha.max(best_score);
+        if let Some(mv) = current_best_move {
+            best_score = current_best_score;
+            best_move = Some(mv);
+
+            // Optional: reorder root_moves so best move is searched first in next iteration
+            if let Some(pos) = root_moves.iter().position(|m| *m == mv) {
+                root_moves.swap(0, pos);
+            }
+        }
+
     }
 
-    println!("Best score found: {}", best_score);
-    best_move // Return Option<Move>
+    best_move
 }
+
 
 fn format_square(sq: Square) -> String {
     format!("{}{}", (sq.1 as u8 + b'a') as char, sq.0 + 1)
 }
 
-// --- Modified Main Function ---
-fn main() {
-    let tt_size_mb = 1024; // Example size: 64MB
-    let mut tt = TranspositionTable::new(tt_size_mb);
 
-    let search_depth = 5; // Increase depth - TT helps!
-    println!(
-        "Searching depth {} with {}MB TT...",
-        search_depth, tt_size_mb
-    );
-
-    let mut board = Board::new();
-
-    let human_color: Color;
-
-    // Ask user for color choice
-    loop {
-        print!("Choose your color (White/Black): ");
-        io::stdout().flush().unwrap(); // Ensure prompt is shown before input
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .expect("Failed to read line");
-
-        match input.trim().to_lowercase().as_str() {
-            "white" | "w" => {
-                human_color = Color::White;
-                println!("You play as White.");
-                break;
-            }
-            "black" | "b" => {
-                human_color = Color::Black;
-                println!("You play as Black.");
-                break;
-            }
-            _ => println!("Invalid input. Please enter 'White' or 'Black'."),
-        }
+fn parse_position_command(board: &mut Board, parts: &[&str]) {
+    let mut i = 1;
+    if i < parts.len() && parts[i] == "startpos" {
+        *board = Board::new();
+        i += 1;
+    } else if i < parts.len() && parts[i] == "fen" {
+        let fen = parts[i + 1..i + 7].join(" ");
+        *board = Board::from_fen(&fen);
+        i += 7;
     }
 
-    board.print();
-
-    // Game Loop
-    loop {
-        // 1. Check Game Over Conditions
-        // Need mutable borrow for these checks now
-        if board.is_checkmate() {
-            let winner = if board.white_to_move {
-                "Black"
+    if i < parts.len() && parts[i] == "moves" {
+        i += 1;
+        while i < parts.len() {
+            if let Some(mv) = parse_uci_move(board, parts[i]) {
+                board.make_move(&mv);
             } else {
-                "White"
-            };
-            println!("\n=== CHECKMATE! {} wins! ===", winner);
-            break;
-        }
-        if board.is_stalemate() {
-            println!("\n=== STALEMATE! Draw. ===");
-            break;
-        }
-
-        // 2. Determine Whose Turn
-        let current_player_color = board.current_color();
-
-        if current_player_color == human_color {
-            // --- Human's Turn ---
-            println!("\nYour turn ({:?}).", human_color);
-            let mut human_move: Option<Move> = None;
-
-            while human_move.is_none() {
-                print!("Enter your move (e.g., e2e4, e7e8q): ");
-                io::stdout().flush().unwrap();
-                let mut input = String::new();
-                io::stdin()
-                    .read_line(&mut input)
-                    .expect("Failed to read line");
-                let trimmed_input = input.trim();
-
-                if trimmed_input == "exit" || trimmed_input == "quit" {
-                    println!("Exiting game.");
-                    return;
-                }
-
-                // Parse and validate the move
-                // parse_uci_move needs &mut board because generate_moves needs it.
-                match parse_uci_move(&mut board, trimmed_input) {
-                    Some(m) => human_move = Some(m),
-                    None => println!("Invalid or illegal move. Try again."),
-                }
+                eprintln!("Invalid move: {}", parts[i]);
             }
-
-            // Make the validated human move
-            let chosen_move = human_move.unwrap(); // We know it's Some by now
-            println!(
-                "You moved: {} to {} (Promo: {:?}, Castle: {}, EP: {}, Capture: {:?})",
-                format_square(chosen_move.from),
-                format_square(chosen_move.to),
-                chosen_move.promotion,
-                chosen_move.is_castling,
-                chosen_move.is_en_passant,
-                chosen_move.captured_piece
-            );
-            let _info = board.make_move(&chosen_move); // Apply the move
-        } else {
-            // --- Computer's Turn ---
-            println!(
-                "\nComputer's turn ({:?}). Thinking...",
-                current_player_color
-            );
-
-            // Use find_best_move which requires &mut self
-            match find_best_move(&mut board, &mut tt, search_depth) {
-                Some(ai_move) => {
-                    println!(
-                        "Computer moved: {} to {} (Promo: {:?}, Castle: {}, EP: {}, Capture: {:?})",
-                        format_square(ai_move.from),
-                        format_square(ai_move.to),
-                        ai_move.promotion,
-                        ai_move.is_castling,
-                        ai_move.is_en_passant,
-                        ai_move.captured_piece
-                    );
-                    let _info = board.make_move(&ai_move); // Apply the computer's move
-                }
-                None => {
-                    // This case should ideally be caught by checkmate/stalemate check
-                    // at the beginning of the loop. If we reach here, something is wrong.
-                    println!("Error: Computer found no moves, but game wasn't over?");
-                    break;
-                }
-            }
+            i += 1;
         }
-
-        // Print board after the move
-        board.print();
-    } // End game loop
-
-    println!("Game finished.");
+    }
 }
 
-use std::time::Instant;
+fn format_uci_move(mv: &Move) -> String {
+    let mut s = format!("{}{}", format_square(mv.from), format_square(mv.to));
+    if let Some(promo) = mv.promotion {
+        s.push(match promo {
+            Piece::Queen => 'q',
+            Piece::Rook => 'r',
+            Piece::Bishop => 'b',
+            Piece::Knight => 'n',
+            _ => '?',
+        });
+    }
+    s
+}
+
+fn find_best_move_with_time(
+    board: &mut Board,
+    tt: &mut TranspositionTable,
+    max_time: Duration,
+    start_time: Instant,
+) -> Option<Move> {
+    let mut best_move: Option<Move> = None;
+    let mut depth = 1;
+
+    // Iterative deepening
+    while start_time.elapsed() < max_time {
+        let time_remaining = max_time.checked_sub(start_time.elapsed()).unwrap_or_default();
+
+        // Optional: Add a time margin to safely bail before the hard limit
+        if time_remaining < Duration::from_millis(5) {
+            break;
+        }
+
+        // Do a full-depth search
+        let mut alpha = -MATE_SCORE * 2;
+        let beta = MATE_SCORE * 2;
+        let mut best_score = -MATE_SCORE * 2;
+        let mut legal_moves = board.generate_moves();
+
+        if legal_moves.is_empty() {
+            return None;
+        }
+
+        // Move ordering using TT
+        if let Some(entry) = tt.probe(board.hash) {
+            if let Some(hm) = &entry.best_move {
+                if let Some(pos) = legal_moves.iter().position(|m| m == hm) {
+                    legal_moves.swap(0, pos);
+                }
+            }
+        }
+
+        let mut new_best_move = None;
+
+        for m in &legal_moves {
+            if start_time.elapsed() >= max_time {
+                break; // stop search if out of time
+            }
+
+            let info = board.make_move(m);
+            let score = -board.negamax(tt, depth - 1, -beta, -alpha);
+            board.unmake_move(m, info);
+
+            if score > best_score {
+                best_score = score;
+                new_best_move = Some(*m);
+            }
+
+            alpha = alpha.max(best_score);
+        }
+
+        if start_time.elapsed() < max_time {
+            best_move = new_best_move;
+        } else {
+            break;
+        }
+
+        depth += 1;
+    }
+
+    best_move
+}
+
+
+
+fn main() {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut board = Board::new();
+    let mut tt = TranspositionTable::new(1024); // 1024MB TT
+    let search_depth = 6;
+
+    let mut time_left = Duration::from_secs(5); // fallback
+    let mut inc = Duration::ZERO;
+    let mut movetime: Option<Duration> = None;
+    
+    for line in stdin.lock().lines() {
+        let line = line.unwrap();
+        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        match parts[0] {
+            "uci" => {
+                println!("id name MyRustEngine");
+                println!("id author Dean Menezes");
+                println!("uciok");
+            }
+            "isready" => {
+                println!("readyok");
+            }
+            "ucinewgame" => {
+                board = Board::new();
+            }
+            "position" => {
+                parse_position_command(&mut board, &parts);
+            }
+            "go" => {
+
+let mut i = 1;
+                while i < parts.len() {
+                    match parts[i] {
+                        "wtime" if board.white_to_move => {
+                            time_left = Duration::from_millis(parts[i + 1].parse().unwrap_or(1000));
+                            i += 2;
+                        }
+                        "btime" if !board.white_to_move => {
+                            time_left = Duration::from_millis(parts[i + 1].parse().unwrap_or(1000));
+                            i += 2;
+                        }
+                        "winc" if board.white_to_move => {
+                            inc = Duration::from_millis(parts[i + 1].parse().unwrap_or(0));
+                            i += 2;
+                        }
+                        "binc" if !board.white_to_move => {
+                            inc = Duration::from_millis(parts[i + 1].parse().unwrap_or(0));
+                            i += 2;
+                        }
+                        "movetime" => {
+                            movetime = Some(Duration::from_millis(parts[i + 1].parse().unwrap_or(100)));
+                            i += 2;
+                        }
+                        _ => i += 1,
+                    }
+                }
+
+                let max_time = movetime.unwrap_or_else(|| time_left / 30 + inc);
+                let start = Instant::now();
+
+                if let Some(best_move) = find_best_move_with_time(&mut board, &mut tt, max_time, start) {
+                    let uci_move = format_uci_move(&best_move);
+                    println!("bestmove {}", uci_move);
+                } else {
+                    println!("bestmove 0000");
+                }
+            }
+            "quit" => break,
+            _ => {
+                // Ignore unknown commands or log them if needed
+            }
+        }
+
+        stdout.flush().unwrap();
+    }
+}
 
 #[cfg(test)]
 mod perft_tests {
