@@ -1882,7 +1882,9 @@ fn find_best_move(board: &mut Board, tt: &mut TranspositionTable, max_depth: u32
     if legal_moves.is_empty() {
         return None;
     }
-
+    if legal_moves.len() == 1 {
+        return Some(legal_moves[0]); // No need to search further
+    }
     let mut root_moves = legal_moves.clone(); // Reuse for move ordering
 
     // Iterative Deepening Loop
@@ -1970,7 +1972,6 @@ fn format_uci_move(mv: &Move) -> String {
     s
 }
 
-
 fn find_best_move_with_time(
     board: &mut Board,
     tt: &mut TranspositionTable,
@@ -1986,9 +1987,7 @@ fn find_best_move_with_time(
 
     while start_time.elapsed() + SAFETY_MARGIN < max_time {
         let elapsed = start_time.elapsed();
-        let time_remaining = max_time
-            .checked_sub(elapsed)
-            .unwrap_or_default();
+        let time_remaining = max_time.checked_sub(elapsed).unwrap_or_default();
 
         // Estimate whether we have enough time for the next depth
         let estimated_next_time = last_depth_time.mul_f32(TIME_GROWTH_FACTOR);
@@ -2005,6 +2004,10 @@ fn find_best_move_with_time(
 
         if legal_moves.is_empty() {
             return None;
+        }
+
+        if legal_moves.len() == 1 {
+            return Some(legal_moves[0]); // No need to search further
         }
 
         // MVV-LVA and TT move ordering
