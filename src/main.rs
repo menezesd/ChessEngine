@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fmt;
 use std::io;
 use std::io::{BufRead, Write};
 use std::mem; // For size_of
@@ -1334,11 +1333,7 @@ impl Board {
             for rank in 0..8 {
                 if let Some((color, piece)) = self.squares[rank][file] {
                     if piece == Piece::Rook {
-                        let file_pawns = if color == Color::White {
-                            white_pawns_by_file[file]
-                        } else {
-                            black_pawns_by_file[file]
-                        };
+                        let file_pawns = white_pawns_by_file[file] + black_pawns_by_file[file];
 
                         if file_pawns == 0 {
                             // Open file
@@ -1535,9 +1530,17 @@ impl Board {
         let mut best_score = -MATE_SCORE * 2; // Initialize with very low score
         let mut best_move_found: Option<Move> = None;
 
-        for m in legal_moves {
+        for (i, m) in legal_moves.iter().enumerate() {
             let info = self.make_move(&m);
-            let score = -self.negamax(tt, depth - 1, -beta, -alpha); // Recursive call with TT
+            let score = if i == 0 {
+                -self.negamax(tt, depth - 1, -beta, -alpha)
+            } else {
+                let mut score = -self.negamax(tt, depth - 1, -alpha - 1, -alpha);
+                if score > alpha && score < beta {
+                    score = -self.negamax(tt, depth - 1, -beta, -alpha);
+                }
+                score
+            };
             self.unmake_move(&m, info);
 
             // --- Update Alpha/Beta and Best Score ---
