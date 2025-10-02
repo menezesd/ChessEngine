@@ -16,11 +16,13 @@ pub struct TTEntry {
     pub(crate) score: i32,
     pub(crate) bound_type: BoundType,
     pub(crate) best_move: Option<Move>,
+    pub(crate) gen: u8,
 }
 
 pub struct TranspositionTable {
     table: Vec<Option<TTEntry>>,
     mask: usize,
+    generation: u8,
 }
 
 impl TranspositionTable {
@@ -34,6 +36,7 @@ impl TranspositionTable {
         TranspositionTable {
             table: vec![None; num_entries],
             mask: num_entries - 1,
+            generation: 0,
         }
     }
 
@@ -60,17 +63,37 @@ impl TranspositionTable {
         best_move: Option<Move>,
     ) {
         let idx = self.index(hash);
-        let should_replace = match &self.table[idx] {
-            Some(e) => depth >= e.depth,
+        let replace = match &self.table[idx] {
+            Some(e) => {
+                // If slot holds a different hash, decide by depth and aging.
+                let depth_better = depth > e.depth;
+                let same_depth = depth == e.depth;
+                let newer_generation = e.gen != self.generation;
+                if depth_better { true }
+                else if newer_generation {
+                    // Prefer replacing older-generation entries even if slightly shallower.
+                    depth + 2 >= e.depth
+                } else if same_depth {
+                    match (bound_type, e.bound_type) {
+                        (BoundType::Exact, BoundType::Exact) => true, // refresh to update move/score
+                        (BoundType::Exact, _) => true,
+                        (_, BoundType::Exact) => false,
+                        _ => true,
+                    }
+                } else {
+                    false
+                }
+            }
             None => true,
         };
-        if should_replace {
+        if replace {
             self.table[idx] = Some(TTEntry {
                 hash,
                 depth,
                 score,
                 bound_type,
                 best_move,
+                gen: self.generation,
             });
         }
     }
@@ -84,11 +107,16 @@ impl TranspositionTable {
         }
         self.table = vec![None; num_entries];
         self.mask = num_entries - 1;
+        self.generation = 0;
     }
 
     pub fn clear(&mut self) {
-        for slot in self.table.iter_mut() {
-            *slot = None;
-        }
+        for slot in self.table.iter_mut() { *slot = None; }
+        // Keep generation; or reset if desired. We'll reset to avoid stale bias.
+        self.generation = 0;
+    }
+
+    pub fn start_new_search(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 }

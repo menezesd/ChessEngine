@@ -1,7 +1,11 @@
-use std::time::Instant;
+// use std::time::Instant; // Only used in tests below
 
+mod bench;
 mod board;
 mod search;
+mod tactics;
+mod tuned_configs;
+mod tuning;
 mod tt;
 mod uci;
 
@@ -14,8 +18,59 @@ pub(crate) use tt::TranspositionTable;
 const KING_VALUE: i32 = 20000;
 const MATE_SCORE: i32 = KING_VALUE * 10;
 
+fn print_help() {
+    println!("Chess Engine - Advanced UCI-compliant chess engine");
+    println!();
+    println!("USAGE:");
+    println!("    chess_engine [COMMAND] [OPTIONS]");
+    println!();
+    println!("COMMANDS:");
+    println!("    uci                          Start UCI mode (default)");
+    println!("    bench [compare]              Run performance benchmarks");
+    println!("    tune [config]                Run parameter tuning");
+    println!("    tactics [SOURCE] [N] [TIME]  Test tactical puzzle solving");
+    println!("    help                         Show this help message");
+    println!();
+    println!("TACTICAL TESTING:");
+    println!("    tactics                      Test 1001 brilliant checkmates (default)");
+    println!("    tactics brilliant [N] [T]    Test N puzzles from brilliant collection (T ms each)");
+    println!("    tactics famous [N] [T]       Test built-in famous mate positions");
+    println!("    tactics FILE.pgn [N] [T]     Test puzzles from custom PGN file");
+    println!();
+    println!("EXAMPLES:");
+    println!("    chess_engine                 # Start UCI mode");
+    println!("    chess_engine bench            # Run standard benchmark");
+    println!("    chess_engine bench compare    # Compare all configurations");
+    println!("    chess_engine tactics          # Test brilliant checkmates");
+    println!("    chess_engine tactics brilliant 25 4000  # Test 25 puzzles, 4s each");
+    println!("    chess_engine tactics famous   # Test 5 built-in positions");
+}
+
 fn main() {
-    uci::run();
+    let args: Vec<String> = std::env::args().collect();
+    
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "bench" => {
+                let bench_args = if args.len() > 2 { &args[2..] } else { &[] };
+                bench::run_bench_command(bench_args);
+            }
+            "tune" => {
+                let tune_args = if args.len() > 2 { &args[2..] } else { &[] };
+                tuning::run_tuning_command(tune_args);
+            }
+            "tactics" => {
+                let tactics_args = if args.len() > 2 { &args[2..] } else { &[] };
+                tactics::run_tactical_test(tactics_args);
+            }
+            "help" | "--help" | "-h" => {
+                print_help();
+            }
+            _ => uci::run(),
+        }
+    } else {
+        uci::run();
+    }
 }
 
 #[cfg(test)]
