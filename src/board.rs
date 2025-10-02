@@ -281,20 +281,152 @@ impl Board {
     }
 
     fn generate_pseudo_moves(&self) -> Vec<Move> {
+        self.generate_pseudo_moves_bb()
+    }
+
+    fn generate_pseudo_moves_bb(&self) -> Vec<Move> {
+        use crate::bitboards as bb;
         let mut moves = Vec::new();
-        let color = if self.white_to_move { Color::White } else { Color::Black };
-        for rank in 0..8 { for file in 0..8 { if let Some((c, piece)) = self.squares[rank][file] { if c == color { let from = Square(rank, file); moves.extend(self.generate_piece_moves(from, piece)); } } } }
+        let color = self.current_color();
+        let us = color;
+        let _them = self.opponent_color(color);
+
+        // Build occupancy and piece bitboards for side to move
+        let mut occ: u64 = 0; let mut occ_us: u64 = 0; let mut occ_them: u64 = 0;
+        let mut pawns: u64 = 0; let mut knights: u64 = 0; let mut bishops: u64 = 0; let mut rooks: u64 = 0; let mut queens: u64 = 0; let mut king: u64 = 0;
+        for r in 0..8 { for f in 0..8 { if let Some((c,p)) = self.squares[r][f] { let b = 1u64 << (r*8+f); occ |= b; if c==us { occ_us |= b; match p { Piece::Pawn=>pawns|=b, Piece::Knight=>knights|=b, Piece::Bishop=>bishops|=b, Piece::Rook=>rooks|=b, Piece::Queen=>queens|=b, Piece::King=>king|=b } } else { occ_them |= b; } } } }
+
+        // Helper to add a quiet or capture move from bit indices
+        let mut push_move = |from_idx: usize, to_idx: usize, promo: Option<Piece>, is_ep: bool| {
+            let from = Square(from_idx/8, from_idx%8);
+            let to = Square(to_idx/8, to_idx%8);
+            let captured_piece = if is_ep { Some(Piece::Pawn) } else { self.squares[to.0][to.1].map(|(_,p)| p) };
+            moves.push(Move{ from, to, is_castling:false, is_en_passant:is_ep, promotion:promo, captured_piece });
+        };
+
+        // Pawn pushes and captures
+        if pawns != 0 {
+            if us == Color::White {
+                // Single pushes
+                let empty = !occ;
+                let one = (pawns << 8) & empty;
+                // Promotions on rank 8
+                let promos = one & bb::RANK8;
+                let quiets = one & !bb::RANK8;
+                let mut q = quiets; while q!=0 { let to = q.trailing_zeros() as usize; q &= q-1; let from = to-8; push_move(from, to, None, false); }
+                let mut pr = promos; while pr!=0 { let to = pr.trailing_zeros() as usize; pr &= pr-1; let from = to-8; for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { push_move(from,to,Some(promo),false); } }
+                // Double pushes from rank2
+                let two = ((one & bb::RANK3_MASK()) << 8) & empty; // RANK3_MASK computed below via helper
+                let mut t = two; while t!=0 { let to = t.trailing_zeros() as usize; t &= t-1; let from = to-16; push_move(from, to, None, false); }
+                // Captures
+                let left_capt = (pawns << 7) & !bb::FILE_H & occ_them;
+                let right_capt = (pawns << 9) & !bb::FILE_A & occ_them;
+                let mut lc = left_capt; while lc!=0 { let to = lc.trailing_zeros() as usize; lc &= lc-1; let from = to-7; if to>=56 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight]{ push_move(from,to,Some(promo),false);} } else { push_move(from,to,None,false);} }
+                let mut rc = right_capt; while rc!=0 { let to = rc.trailing_zeros() as usize; rc &= rc-1; let from = to-9; if to>=56 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight]{ push_move(from,to,Some(promo),false);} } else { push_move(from,to,None,false);} }
+                // En passant
+                if let Some(ep) = self.en_passant_target { let ep_bb = bb::sq_to_bb(ep); let left_ep = (pawns << 7) & !bb::FILE_H & ep_bb; if left_ep!=0 { let to = ep.0*8+ep.1; let from = to-7; push_move(from,to,None,true); } let right_ep = (pawns << 9) & !bb::FILE_A & ep_bb; if right_ep!=0 { let to = ep.0*8+ep.1; let from = to-9; push_move(from,to,None,true); } }
+            } else {
+                // Black
+                let empty = !occ;
+                let one = (pawns >> 8) & empty;
+                let promos = one & bb::RANK1;
+                let quiets = one & !bb::RANK1;
+                let mut q = quiets; while q!=0 { let to = q.trailing_zeros() as usize; q &= q-1; let from = to+8; push_move(from, to, None, false); }
+                let mut pr = promos; while pr!=0 { let to = pr.trailing_zeros() as usize; pr &= pr-1; let from = to+8; for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { push_move(from,to,Some(promo),false); } }
+                let two = ((one & bb::RANK6_MASK()) >> 8) & empty;
+                let mut t = two; while t!=0 { let to = t.trailing_zeros() as usize; t &= t-1; let from = to+16; push_move(from, to, None, false); }
+                // Captures
+                let left_capt = (pawns >> 9) & !bb::FILE_H & occ_them;
+                let right_capt = (pawns >> 7) & !bb::FILE_A & occ_them;
+                let mut lc = left_capt; while lc!=0 { let to = lc.trailing_zeros() as usize; lc &= lc-1; let from = to+9; if to<8 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight]{ push_move(from,to,Some(promo),false);} } else { push_move(from,to,None,false);} }
+                let mut rc = right_capt; while rc!=0 { let to = rc.trailing_zeros() as usize; rc &= rc-1; let from = to+7; if to<8 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight]{ push_move(from,to,Some(promo),false);} } else { push_move(from,to,None,false);} }
+                // EP
+                if let Some(ep) = self.en_passant_target { let ep_bb = bb::sq_to_bb(ep); let left_ep = (pawns >> 9) & !bb::FILE_H & ep_bb; if left_ep!=0 { let to = ep.0*8+ep.1; let from = to+9; push_move(from,to,None,true); } let right_ep = (pawns >> 7) & !bb::FILE_A & ep_bb; if right_ep!=0 { let to = ep.0*8+ep.1; let from = to+7; push_move(from,to,None,true); } }
+            }
+        }
+
+        // Knights
+        let mut n = knights; while n!=0 { let from = n.trailing_zeros() as usize; n &= n-1; let from_sq = Square(from/8, from%8); let mut targets = bb::knight_attacks_from(from_sq) & !occ_us; while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; push_move(from,to,None,false); } }
+
+        // Bishops
+        let mut b = bishops; while b!=0 { let from = b.trailing_zeros() as usize; b &= b-1; let from_sq = Square(from/8, from%8); let mut targets = bb::bishop_attacks_from(from_sq, occ) & !occ_us; while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; push_move(from,to,None,false); } }
+
+        // Rooks
+        let mut r = rooks; while r!=0 { let from = r.trailing_zeros() as usize; r &= r-1; let from_sq = Square(from/8, from%8); let mut targets = bb::rook_attacks_from(from_sq, occ) & !occ_us; while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; push_move(from,to,None,false); } }
+
+        // Queens
+        let mut qn = queens; while qn!=0 { let from = qn.trailing_zeros() as usize; qn &= qn-1; let from_sq = Square(from/8, from%8); let mut targets = (bb::rook_attacks_from(from_sq, occ) | bb::bishop_attacks_from(from_sq, occ)) & !occ_us; while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; push_move(from,to,None,false); } }
+
+        // King (including castling squares without safety check here; legality filter later will exclude illegal castling through check)
+        if king != 0 { let from = king.trailing_zeros() as usize; let from_sq = Square(from/8, from%8); let mut targets = bb::king_attacks_from(from_sq) & !occ_us; while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; push_move(from,to,None,false); }
+            // Castling pseudo-moves
+            let back_rank = if us==Color::White {0} else {7};
+            if from_sq == Square(back_rank,4) {
+                // King side
+                if self.castling_rights.contains(&(us,'K')) && self.squares[back_rank][5].is_none() && self.squares[back_rank][6].is_none() && self.squares[back_rank][7]==Some((us,Piece::Rook)) {
+                    moves.push(Move{ from:from_sq, to:Square(back_rank,6), is_castling:true, is_en_passant:false, promotion:None, captured_piece:None});
+                }
+                // Queen side
+                if self.castling_rights.contains(&(us,'Q')) && self.squares[back_rank][1].is_none() && self.squares[back_rank][2].is_none() && self.squares[back_rank][3].is_none() && self.squares[back_rank][0]==Some((us,Piece::Rook)) {
+                    moves.push(Move{ from:from_sq, to:Square(back_rank,2), is_castling:true, is_en_passant:false, promotion:None, captured_piece:None});
+                }
+            }
+        }
+
         moves
     }
 
     pub(crate) fn generate_piece_moves(&self, from: Square, piece: Piece) -> Vec<Move> {
+        use crate::bitboards as bb;
+        // Build occupancy masks
+        let mut occ: u64 = 0; let mut occ_us: u64 = 0;
+        let us = self.current_color();
+        for r in 0..8 { for f in 0..8 { if let Some((c,_)) = self.squares[r][f] { let b = 1u64 << (r*8+f); occ |= b; if c==us { occ_us |= b; } } } }
+
         match piece {
             Piece::Pawn => self.generate_pawn_moves(from),
-            Piece::Knight => self.generate_knight_moves(from),
-            Piece::Bishop => self.generate_sliding_moves(from, &[(1, 1), (1, -1), (-1, 1), (-1, -1)]),
-            Piece::Rook => self.generate_sliding_moves(from, &[(1, 0), (-1, 0), (0, 1), (0, -1)]),
-            Piece::Queen => self.generate_sliding_moves(from, &[(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]),
-            Piece::King => self.generate_king_moves(from),
+            Piece::Knight => {
+                let mut moves = Vec::new();
+                let mut targets = bb::knight_attacks_from(from) & !occ_us;
+                while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; let to_sq = Square(to/8, to%8); let captured_piece = self.squares[to_sq.0][to_sq.1].map(|(_,p)| p); moves.push(Move{ from, to:to_sq, is_castling:false, is_en_passant:false, promotion:None, captured_piece}); }
+                moves
+            }
+            Piece::Bishop => {
+                let mut moves = Vec::new();
+                let mut targets = bb::bishop_attacks_from(from, occ) & !occ_us;
+                while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; let to_sq = Square(to/8, to%8); let captured_piece = self.squares[to_sq.0][to_sq.1].map(|(_,p)| p); moves.push(Move{ from, to:to_sq, is_castling:false, is_en_passant:false, promotion:None, captured_piece}); }
+                moves
+            }
+            Piece::Rook => {
+                let mut moves = Vec::new();
+                let mut targets = bb::rook_attacks_from(from, occ) & !occ_us;
+                while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; let to_sq = Square(to/8, to%8); let captured_piece = self.squares[to_sq.0][to_sq.1].map(|(_,p)| p); moves.push(Move{ from, to:to_sq, is_castling:false, is_en_passant:false, promotion:None, captured_piece}); }
+                moves
+            }
+            Piece::Queen => {
+                let mut moves = Vec::new();
+                let mut targets = (bb::rook_attacks_from(from, occ) | bb::bishop_attacks_from(from, occ)) & !occ_us;
+                while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; let to_sq = Square(to/8, to%8); let captured_piece = self.squares[to_sq.0][to_sq.1].map(|(_,p)| p); moves.push(Move{ from, to:to_sq, is_castling:false, is_en_passant:false, promotion:None, captured_piece}); }
+                moves
+            }
+            Piece::King => {
+                // Single king moves via bitboards + castling pseudo as before
+                let mut moves = Vec::new();
+                let mut targets = bb::king_attacks_from(from) & !occ_us;
+                while targets!=0 { let to = targets.trailing_zeros() as usize; targets &= targets-1; let to_sq = Square(to/8, to%8); let captured_piece = self.squares[to_sq.0][to_sq.1].map(|(_,p)| p); moves.push(Move{ from, to:to_sq, is_castling:false, is_en_passant:false, promotion:None, captured_piece}); }
+                // Castling pseudo-moves
+                let color = self.current_color();
+                let back_rank = if color == Color::White { 0 } else { 7 };
+                if from == Square(back_rank, 4) {
+                    if self.castling_rights.contains(&(color, 'K')) && self.squares[back_rank][5].is_none() && self.squares[back_rank][6].is_none() && self.squares[back_rank][7] == Some((color, Piece::Rook)) {
+                        moves.push(Move{ from, to:Square(back_rank,6), is_castling:true, is_en_passant:false, promotion:None, captured_piece:None});
+                    }
+                    if self.castling_rights.contains(&(color, 'Q')) && self.squares[back_rank][1].is_none() && self.squares[back_rank][2].is_none() && self.squares[back_rank][3].is_none() && self.squares[back_rank][0] == Some((color, Piece::Rook)) {
+                        moves.push(Move{ from, to:Square(back_rank,2), is_castling:true, is_en_passant:false, promotion:None, captured_piece:None});
+                    }
+                }
+                moves
+            }
         }
     }
 
@@ -317,32 +449,28 @@ impl Board {
     }
 
     pub(crate) fn generate_pawn_tactical_moves(&self, from: Square, out: &mut Vec<Move>) {
+        use crate::bitboards as bb;
         let color = if self.white_to_move { Color::White } else { Color::Black };
-        let dir: isize = if color == Color::White { 1 } else { -1 };
-        let promotion_rank = if color == Color::White { 7 } else { 0 };
-        let r = from.0 as isize;
-        let f = from.1 as isize;
-        let forward_r = r + dir;
-        if forward_r >= 0 && forward_r < 8 {
-            for df in [-1, 1] {
-                let capture_f = f + df;
-                if capture_f >= 0 && capture_f < 8 {
-                    let target_sq = Square(forward_r as usize, capture_f as usize);
-                    if let Some((target_color, _)) = self.squares[target_sq.0][target_sq.1] {
-                        if target_color != color {
-                            if target_sq.0 == promotion_rank {
-                                for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                                    out.push(self.create_move(from, target_sq, Some(promo), false, false));
-                                }
-                            } else {
-                                out.push(self.create_move(from, target_sq, None, false, false));
-                            }
-                        }
-                    } else if Some(target_sq) == self.en_passant_target {
-                        out.push(self.create_move(from, target_sq, None, false, true));
-                    }
-                }
-            }
+        // Build occupancy of opponents to detect captures
+        let mut occ_them: u64 = 0;
+        for r in 0..8 { for f in 0..8 { if let Some((c,_)) = self.squares[r][f] { if c != color { occ_them |= 1u64 << (r*8+f); } } } }
+
+        let from_idx = from.0*8 + from.1;
+        if color == Color::White {
+            // White captures: left (<<7, not on H-file), right (<<9, not on A-file)
+            let left = ((1u64 << from_idx) << 7) & !bb::FILE_H & occ_them;
+            let right = ((1u64 << from_idx) << 9) & !bb::FILE_A & occ_them;
+            let mut caps = left | right;
+            while caps != 0 { let to = caps.trailing_zeros() as usize; caps &= caps-1; let to_sq = Square(to/8,to%8); if to_sq.0 == 7 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { out.push(self.create_move(from, to_sq, Some(promo), false, false)); } } else { out.push(self.create_move(from, to_sq, None, false, false)); } }
+            // En passant
+            if let Some(ep) = self.en_passant_target { let ep_bb = bb::sq_to_bb(ep); let left_ep = ((1u64<<from_idx) << 7) & !bb::FILE_H & ep_bb; if left_ep!=0 { out.push(self.create_move(from, ep, None, false, true)); } let right_ep = ((1u64<<from_idx) << 9) & !bb::FILE_A & ep_bb; if right_ep!=0 { out.push(self.create_move(from, ep, None, false, true)); } }
+        } else {
+            // Black captures
+            let left = ((1u64 << from_idx) >> 9) & !bb::FILE_H & occ_them;
+            let right = ((1u64 << from_idx) >> 7) & !bb::FILE_A & occ_them;
+            let mut caps = left | right;
+            while caps != 0 { let to = caps.trailing_zeros() as usize; caps &= caps-1; let to_sq = Square(to/8,to%8); if to_sq.0 == 0 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { out.push(self.create_move(from, to_sq, Some(promo), false, false)); } } else { out.push(self.create_move(from, to_sq, None, false, false)); } }
+            if let Some(ep) = self.en_passant_target { let ep_bb = bb::sq_to_bb(ep); let left_ep = ((1u64<<from_idx) >> 9) & !bb::FILE_H & ep_bb; if left_ep!=0 { out.push(self.create_move(from, ep, None, false, true)); } let right_ep = ((1u64<<from_idx) >> 7) & !bb::FILE_A & ep_bb; if right_ep!=0 { out.push(self.create_move(from, ep, None, false, true)); } }
         }
     }
 
