@@ -2,6 +2,7 @@
 
 mod bench;
 mod board;
+mod bitboards;
 mod search;
 mod tactics;
 mod tuned_configs;
@@ -76,6 +77,7 @@ fn main() {
 #[cfg(test)]
 mod perft_tests {
     use super::*;
+    use std::time::Instant;
 
     struct TestPosition {
         name: &'static str,

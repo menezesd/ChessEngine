@@ -386,19 +386,7 @@ impl Board {
     }
 
     pub(crate) fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
-        let target_r = square.0 as isize; let target_f = square.1 as isize;
-        let pawn_dir: isize = if attacker_color == Color::White { 1 } else { -1 };
-        let pawn_start_r = target_r - pawn_dir; if pawn_start_r >= 0 && pawn_start_r < 8 { for df in [-1, 1] { let pawn_start_f = target_f + df; if pawn_start_f >= 0 && pawn_start_f < 8 { if self.squares[pawn_start_r as usize][pawn_start_f as usize] == Some((attacker_color, Piece::Pawn)) { return true; } } } }
-        let knight_deltas = [(2, 1),(1, 2),(-1, 2),(-2, 1),(-2, -1),(-1, -2),(1, -2),(2, -1)];
-        for (dr, df) in knight_deltas { let r = target_r + dr; let f = target_f + df; if r >= 0 && r < 8 && f >= 0 && f < 8 { if self.squares[r as usize][f as usize] == Some((attacker_color, Piece::Knight)) { return true; } } }
-        let king_deltas = [(1, 0),(-1, 0),(0, 1),(0, -1),(1, 1),(1, -1),(-1, 1),(-1, -1)];
-        for (dr, df) in king_deltas { let r = target_r + dr; let f = target_f + df; if r >= 0 && r < 8 && f >= 0 && f < 8 { if self.squares[r as usize][f as usize] == Some((attacker_color, Piece::King)) { return true; } } }
-        let sliding_directions = [(1, 0),(-1, 0),(0, 1),(0, -1),(1, 1),(1, -1),(-1, 1),(-1, -1)];
-        for (i, &(dr, df)) in sliding_directions.iter().enumerate() {
-            let is_diagonal = i >= 4; let mut r = target_r + dr; let mut f = target_f + df;
-            while r >= 0 && r < 8 && f >= 0 && f < 8 { if let Some((piece_color, piece)) = self.squares[r as usize][f as usize] { if piece_color == attacker_color { let can_attack = match piece { Piece::Queen => true, Piece::Rook => !is_diagonal, Piece::Bishop => is_diagonal, _ => false, }; if can_attack { return true; } } break; } r += dr; f += df; }
-        }
-        false
+        crate::bitboards::is_square_attacked_bb(&self.squares, square, attacker_color)
     }
 
     pub(crate) fn is_in_check(&self, color: Color) -> bool { if let Some(king_sq) = self.find_king(color) { self.is_square_attacked(king_sq, self.opponent_color(color)) } else { false } }
