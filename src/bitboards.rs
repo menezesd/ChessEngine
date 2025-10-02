@@ -162,12 +162,10 @@ pub fn is_square_attacked_bb(
 pub(crate) const FILE_A: BitBoard = 0x0101_0101_0101_0101u64;
 pub(crate) const FILE_H: BitBoard = 0x8080_8080_8080_8080u64;
 pub(crate) const RANK1: BitBoard = 0x0000_0000_0000_00FFu64;
-pub(crate) const RANK2: BitBoard = 0x0000_0000_0000_FF00u64;
-pub(crate) const RANK7: BitBoard = 0x00FF_0000_0000_0000u64;
 pub(crate) const RANK8: BitBoard = 0xFF00_0000_0000_0000u64;
 
 // Helpers used by movegen to detect intermediate squares for double pushes
 #[inline]
-pub(crate) fn RANK3_MASK() -> BitBoard { 0x0000_0000_0000_FF00u64 << 8 } // rank 3
+pub(crate) fn rank3_mask() -> BitBoard { 0x0000_0000_0000_FF00u64 << 8 } // rank 3
 #[inline]
-pub(crate) fn RANK6_MASK() -> BitBoard { 0x00FF_0000_0000_0000u64 >> 8 } // rank 6
+pub(crate) fn rank6_mask() -> BitBoard { 0x00FF_0000_0000_0000u64 >> 8 } // rank 6

@@ -1,5 +1,4 @@
 use crate::bench::{BenchSuite, SearchConfig};
-use std::time::Instant;
 
 pub struct TuningSession {
     suite: BenchSuite,

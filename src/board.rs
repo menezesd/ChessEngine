@@ -316,7 +316,7 @@ impl Board {
                 let mut q = quiets; while q!=0 { let to = q.trailing_zeros() as usize; q &= q-1; let from = to-8; push_move(from, to, None, false); }
                 let mut pr = promos; while pr!=0 { let to = pr.trailing_zeros() as usize; pr &= pr-1; let from = to-8; for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { push_move(from,to,Some(promo),false); } }
                 // Double pushes from rank2
-                let two = ((one & bb::RANK3_MASK()) << 8) & empty; // RANK3_MASK computed below via helper
+                let two = ((one & bb::rank3_mask()) << 8) & empty; // rank3_mask computed below via helper
                 let mut t = two; while t!=0 { let to = t.trailing_zeros() as usize; t &= t-1; let from = to-16; push_move(from, to, None, false); }
                 // Captures
                 let left_capt = (pawns << 7) & !bb::FILE_H & occ_them;
@@ -333,7 +333,7 @@ impl Board {
                 let quiets = one & !bb::RANK1;
                 let mut q = quiets; while q!=0 { let to = q.trailing_zeros() as usize; q &= q-1; let from = to+8; push_move(from, to, None, false); }
                 let mut pr = promos; while pr!=0 { let to = pr.trailing_zeros() as usize; pr &= pr-1; let from = to+8; for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { push_move(from,to,Some(promo),false); } }
-                let two = ((one & bb::RANK6_MASK()) >> 8) & empty;
+                let two = ((one & bb::rank6_mask()) >> 8) & empty;
                 let mut t = two; while t!=0 { let to = t.trailing_zeros() as usize; t &= t-1; let from = to+16; push_move(from, to, None, false); }
                 // Captures
                 let left_capt = (pawns >> 9) & !bb::FILE_H & occ_them;
