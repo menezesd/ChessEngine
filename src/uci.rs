@@ -103,6 +103,9 @@ pub fn find_best_move_with_time(
     const SAFETY_MARGIN: Duration = Duration::from_millis(5);
     const TIME_GROWTH_FACTOR: f32 = 2.0;
     let mut heur = SearchHeuristics::new(128);
+    // Provide a soft deadline so search can abort cleanly before the hard limit
+    let soft = max_time.saturating_sub(SAFETY_MARGIN);
+    heur.deadline = Some(start_time + soft);
     let mut best_score = -crate::MATE_SCORE * 2;
     while start_time.elapsed() + SAFETY_MARGIN < max_time {
         let elapsed = start_time.elapsed();

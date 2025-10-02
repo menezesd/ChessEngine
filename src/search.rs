@@ -1,6 +1,32 @@
 use crate::tt::{BoundType, TranspositionTable};
 use crate::{color_to_zobrist_index, mvv_lva_score, square_to_zobrist_index};
 use crate::{Board, Move};
+use std::time::Instant;
+
+// TT mate score conversion helpers: encode/decode mate distances by ply
+#[inline]
+fn score_to_tt(score: i32, ply: i32) -> i32 {
+    let near_mate = crate::MATE_SCORE - 1000;
+    if score >= near_mate {
+        (score + ply).min(crate::MATE_SCORE)
+    } else if score <= -near_mate {
+        (score - ply).max(-crate::MATE_SCORE)
+    } else {
+        score
+    }
+}
+
+#[inline]
+fn score_from_tt(score: i32, ply: i32) -> i32 {
+    let near_mate = crate::MATE_SCORE - 1000;
+    if score >= near_mate {
+        (score - ply).clamp(-crate::MATE_SCORE, crate::MATE_SCORE)
+    } else if score <= -near_mate {
+        (score + ply).clamp(-crate::MATE_SCORE, crate::MATE_SCORE)
+    } else {
+        score
+    }
+}
 
 #[derive(Clone)]
 pub struct SearchHeuristics {
@@ -10,6 +36,11 @@ pub struct SearchHeuristics {
     pub(crate) node_count: u64,
     pub(crate) countermove: [[[Option<Move>; 64]; 64]; 2],
     pub(crate) last_moves: Vec<Option<Move>>, // opponent's last move leading to this ply
+    // Early-abort support
+    pub(crate) deadline: Option<Instant>,
+    pub(crate) abort: bool,
+    pub(crate) nodes_between_checks: u64,
+    pub(crate) next_check: u64,
 }
 
 impl SearchHeuristics {
@@ -21,6 +52,10 @@ impl SearchHeuristics {
             node_count: 0,
             countermove: [[[None; 64]; 64]; 2],
             last_moves: vec![None; max_ply.max(1)],
+            deadline: None,
+            abort: false,
+            nodes_between_checks: 2048,
+            next_check: 2048,
         }
     }
     
@@ -41,6 +76,25 @@ impl SearchHeuristics {
             self.last_moves.resize(ply + 1, None);
         }
     }
+
+    #[inline]
+    pub fn check_abort(&mut self) -> bool {
+        if self.abort {
+            return true;
+        }
+        if let Some(deadline) = self.deadline {
+            if self.node_count >= self.next_check {
+                if Instant::now() >= deadline {
+                    self.abort = true;
+                    return true;
+                }
+                // Schedule next check (increase spacing gradually)
+                self.nodes_between_checks = (self.nodes_between_checks + 2048).min(1 << 20);
+                self.next_check = self.node_count.saturating_add(self.nodes_between_checks);
+            }
+        }
+        false
+    }
 }
 
 impl Board {
@@ -53,7 +107,7 @@ impl Board {
         heur: &mut SearchHeuristics,
         ply: usize,
     ) -> i32 {
-        self.negamax_with_config(tt, depth, alpha, beta, heur, ply, &crate::bench::SearchConfig::tuned_optimal())
+    self.negamax_with_config(tt, depth, alpha, beta, heur, ply, &crate::bench::SearchConfig::tuned_optimal())
     }
 
     pub(crate) fn negamax_with_config(
@@ -66,6 +120,7 @@ impl Board {
         ply: usize,
         config: &crate::bench::SearchConfig,
     ) -> i32 {
+        if heur.check_abort() { return alpha; }
         heur.node_count += 1;
         // Mate distance pruning
         let ply_i32 = ply as i32;
@@ -83,17 +138,18 @@ impl Board {
         let mut hash_move: Option<Move> = None;
         if let Some(entry) = tt.probe(current_hash) {
             if entry.depth >= depth {
+                let tt_sc = score_from_tt(entry.score, ply_i32);
                 match entry.bound_type {
-                    BoundType::Exact => return entry.score,
-                    BoundType::LowerBound => alpha = alpha.max(entry.score),
-                    BoundType::UpperBound => beta = beta.min(entry.score),
+                    BoundType::Exact => return tt_sc,
+                    BoundType::LowerBound => alpha = alpha.max(tt_sc),
+                    BoundType::UpperBound => beta = beta.min(tt_sc),
                 }
-                if alpha >= beta { return entry.score; }
+                if alpha >= beta { return tt_sc; }
             }
             hash_move = entry.best_move.clone();
         }
 
-        if depth == 0 { return self.quiesce(tt, alpha, beta, heur, ply); }
+    if depth == 0 { return self.quiesce(tt, alpha, beta, heur, ply); }
 
         let in_check = self.is_in_check(self.current_color());
 
@@ -116,9 +172,23 @@ impl Board {
                 if depth >= 8 { r += 2; } else if depth >= 5 { r += 1; }
                 if non_pawn_count >= 5 && depth >= 6 { r += 1; }
                 let (prev_ep, prev_hash, prev_halfmove) = self.make_null_move();
-                let score = -self.negamax_with_config(tt, depth.saturating_sub(1 + r), -beta, -beta + 1, heur, ply + 1, config);
+                // If making a null move leaves the side to move in check, it's an illegal null move; skip search
+                let mut score = -crate::MATE_SCORE;
+                if !self.is_in_check(self.current_color()) {
+                    score = -self.negamax_with_config(tt, depth.saturating_sub(1 + r), -beta, -beta + 1, heur, ply + 1, config);
+                }
                 self.unmake_null_move(prev_ep, prev_hash, prev_halfmove);
                 if score >= beta { return score; }
+            }
+        }
+
+        // Razoring: if static eval far below alpha at shallow depth, try quiescence instead
+        if depth <= 3 && !in_check {
+            let static_eval = self.evaluate();
+            let margin = 200 * (depth as i32);
+            if static_eval + margin < alpha {
+                let razor_score = self.quiesce(tt, alpha, beta, heur, ply);
+                if razor_score <= alpha { return razor_score; }
             }
         }
 
@@ -167,6 +237,7 @@ impl Board {
         let static_eval_opt = if depth <= config.futility_depth_threshold && !in_check { Some(self.evaluate()) } else { None };
 
         for (i, m) in legal_moves.iter().enumerate() {
+            if heur.check_abort() { break; }
             let is_capture = m.captured_piece.is_some() || m.is_en_passant || m.promotion.is_some();
             let from_idx = square_to_zobrist_index(m.from) as usize;
             let to_idx = square_to_zobrist_index(m.to) as usize;
@@ -205,6 +276,13 @@ impl Board {
                     let fut_margin = config.futility_margin_base * (depth as i32);
                     if static_eval + fut_margin <= alpha { self.unmake_move(&m, info); continue; }
                 }
+            }
+
+            // Reverse futility pruning: when we're far above beta at shallow depth, cut
+            if depth <= 2 && !gives_check && !is_capture && m.promotion.is_none() {
+                let static_eval = static_eval_opt.unwrap_or_else(|| self.evaluate());
+                let margin = 120 * (depth as i32);
+                if static_eval - margin >= beta { self.unmake_move(&m, info); break; }
             }
 
             let score = if i == 0 {
@@ -247,7 +325,7 @@ impl Board {
         }
 
         let bound_type = if best_score <= original_alpha { BoundType::UpperBound } else if best_score >= beta { BoundType::LowerBound } else { BoundType::Exact };
-        tt.store(current_hash, depth, best_score, bound_type, best_move_found.clone());
+        tt.store(current_hash, depth, score_to_tt(best_score, ply_i32), bound_type, best_move_found.clone());
         best_score
     }
 
@@ -277,6 +355,7 @@ impl Board {
         heur: &mut SearchHeuristics,
         _ply: usize,
     ) -> i32 {
+        if heur.check_abort() { return alpha; }
         heur.node_count += 1;
         if self.is_fifty_move_draw() || self.is_threefold_repetition() { return 0; }
         let stand_pat = self.evaluate();
@@ -289,6 +368,7 @@ impl Board {
         let delta_margin = 150;
         let mut best = stand_pat;
         for m in tactical_moves {
+            if heur.check_abort() { break; }
             if let Some(victim) = m.captured_piece {
                 let gain = crate::piece_value(victim);
                 if stand_pat + gain + delta_margin < alpha { continue; }
