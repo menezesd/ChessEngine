@@ -1,5 +1,5 @@
 use crate::tt::{BoundType, TranspositionTable};
-use crate::{color_to_zobrist_index, mvv_lva_score, square_to_zobrist_index};
+use crate::{color_to_zobrist_index, square_to_zobrist_index};
 use crate::{Board, Move};
 use std::time::Instant;
 
@@ -41,6 +41,9 @@ pub struct SearchHeuristics {
     pub(crate) abort: bool,
     pub(crate) nodes_between_checks: u64,
     pub(crate) next_check: u64,
+    // SEE cache per ply: simple fixed-size ring storing last N (from,to) scores
+    pub(crate) see_cache: Vec<[(u8, u8, i16); 8]>,
+    pub(crate) see_cache_len: Vec<usize>,
 }
 
 impl SearchHeuristics {
@@ -56,6 +59,8 @@ impl SearchHeuristics {
             abort: false,
             nodes_between_checks: 2048,
             next_check: 2048,
+            see_cache: vec!([(255, 255, 0); 8]; max_ply.max(1)),
+            see_cache_len: vec![0; max_ply.max(1)],
         }
     }
     
@@ -74,6 +79,10 @@ impl SearchHeuristics {
         }
         if ply >= self.last_moves.len() {
             self.last_moves.resize(ply + 1, None);
+        }
+        if ply >= self.see_cache.len() {
+            self.see_cache.resize(ply + 1, [(255, 255, 0); 8]);
+            self.see_cache_len.resize(ply + 1, 0);
         }
     }
 
@@ -98,6 +107,24 @@ impl SearchHeuristics {
 }
 
 impl Board {
+    #[inline]
+    fn see_cached(&self, m: &Move, heur: &mut SearchHeuristics, ply: usize) -> i32 {
+        // Only cache for simple captures/EP without promotion component
+        if !(m.captured_piece.is_some() || m.is_en_passant) { return 0; }
+        heur.ensure_ply(ply);
+        let key_from = crate::square_to_zobrist_index(m.from) as u8;
+        let key_to = crate::square_to_zobrist_index(m.to) as u8;
+        let cache = &mut heur.see_cache[ply];
+        let len = &mut heur.see_cache_len[ply];
+        for i in 0..*len {
+            let (f, t, v) = cache[i];
+            if f == key_from && t == key_to { return v as i32; }
+        }
+        // Miss: compute and insert (simple FIFO within 8 slots)
+        let v = self.see(m) as i16;
+        if *len < cache.len() { cache[*len] = (key_from, key_to, v); *len += 1; } else { cache[0] = (key_from, key_to, v); }
+        v as i32
+    }
     pub(crate) fn negamax(
         &mut self,
         tt: &mut TranspositionTable,
@@ -193,42 +220,20 @@ impl Board {
         }
 
         // Generate and order moves
-        let mut legal_moves = self.generate_moves();
+    let mut legal_moves = self.generate_moves();
         heur.ensure_ply(ply);
         let color_idx = color_to_zobrist_index(self.current_color());
-        let killers = heur.killers[ply].clone();
-        let tt_move = hash_move.clone();
         let last_move_opt = if ply > 0 { heur.last_moves.get(ply - 1).cloned().flatten() } else { None };
-        legal_moves.sort_by_key(|m| {
-            let mut score = 0i32;
-            if let Some(ref hm) = tt_move { if m == hm { score += 1_000_000; } }
-            if m.captured_piece.is_some() || m.is_en_passant {
-                let see_gain = self.see(m);
-                score += 100_000 + mvv_lva_score(m, self) + see_gain;
-            } else {
-                if let Some(k0) = &killers[0] { if m == k0 { score += 90_000; } }
-                if let Some(k1) = &killers[1] { if m == k1 { score += 80_000; } }
-                if let Some(lm) = last_move_opt {
-                    let l_from = square_to_zobrist_index(lm.from) as usize;
-                    let l_to = square_to_zobrist_index(lm.to) as usize;
-                    if let Some(cm) = heur.countermove[color_idx][l_from][l_to] {
-                        if *m == cm { score += 70_000; }
-                    }
-                }
-                let from_idx = square_to_zobrist_index(m.from) as usize;
-                let to_idx = square_to_zobrist_index(m.to) as usize;
-                score += heur.get_history_score(color_idx, from_idx, to_idx);
-            }
-            score
-        });
-        legal_moves.reverse();
+        
+        // Use enhanced move ordering
+        crate::move_ordering::order_moves(&mut legal_moves, self, heur, hash_move.as_ref(), ply);
 
         if legal_moves.is_empty() {
             let current_color = self.current_color();
             return if self.is_in_check(current_color) { -(crate::MATE_SCORE - ply as i32) } else { 0 };
         }
 
-        if let Some(hm) = &hash_move { if let Some(pos) = legal_moves.iter().position(|m| m == hm) { legal_moves.swap(0, pos); } }
+    if let Some(hm) = &hash_move { if let Some(pos) = legal_moves.iter().position(|m| m == hm) { legal_moves.swap(0, pos); } }
 
         let mut best_score = -crate::MATE_SCORE * 2;
         let mut best_move_found: Option<Move> = None;
@@ -247,7 +252,7 @@ impl Board {
             heur.butterfly[color_idx][from_idx][to_idx] += 1;
 
             // SEE-based pruning for bad captures
-            if is_capture && depth <= 3 && self.see(&m) < config.see_capture_threshold { continue; }
+            if is_capture && depth <= 3 && self.see_cached(&m, heur, ply) < config.see_capture_threshold { continue; }
 
             // Mild late move pruning
             if !is_capture && m.promotion.is_none() && !in_check {
@@ -363,7 +368,7 @@ impl Board {
         alpha = alpha.max(stand_pat);
 
         let mut tactical_moves = self.generate_tactical_moves();
-        tactical_moves.sort_by_key(|m| -mvv_lva_score(m, self));
+        crate::move_ordering::order_tactical_moves(&mut tactical_moves, self);
 
         let delta_margin = 150;
         let mut best = stand_pat;
@@ -372,7 +377,7 @@ impl Board {
             if let Some(victim) = m.captured_piece {
                 let gain = crate::piece_value(victim);
                 if stand_pat + gain + delta_margin < alpha { continue; }
-                if self.see(&m) < 0 { continue; }
+                if self.see_cached(&m, heur, _ply) < 0 { continue; }
             }
             let info = self.make_move(&m);
             let score = -self.quiesce(_tt, -beta, -alpha, heur, _ply + 1);

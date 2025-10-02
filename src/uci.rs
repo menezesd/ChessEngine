@@ -1,6 +1,7 @@
 use crate::mvv_lva_score;
 use crate::search::SearchHeuristics;
 use crate::{Board, Move, TranspositionTable};
+use crate::lmr::LmrTable;
 use std::io::{self, BufRead, Write};
 use std::time::{Duration, Instant};
 
@@ -103,6 +104,7 @@ pub fn find_best_move_with_time(
     const SAFETY_MARGIN: Duration = Duration::from_millis(5);
     const TIME_GROWTH_FACTOR: f32 = 2.0;
     let mut heur = SearchHeuristics::new(128);
+    let lmr_table = LmrTable::new();
     // Provide a soft deadline so search can abort cleanly before the hard limit
     let soft = max_time.saturating_sub(SAFETY_MARGIN);
     heur.deadline = Some(start_time + soft);
@@ -153,7 +155,7 @@ pub fn find_best_move_with_time(
             for m in &legal_moves {
                 if start_time.elapsed() + SAFETY_MARGIN >= max_time { break; }
                 let info = board.make_move(m);
-                let score = -board.negamax(tt, depth - 1, -beta, -alpha, &mut heur, 1);
+                let score = -board.negamax_enhanced(tt, depth - 1, -beta, -alpha, &mut heur, 1, &lmr_table, false, None);
                 board.unmake_move(m, info);
                 if score > best_score { best_score = score; new_best_move = Some(*m); }
                 alpha = alpha.max(best_score);
@@ -235,6 +237,7 @@ pub fn find_best_move_fixed_depth(
 ) -> Option<Move> {
     let mut best_move: Option<Move> = None;
     let mut heur = SearchHeuristics::new(128);
+    let lmr_table = LmrTable::new();
     let mut best_score = -crate::MATE_SCORE * 2;
     for depth in 1..=max_depth {
         let nodes_before = heur.node_count;
@@ -249,7 +252,7 @@ pub fn find_best_move_fixed_depth(
         let mut new_best_move: Option<Move> = None;
         for m in &legal_moves {
             let info = board.make_move(m);
-            let score = -board.negamax(tt, depth - 1, -beta, -alpha, &mut heur, 1);
+            let score = -board.negamax_enhanced(tt, depth - 1, -beta, -alpha, &mut heur, 1, &lmr_table, false, None);
             board.unmake_move(m, info);
             if score > best_score { best_score = score; new_best_move = Some(*m); }
             alpha = alpha.max(best_score);

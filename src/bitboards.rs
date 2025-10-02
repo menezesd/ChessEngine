@@ -32,18 +32,14 @@ static KING_DELTAS: [(isize, isize); 8] = [
 
 #[inline]
 pub(crate) fn knight_attacks_from(sq: Square) -> BitBoard {
-    let (r, f) = (sq.0 as isize, sq.1 as isize);
-    let mut bb = 0u64;
-    for (dr, df) in KNIGHT_DELTAS { let nr = r + dr; let nf = f + df; if in_bounds(nr, nf) { bb |= sq_to_bb(rf_to_sq(nr, nf)); } }
-    bb
+    let sq_idx = sq.0 * 8 + sq.1;
+    crate::attack_tables::get_attack_tables().knight_attacks(sq_idx)
 }
 
 #[inline]
 pub(crate) fn king_attacks_from(sq: Square) -> BitBoard {
-    let (r, f) = (sq.0 as isize, sq.1 as isize);
-    let mut bb = 0u64;
-    for (dr, df) in KING_DELTAS { let nr = r + dr; let nf = f + df; if in_bounds(nr, nf) { bb |= sq_to_bb(rf_to_sq(nr, nf)); } }
-    bb
+    let sq_idx = sq.0 * 8 + sq.1;
+    crate::attack_tables::get_attack_tables().king_attacks(sq_idx)
 }
 
 #[inline]
@@ -65,14 +61,14 @@ fn ray_attacks(sq: Square, occ: BitBoard, deltas: &[(isize, isize)]) -> BitBoard
 
 #[inline]
 pub(crate) fn bishop_attacks_from(sq: Square, occ: BitBoard) -> BitBoard {
-    const DIAGS: &[(isize, isize)] = &[(1, 1), (1, -1), (-1, 1), (-1, -1)];
-    ray_attacks(sq, occ, DIAGS)
+    let sq_idx = sq.0 * 8 + sq.1;
+    crate::attack_tables::get_attack_tables().bishop_attacks(sq_idx, occ)
 }
 
 #[inline]
 pub(crate) fn rook_attacks_from(sq: Square, occ: BitBoard) -> BitBoard {
-    const ORTHO: &[(isize, isize)] = &[(1, 0), (-1, 0), (0, 1), (0, -1)];
-    ray_attacks(sq, occ, ORTHO)
+    let sq_idx = sq.0 * 8 + sq.1;
+    crate::attack_tables::get_attack_tables().rook_attacks(sq_idx, occ)
 }
 
 pub fn is_square_attacked_bb(
@@ -103,32 +99,15 @@ pub fn is_square_attacked_bb(
 
     let tgt_bb = sq_to_bb(target);
 
-    // Pawn attacks
-    // Note: Board uses Square(rank,file) with rank 0 = White back rank, White pawns increase rank by +1 when moving.
-    // For attacker_color pawns, generate the squares they attack and test membership.
-    let pawn_attacks = if attacker_color == Color::White {
-        // White pawns attack (r+1, f±1)
-        let mut attacks = 0u64;
-        let mut wp = pawns;
-        while let Some(idx) = lsb(wp) {
-            wp &= wp - 1; // pop lsb
-            let sq = idx_to_sq(idx);
-            let r = sq.0 as isize; let f = sq.1 as isize;
-            for df in [-1, 1] { let nr = r + 1; let nf = f + df; if in_bounds(nr, nf) { attacks |= sq_to_bb(rf_to_sq(nr, nf)); } }
-        }
-        attacks
-    } else {
-        // Black pawns attack (r-1, f±1)
-        let mut attacks = 0u64;
-        let mut bp = pawns;
-        while let Some(idx) = lsb(bp) {
-            bp &= bp - 1; // pop lsb
-            let sq = idx_to_sq(idx);
-            let r = sq.0 as isize; let f = sq.1 as isize;
-            for df in [-1, 1] { let nr = r - 1; let nf = f + df; if in_bounds(nr, nf) { attacks |= sq_to_bb(rf_to_sq(nr, nf)); } }
-        }
-        attacks
-    };
+    // Pawn attacks - optimized with pre-computed tables
+    let color_idx = if attacker_color == Color::White { 0 } else { 1 };
+    let attack_tables = crate::attack_tables::get_attack_tables();
+    let mut pawn_attacks = 0u64;
+    let mut temp_pawns = pawns;
+    while let Some(idx) = lsb(temp_pawns) {
+        temp_pawns &= temp_pawns - 1; // pop lsb
+        pawn_attacks |= attack_tables.pawn_attacks(idx, color_idx);
+    }
     if (pawn_attacks & tgt_bb) != 0 { return true; }
 
     // Knight attacks

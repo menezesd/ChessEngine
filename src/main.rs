@@ -1,9 +1,16 @@
 // use std::time::Instant; // Only used in tests below
 
+mod advanced_search;
+mod aspiration;
+mod attack_tables;
 mod bench;
 mod board;
 mod bitboards;
+mod lmr;
+mod move_ordering;
 mod search;
+mod search_optimizations;
+mod singular;
 mod tactics;
 mod tuned_configs;
 mod tuning;
@@ -30,6 +37,7 @@ fn print_help() {
     println!("    bench [compare]              Run performance benchmarks");
     println!("    tune [config]                Run parameter tuning");
     println!("    tactics [SOURCE] [N] [TIME]  Test tactical puzzle solving");
+    // Debug commands are intentionally not exposed in production builds
     println!("    help                         Show this help message");
     println!();
     println!("TACTICAL TESTING:");
