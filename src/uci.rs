@@ -442,20 +442,32 @@ pub fn run() {
                 }
                 // Start a new search: bump TT generation.
                 tt.start_new_search();
+                let mut best_move: Option<Move> = None;
+                let mut best_score: i32 = 0;
                 if let Some(_d) = fixed_depth {
                     // Use search engine for fixed depth (with time limit)
                     let mut engine = SearchEngine::new();
                     let time_limit = Some(Instant::now() + std::time::Duration::from_millis(5000));
-                    let best_move = engine.think(&mut board, time_limit);
-                    println!("bestmove {}", format_uci_move(&best_move));
+                    let mv = engine.think(&mut board, time_limit);
+                    best_score = board.evaluate();
+                    best_move = Some(mv);
                 } else {
                     let max_time = movetime.unwrap_or_else(|| time_left / 30 + inc);
                     let start = Instant::now();
-                    if let Some(best_move) = find_best_move_with_time(&mut board, &mut tt, max_time, start) {
-                        println!("bestmove {}", format_uci_move(&best_move));
-                    } else {
-                        println!("bestmove 0000");
+                    best_move = find_best_move_with_time(&mut board, &mut tt, max_time, start);
+                    if let Some(ref mv) = best_move {
+                        let info = board.make_move(mv);
+                        best_score = board.evaluate();
+                        board.unmake_move(mv, info);
                     }
+                }
+                // Always print a final info score line before bestmove
+                if let Some(ref mv) = best_move {
+                    println!("info score cp {} pv {}", best_score, format_uci_move(mv));
+                    println!("bestmove {}", format_uci_move(mv));
+                } else {
+                    println!("info score cp 0 pv");
+                    println!("bestmove 0000");
                 }
             }
             "quit" => break,

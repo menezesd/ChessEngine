@@ -812,7 +812,13 @@ impl Board {
                 bb &= bb - 1;
                 let rank = sq_idx_raw / 8;
                 let file = sq_idx_raw % 8;
-                let sq_idx = if color == Color::White { square_to_index(7-rank, file) } else { square_to_index(rank, file) };
+                // PST tables are defined from White's perspective (rank 0 = White back rank).
+                // Therefore: use (rank,file) directly for White, and mirror vertically for Black.
+                let sq_idx = if color == Color::White {
+                    square_to_index(rank, file)
+                } else {
+                    square_to_index(7 - rank, file)
+                };
                 let mg_value = MATERIAL_MG[piece_idx] + PST_MG[piece_idx][sq_idx];
                 let eg_value = MATERIAL_EG[piece_idx] + PST_EG[piece_idx][sq_idx];
                 if color == Color::White {

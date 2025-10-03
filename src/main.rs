@@ -183,3 +183,33 @@ mod perft_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod eval_tests {
+    use super::*;
+
+    struct EvalCase { fen: &'static str, min: i32, max: i32, note: &'static str }
+
+    // Expected ranges are intentionally wide; goal is to catch outrageous swings / sign errors.
+    const CASES: &[EvalCase] = &[
+        // Starting position should be roughly balanced.
+        EvalCase { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", min: -50, max: 50, note: "Start position" },
+        // Big material edge for White (extra queen)
+        EvalCase { fen: "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKQNR w KQkq - 0 1", min: 800, max: 1300, note: "White up a queen" },
+        // Big material edge for Black (white missing queen)
+        EvalCase { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w KQkq - 0 1", min: -1300, max: -800, note: "Black up a queen" },
+        // Passed pawn near promotion should give White significant advantage.
+        EvalCase { fen: "4k3/4P3/8/8/8/8/4K3/8 w - - 0 1", min: 200, max: 900, note: "White passed pawn on 7th" },
+        // Simple mate threat (Fool's mate after 1... Qh4# position but before mate): White should be losing.
+        EvalCase { fen: "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3", min: -1500, max: -200, note: "King attack" },
+    ];
+
+    #[test]
+    fn evaluation_regression_ranges() {
+        for case in CASES {
+            let board = Board::from_fen(case.fen);
+            let eval = board.evaluate();
+            assert!(eval >= case.min && eval <= case.max, "Eval {} out of range [{}, {}] for {} ({})", eval, case.min, case.max, case.note, case.fen);
+        }
+    }
+}
