@@ -1,16 +1,13 @@
 // use std::time::Instant; // Only used in tests below
 
-mod advanced_search;
-mod aspiration;
+
 mod attack_tables;
 mod bench;
 mod board;
 mod bitboards;
-mod lmr;
-mod move_ordering;
+
 mod search;
-mod search_optimizations;
-mod singular;
+
 mod tactics;
 mod tuned_configs;
 mod tuning;
@@ -21,10 +18,35 @@ pub(crate) use board::{Board, Move, Piece, Square};
 pub(crate) use board::{color_to_zobrist_index, square_to_zobrist_index};
 pub(crate) use board::{mvv_lva_score, piece_value};
 pub(crate) use tt::TranspositionTable;
+use search::SearchEngine;
 
 // Material values (used for mate score scaling only)
 const KING_VALUE: i32 = 20000;
 const MATE_SCORE: i32 = KING_VALUE * 10;
+
+fn test_search_engine() {
+    println!("Testing advanced search engine...");
+    
+    // Test with a tactical position (Kiwipete)
+    let mut board = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+    let mut engine = SearchEngine::new();
+    
+    println!("Position: Kiwipete (rich tactical position)");
+    board.print();
+    
+    let time_limit = Some(std::time::Instant::now() + std::time::Duration::from_millis(2000));
+    let best_move = engine.think(&mut board, time_limit);
+    
+    println!("Best move found: {}{}", 
+        format_square(best_move.from), 
+        format_square(best_move.to));
+}
+
+fn format_square(sq: Square) -> String {
+    let file = (b'a' + sq.1 as u8) as char;
+    let rank = (b'1' + sq.0 as u8) as char;
+    format!("{}{}", file, rank)
+}
 
 fn print_help() {
     println!("Chess Engine - Advanced UCI-compliant chess engine");
@@ -37,6 +59,7 @@ fn print_help() {
     println!("    bench [compare]              Run performance benchmarks");
     println!("    tune [config]                Run parameter tuning");
     println!("    tactics [SOURCE] [N] [TIME]  Test tactical puzzle solving");
+    println!("    search                       Test search engine");
     // Debug commands are intentionally not exposed in production builds
     println!("    help                         Show this help message");
     println!();
@@ -71,6 +94,10 @@ fn main() {
             "tactics" => {
                 let tactics_args = if args.len() > 2 { &args[2..] } else { &[] };
                 tactics::run_tactical_test(tactics_args);
+            }
+            "search" => {
+                println!("Testing search engine...");
+                test_search_engine();
             }
             "help" | "--help" | "-h" => {
                 print_help();

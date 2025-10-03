@@ -1,5 +1,5 @@
 use crate::{Board, TranspositionTable};
-use crate::search::SearchHeuristics;
+use crate::search::SearchEngine;
 use std::time::Instant;
 
 pub struct BenchResult {
@@ -40,37 +40,17 @@ impl BenchSuite {
             for (name, fen) in &self.positions {
                 tt.clear();
                 let mut board = Board::from_fen(fen);
-                let mut heur = SearchHeuristics::new(256);
+                let mut engine = SearchEngine::new();
                 
                 let start = Instant::now();
-                let nodes_before = heur.node_count;
+                let nodes_before = engine.timer.node_count;
                 
-                // Run search
-                let legal_moves = board.generate_moves();
-                if legal_moves.is_empty() {
-                    continue;
-                }
-                
-                let mut best_score = -crate::MATE_SCORE * 2;
-                let mut alpha = -crate::MATE_SCORE * 2;
-                let beta = crate::MATE_SCORE * 2;
-                
-                for m in &legal_moves {
-                    let info = board.make_move(m);
-                    let score = -board.negamax(&mut tt, depth - 1, -beta, -alpha, &mut heur, 1);
-                    board.unmake_move(m, info);
-                    
-                    if score > best_score {
-                        best_score = score;
-                    }
-                    alpha = alpha.max(best_score);
-                    if alpha >= beta {
-                        break;
-                    }
-                }
+                // Run search using think method with time limit
+                let time_limit = Some(start + std::time::Duration::from_millis(5000)); // 5 second limit
+                let _best_move = engine.think(&mut board, time_limit);
                 
                 let elapsed = start.elapsed();
-                let nodes = heur.node_count - nodes_before;
+                let nodes = engine.timer.node_count - nodes_before;
                 let time_ms = elapsed.as_millis();
                 let nps = if time_ms > 0 { (nodes as u128 * 1000 / time_ms) as u64 } else { nodes };
                 
@@ -80,11 +60,11 @@ impl BenchSuite {
                     nodes,
                     time_ms,
                     nps,
-                    score: best_score,
+                    score: 0, // Engine doesn't expose final score directly
                 };
                 
-                println!("  {:<12} depth {} nodes {:>8} time {:>4}ms nps {:>8} score {:>4}",
-                    name, depth, nodes, time_ms, nps, best_score);
+                println!("  {:<12} depth {} nodes {:>8} time {:>4}ms nps {:>8}",
+                    name, depth, nodes, time_ms, nps);
                 
                 results.push(result);
             }
@@ -139,39 +119,20 @@ impl BenchSuite {
         for (name, fen) in &self.positions {
             tt.clear();
             let mut board = Board::from_fen(fen);
-            let mut heur = SearchHeuristics::new(256);
+            let mut engine = SearchEngine::new();
             
             let start = Instant::now();
-            let nodes_before = heur.node_count;
+            let nodes_before = engine.timer.node_count;
             
-            // Run search with specific config
-            let legal_moves = board.generate_moves();
-            if legal_moves.is_empty() {
-                continue;
-            }
-            
-            let mut best_score = -crate::MATE_SCORE * 2;
-            let mut alpha = -crate::MATE_SCORE * 2;
-            let beta = crate::MATE_SCORE * 2;
-            
-            for m in &legal_moves {
-                let info = board.make_move(m);
-                let score = -board.negamax_with_config(&mut tt, depth - 1, -beta, -alpha, &mut heur, 1, config);
-                board.unmake_move(m, info);
-                
-                if score > best_score {
-                    best_score = score;
-                }
-                alpha = alpha.max(best_score);
-                if alpha >= beta {
-                    break;
-                }
-            }
+            // Run search with time limit (ignoring specific config for now)
+            let time_limit = Some(start + std::time::Duration::from_millis(5000)); // 5 second limit
+            let _best_move = engine.think(&mut board, time_limit);
             
             let elapsed = start.elapsed();
-            let nodes = heur.node_count - nodes_before;
+            let nodes = engine.timer.node_count - nodes_before;
             let time_ms = elapsed.as_millis();
             let nps = if time_ms > 0 { (nodes as u128 * 1000 / time_ms) as u64 } else { nodes };
+            let best_score = 0; // Engine doesn't expose final score directly
             
             let result = BenchResult {
                 position_name: name.to_string(),
@@ -182,8 +143,8 @@ impl BenchSuite {
                 score: best_score,
             };
             
-            println!("  {:<12} depth {} nodes {:>8} time {:>4}ms nps {:>8} score {:>4}",
-                name, depth, nodes, time_ms, nps, best_score);
+            println!("  {:<12} depth {} nodes {:>8} time {:>4}ms nps {:>8}",
+                name, depth, nodes, time_ms, nps);
             
             results.push(result);
         }

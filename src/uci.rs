@@ -1,7 +1,6 @@
 use crate::mvv_lva_score;
-use crate::search::SearchHeuristics;
+use crate::search::SearchEngine;
 use crate::{Board, Move, TranspositionTable};
-use crate::lmr::LmrTable;
 use std::io::{self, BufRead, Write};
 use std::time::{Duration, Instant};
 
@@ -103,11 +102,10 @@ pub fn find_best_move_with_time(
     let mut last_depth_time = Duration::from_millis(1);
     const SAFETY_MARGIN: Duration = Duration::from_millis(5);
     const TIME_GROWTH_FACTOR: f32 = 2.0;
-    let mut heur = SearchHeuristics::new(128);
-    let lmr_table = LmrTable::new();
+    let mut engine = SearchEngine::new();
     // Provide a soft deadline so search can abort cleanly before the hard limit
     let soft = max_time.saturating_sub(SAFETY_MARGIN);
-    heur.deadline = Some(start_time + soft);
+    engine.timer.deadline = Some(start_time + soft);
     let mut best_score = -crate::MATE_SCORE * 2;
     while start_time.elapsed() + SAFETY_MARGIN < max_time {
         let elapsed = start_time.elapsed();
@@ -116,7 +114,7 @@ pub fn find_best_move_with_time(
             break;
         }
         let depth_start = Instant::now();
-        let nodes_before = heur.node_count;
+        let nodes_before = engine.timer.node_count;
         let mut legal_moves = board.generate_moves();
         if legal_moves.is_empty() {
             return None;
@@ -155,7 +153,8 @@ pub fn find_best_move_with_time(
             for m in &legal_moves {
                 if start_time.elapsed() + SAFETY_MARGIN >= max_time { break; }
                 let info = board.make_move(m);
-                let score = -board.negamax_enhanced(tt, depth - 1, -beta, -alpha, &mut heur, 1, &lmr_table, false, None);
+                let mut sc = crate::search::SearchContext::new();
+                let score = -engine.search(board, &mut sc, 1, -beta, -alpha, depth - 1, false, false);
                 board.unmake_move(m, info);
                 if score > best_score { best_score = score; new_best_move = Some(*m); }
                 alpha = alpha.max(best_score);
@@ -198,18 +197,10 @@ pub fn find_best_move_with_time(
         if start_time.elapsed() + SAFETY_MARGIN < max_time {
             best_move = new_best_move;
             last_depth_time = depth_start.elapsed();
-            // Light history aging to prevent runaway values; keep the table responsive.
-            for c in 0..2 { 
-                for f in 0..64 { 
-                    for t in 0..64 { 
-                        heur.history[c][f][t] = (heur.history[c][f][t] * 7) / 8; 
-                        heur.butterfly[c][f][t] = (heur.butterfly[c][f][t] * 7) / 8; 
-                    } 
-                } 
-            }
+            // History aging is handled internally by the SearchEngine
             // Print UCI info for this completed depth
             let depth_time = last_depth_time.as_millis().max(1) as u128;
-            let nodes = (heur.node_count - nodes_before) as u128;
+            let nodes = (engine.timer.node_count - nodes_before) as u128;
             let nps = (nodes * 1000) / depth_time;
             let pv = board.extract_pv(tt, 30);
             let pv_str = pv.iter().map(|m| format_uci_move(m)).collect::<Vec<_>>().join(" ");
@@ -236,11 +227,10 @@ pub fn find_best_move_fixed_depth(
     max_depth: u32,
 ) -> Option<Move> {
     let mut best_move: Option<Move> = None;
-    let mut heur = SearchHeuristics::new(128);
-    let lmr_table = LmrTable::new();
+    let mut engine = SearchEngine::new();
     let mut best_score = -crate::MATE_SCORE * 2;
     for depth in 1..=max_depth {
-        let nodes_before = heur.node_count;
+        let nodes_before = engine.timer.node_count;
         let mut legal_moves = board.generate_moves();
         if legal_moves.is_empty() { return None; }
         if legal_moves.len() == 1 { return Some(legal_moves[0]); }
@@ -252,7 +242,8 @@ pub fn find_best_move_fixed_depth(
         let mut new_best_move: Option<Move> = None;
         for m in &legal_moves {
             let info = board.make_move(m);
-            let score = -board.negamax_enhanced(tt, depth - 1, -beta, -alpha, &mut heur, 1, &lmr_table, false, None);
+            let mut sc = crate::search::SearchContext::new();
+            let score = -engine.search(board, &mut sc, 1, -beta, -alpha, depth - 1, false, false);
             board.unmake_move(m, info);
             if score > best_score { best_score = score; new_best_move = Some(*m); }
             alpha = alpha.max(best_score);
@@ -260,7 +251,7 @@ pub fn find_best_move_fixed_depth(
         }
         best_move = new_best_move;
         // Per-depth info
-        let nodes = (heur.node_count - nodes_before) as u128;
+        let nodes = (engine.timer.node_count - nodes_before) as u128;
         // No wall-clock here; report time as 0 and nps as nodes (pseudo)
         let pv = board.extract_pv(tt, 30);
         let pv_str = pv.iter().map(|m| format_uci_move(m)).collect::<Vec<_>>().join(" ");
@@ -299,6 +290,73 @@ pub fn run() {
             }
             "isready" => {
                 println!("readyok");
+            }
+            "testsimple" => {
+                println!("Testing advanced search:");
+                let mut engine = SearchEngine::new();
+                let time_limit = Some(std::time::Instant::now() + std::time::Duration::from_millis(1000));
+                let best = engine.think(&mut board, time_limit);
+                println!("Search result: {}", format_uci_move(&best));
+            }
+            "eval" => {
+                let score = board.evaluate();
+                println!("Static evaluation: {}", score);
+            }
+            "testmoves" => {
+                println!("Testing individual moves:");
+                let moves = board.generate_moves();
+                for (i, m) in moves.iter().take(5).enumerate() {
+                    let info = board.make_move(m);
+                    let score = -board.evaluate();
+                    board.unmake_move(m, info);
+                    println!("Move {}: {:?} -> Score: {}", i+1, m, score);
+                }
+            }
+            "testintegrity" => {
+                println!("Testing make/unmake integrity:");
+                let original_hash = board.hash;
+                let original_eval = board.evaluate();
+                println!("Original - Hash: {}, Eval: {}", original_hash, original_eval);
+                
+                let moves = board.generate_moves();
+                for (i, m) in moves.iter().take(3).enumerate() {
+                    println!("Testing move {}: {:?}", i+1, m);
+                    let info = board.make_move(m);
+                    let after_make_hash = board.hash;
+                    let after_make_eval = board.evaluate();
+                    println!("  After make - Hash: {}, Eval: {}", after_make_hash, after_make_eval);
+                    
+                    board.unmake_move(m, info);
+                    let after_unmake_hash = board.hash;
+                    let after_unmake_eval = board.evaluate();
+                    println!("  After unmake - Hash: {}, Eval: {}", after_unmake_hash, after_unmake_eval);
+                    
+                    if original_hash != after_unmake_hash {
+                        println!("  ❌ HASH CORRUPTION!");
+                    }
+                    if original_eval != after_unmake_eval {
+                        println!("  ❌ EVAL CORRUPTION!");
+                    }
+                    if original_hash == after_unmake_hash && original_eval == after_unmake_eval {
+                        println!("  ✅ Make/unmake OK");
+                    }
+                }
+            }
+            "debugsearch" => {
+                println!("Debug advanced search:");
+                let mut engine = SearchEngine::new();
+                let time_limit = Some(std::time::Instant::now() + std::time::Duration::from_millis(2000));
+                let _best = engine.think(&mut board, time_limit);
+                println!("Debug search completed");
+            }
+            "listmoves" => {
+                println!("All legal moves from starting position:");
+                let moves = board.generate_moves();
+                for (i, m) in moves.iter().enumerate() {
+                    println!("Move {}: {:?}", i+1, m);
+                    if i >= 19 { break; } // Show first 20 moves
+                }
+                println!("Total moves: {}", moves.len());
             }
             "ucinewgame" => {
                 board = Board::new();
@@ -384,10 +442,12 @@ pub fn run() {
                 }
                 // Start a new search: bump TT generation.
                 tt.start_new_search();
-                if let Some(d) = fixed_depth {
-                    let best = find_best_move_fixed_depth(&mut board, &mut tt, d);
-                    if let Some(best_move) = best { println!("bestmove {}", format_uci_move(&best_move)); }
-                    else { println!("bestmove 0000"); }
+                if let Some(_d) = fixed_depth {
+                    // Use search engine for fixed depth (with time limit)
+                    let mut engine = SearchEngine::new();
+                    let time_limit = Some(Instant::now() + std::time::Duration::from_millis(5000));
+                    let best_move = engine.think(&mut board, time_limit);
+                    println!("bestmove {}", format_uci_move(&best_move));
                 } else {
                     let max_time = movetime.unwrap_or_else(|| time_left / 30 + inc);
                     let start = Instant::now();

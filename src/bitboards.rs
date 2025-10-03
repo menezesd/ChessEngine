@@ -1,4 +1,4 @@
-use crate::board::{Color, Piece, Square};
+use crate::board::{Color, Square, Board};
 
 pub type BitBoard = u64;
 
@@ -72,30 +72,16 @@ pub(crate) fn rook_attacks_from(sq: Square, occ: BitBoard) -> BitBoard {
 }
 
 pub fn is_square_attacked_bb(
-    squares: &[[Option<(Color, Piece)>; 8]; 8],
+    board: &Board,
     target: Square,
     attacker_color: Color,
 ) -> bool {
-    // Build occupancy and attacker piece bitboards
-    let mut occ: BitBoard = 0;
-    let mut pawns: BitBoard = 0; let mut knights: BitBoard = 0; let mut bishops: BitBoard = 0; let mut rooks: BitBoard = 0; let mut queens: BitBoard = 0; let mut king: BitBoard = 0;
-
-    for r in 0..8 { for f in 0..8 {
-        if let Some((c, p)) = squares[r][f] {
-            let bb = 1u64 << (r * 8 + f);
-            occ |= bb;
-            if c == attacker_color {
-                match p {
-                    Piece::Pawn => pawns |= bb,
-                    Piece::Knight => knights |= bb,
-                    Piece::Bishop => bishops |= bb,
-                    Piece::Rook => rooks |= bb,
-                    Piece::Queen => queens |= bb,
-                    Piece::King => king |= bb,
-                }
-            }
-        }
-    }}
+    // Get occupancy and attacker piece bitboards from the board
+    let occ = board.all_pieces();
+    let (pawns, knights, bishops, rooks, queens, king) = match attacker_color {
+        Color::White => (board.white_pawns, board.white_knights, board.white_bishops, board.white_rooks, board.white_queens, board.white_king),
+        Color::Black => (board.black_pawns, board.black_knights, board.black_bishops, board.black_rooks, board.black_queens, board.black_king),
+    };
 
     let tgt_bb = sq_to_bb(target);
 

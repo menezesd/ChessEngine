@@ -119,4 +119,8 @@ impl TranspositionTable {
     pub fn start_new_search(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
+    
+    pub fn age(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
 }
