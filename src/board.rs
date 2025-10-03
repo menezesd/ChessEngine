@@ -1,6 +1,5 @@
-use std::collections::{HashSet, HashMap};
+use std::collections::HashSet;
 use once_cell::sync::Lazy;
-use smallvec::SmallVec;
 use rand::prelude::*;
 
 use crate::uci::format_square;
@@ -114,7 +113,6 @@ pub(crate) struct Board {
     pub(crate) hash: u64,
     pub(crate) halfmove_clock: u32,
     pub(crate) position_history: Vec<u64>,
-    pub(crate) repetition_count: HashMap<u64, u8>,
 }
 
 impl Board {
@@ -132,10 +130,9 @@ impl Board {
         castling_rights.insert((Color::White, 'Q'));
         castling_rights.insert((Color::Black, 'K'));
         castling_rights.insert((Color::Black, 'Q'));
-        let mut board = Board { squares, white_to_move: true, en_passant_target: None, castling_rights, hash: 0, halfmove_clock: 0, position_history: Vec::new(), repetition_count: HashMap::new() };
+        let mut board = Board { squares, white_to_move: true, en_passant_target: None, castling_rights, hash: 0, halfmove_clock: 0, position_history: Vec::new() };
         board.hash = board.calculate_initial_hash();
         board.position_history.push(board.hash);
-        board.repetition_count.insert(board.hash, 1);
         board
     }
 
@@ -163,10 +160,9 @@ impl Board {
             match c { 'K' => { castling_rights.insert((Color::White, 'K')); }, 'Q' => { castling_rights.insert((Color::White, 'Q')); }, 'k' => { castling_rights.insert((Color::Black, 'K')); }, 'q' => { castling_rights.insert((Color::Black, 'Q')); }, '-' => {}, _ => panic!("Invalid castle"), }
         }
         let en_passant_target = if parts[3] != "-" { let chars: Vec<char> = parts[3].chars().collect(); if chars.len() == 2 { Some(Square(rank_to_index(chars[1]), file_to_index(chars[0]))) } else { None } } else { None };
-        let mut board = Board { squares, white_to_move, en_passant_target, castling_rights, hash: 0, halfmove_clock: parts.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0), position_history: Vec::new(), repetition_count: HashMap::new() };
+        let mut board = Board { squares, white_to_move, en_passant_target, castling_rights, hash: 0, halfmove_clock: parts.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0), position_history: Vec::new() };
         board.hash = board.calculate_initial_hash();
         board.position_history.push(board.hash);
-        board.repetition_count.insert(board.hash, 1);
         board
     }
 
@@ -247,17 +243,12 @@ impl Board {
         if let Some((captured_color, captured_piece)) = captured_piece_info { if captured_piece == Piece::Rook { let start_rank = if captured_color == Color::White { 0 } else { 7 }; if m.to == Square(start_rank, 0) && self.castling_rights.contains(&(captured_color, 'Q')) { castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][1]; new_castling_rights.remove(&(captured_color, 'Q')); } else if m.to == Square(start_rank, 7) && self.castling_rights.contains(&(captured_color, 'K')) { castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][0]; new_castling_rights.remove(&(captured_color, 'K')); } } }
         self.castling_rights = new_castling_rights; current_hash ^= castle_hash_diff;
         self.white_to_move = !self.white_to_move;
-        self.hash = current_hash; 
-        self.position_history.push(self.hash);
-        // Update repetition count for new position
-        *self.repetition_count.entry(self.hash).or_insert(0) += 1;
+        self.hash = current_hash; self.position_history.push(self.hash);
         UnmakeInfo { captured_piece_info, previous_en_passant_target, previous_castling_rights, previous_hash, previous_halfmove_clock }
     }
 
     pub(crate) fn unmake_move(&mut self, m: &Move, info: UnmakeInfo) {
-        if let Some(popped_hash) = self.position_history.pop() {
-            if let Some(cnt) = self.repetition_count.get_mut(&popped_hash) { if *cnt > 0 { *cnt -= 1; } }
-        }
+        let _ = self.position_history.pop();
         self.white_to_move = !self.white_to_move;
         self.en_passant_target = info.previous_en_passant_target;
         self.castling_rights = info.previous_castling_rights;
@@ -281,13 +272,12 @@ impl Board {
     pub(crate) fn make_null_move(&mut self) -> (Option<Square>, u64, u32) {
         let prev_ep = self.en_passant_target; let prev_hash = self.hash; let prev_halfmove = self.halfmove_clock;
         if let Some(ep) = self.en_passant_target { self.hash ^= ZOBRIST.en_passant_keys[ep.1]; }
-        self.white_to_move = !self.white_to_move; self.hash ^= ZOBRIST.black_to_move_key; self.en_passant_target = None; self.halfmove_clock = self.halfmove_clock.saturating_add(1); self.position_history.push(self.hash); *self.repetition_count.entry(self.hash).or_insert(0) += 1;
+        self.white_to_move = !self.white_to_move; self.hash ^= ZOBRIST.black_to_move_key; self.en_passant_target = None; self.halfmove_clock = self.halfmove_clock.saturating_add(1); self.position_history.push(self.hash);
         (prev_ep, prev_hash, prev_halfmove)
     }
 
     pub(crate) fn unmake_null_move(&mut self, prev_ep: Option<Square>, prev_hash: u64, prev_halfmove: u32) {
-    if let Some(popped_hash) = self.position_history.pop() { if let Some(cnt) = self.repetition_count.get_mut(&popped_hash) { if *cnt > 0 { *cnt -= 1; } } }
-    self.hash = prev_hash; self.white_to_move = !self.white_to_move; self.en_passant_target = prev_ep; self.halfmove_clock = prev_halfmove;
+        let _ = self.position_history.pop(); self.hash = prev_hash; self.white_to_move = !self.white_to_move; self.en_passant_target = prev_ep; self.halfmove_clock = prev_halfmove;
     }
 
     fn generate_pseudo_moves(&self) -> Vec<Move> {
@@ -296,8 +286,7 @@ impl Board {
 
     fn generate_pseudo_moves_bb(&self) -> Vec<Move> {
         use crate::bitboards as bb;
-        // Typical branching factor ~30-40; inline up to 64 moves to avoid heap in most cases
-        let mut moves: SmallVec<[Move; 64]> = SmallVec::new();
+        let mut moves = Vec::new();
         let color = self.current_color();
         let us = color;
         let _them = self.opponent_color(color);
@@ -329,20 +318,13 @@ impl Board {
                 // Double pushes from rank2
                 let two = ((one & bb::rank3_mask()) << 8) & empty; // rank3_mask computed below via helper
                 let mut t = two; while t!=0 { let to = t.trailing_zeros() as usize; t &= t-1; let from = to-16; push_move(from, to, None, false); }
-                // Captures: pre-mask origins to avoid file wraparound
-                let left_capt = ((pawns & !bb::FILE_A) << 7) & occ_them;  // NW
-                let right_capt = ((pawns & !bb::FILE_H) << 9) & occ_them; // NE
+                // Captures
+                let left_capt = (pawns << 7) & !bb::FILE_H & occ_them;
+                let right_capt = (pawns << 9) & !bb::FILE_A & occ_them;
                 let mut lc = left_capt; while lc!=0 { let to = lc.trailing_zeros() as usize; lc &= lc-1; let from = to-7; if to>=56 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight]{ push_move(from,to,Some(promo),false);} } else { push_move(from,to,None,false);} }
                 let mut rc = right_capt; while rc!=0 { let to = rc.trailing_zeros() as usize; rc &= rc-1; let from = to-9; if to>=56 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight]{ push_move(from,to,Some(promo),false);} } else { push_move(from,to,None,false);} }
                 // En passant
-                if let Some(ep) = self.en_passant_target {
-                    let ep_bb = bb::sq_to_bb(ep);
-                    // For white: ensure target isn't on the forbidden edge before reverse-shift
-                    let nw_attackers = pawns & ((ep_bb & !bb::FILE_H) >> 7);
-                    if nw_attackers != 0 { let from_idx = (ep.0 * 8 + ep.1) - 7; let to_idx = ep.0 * 8 + ep.1; push_move(from_idx, to_idx, None, true); }
-                    let ne_attackers = pawns & ((ep_bb & !bb::FILE_A) >> 9);
-                    if ne_attackers != 0 { let from_idx = (ep.0 * 8 + ep.1) - 9; let to_idx = ep.0 * 8 + ep.1; push_move(from_idx, to_idx, None, true); }
-                }
+                if let Some(ep) = self.en_passant_target { let ep_bb = bb::sq_to_bb(ep); let left_ep = (pawns << 7) & !bb::FILE_H & ep_bb; if left_ep!=0 { let to = ep.0*8+ep.1; let from = to-7; push_move(from,to,None,true); } let right_ep = (pawns << 9) & !bb::FILE_A & ep_bb; if right_ep!=0 { let to = ep.0*8+ep.1; let from = to-9; push_move(from,to,None,true); } }
             } else {
                 // Black
                 let empty = !occ;
@@ -353,20 +335,13 @@ impl Board {
                 let mut pr = promos; while pr!=0 { let to = pr.trailing_zeros() as usize; pr &= pr-1; let from = to+8; for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { push_move(from,to,Some(promo),false); } }
                 let two = ((one & bb::rank6_mask()) >> 8) & empty;
                 let mut t = two; while t!=0 { let to = t.trailing_zeros() as usize; t &= t-1; let from = to+16; push_move(from, to, None, false); }
-                // Captures: pre-mask origins to avoid file wraparound
-                let left_capt = ((pawns & !bb::FILE_A) >> 9) & occ_them; // SW
-                let right_capt = ((pawns & !bb::FILE_H) >> 7) & occ_them; // SE
+                // Captures
+                let left_capt = (pawns >> 9) & !bb::FILE_H & occ_them;
+                let right_capt = (pawns >> 7) & !bb::FILE_A & occ_them;
                 let mut lc = left_capt; while lc!=0 { let to = lc.trailing_zeros() as usize; lc &= lc-1; let from = to+9; if to<8 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight]{ push_move(from,to,Some(promo),false);} } else { push_move(from,to,None,false);} }
                 let mut rc = right_capt; while rc!=0 { let to = rc.trailing_zeros() as usize; rc &= rc-1; let from = to+7; if to<8 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight]{ push_move(from,to,Some(promo),false);} } else { push_move(from,to,None,false);} }
-                // En passant
-                if let Some(ep) = self.en_passant_target {
-                    let ep_bb = bb::sq_to_bb(ep);
-                    // For black: ensure target isn't on the forbidden edge before reverse-shift
-                    let sw_attackers = pawns & ((ep_bb & !bb::FILE_H) << 9);
-                    if sw_attackers != 0 { let from_idx = (ep.0 * 8 + ep.1) + 9; let to_idx = ep.0 * 8 + ep.1; push_move(from_idx, to_idx, None, true); }
-                    let se_attackers = pawns & ((ep_bb & !bb::FILE_A) << 7);
-                    if se_attackers != 0 { let from_idx = (ep.0 * 8 + ep.1) + 7; let to_idx = ep.0 * 8 + ep.1; push_move(from_idx, to_idx, None, true); }
-                }
+                // EP
+                if let Some(ep) = self.en_passant_target { let ep_bb = bb::sq_to_bb(ep); let left_ep = (pawns >> 9) & !bb::FILE_H & ep_bb; if left_ep!=0 { let to = ep.0*8+ep.1; let from = to+9; push_move(from,to,None,true); } let right_ep = (pawns >> 7) & !bb::FILE_A & ep_bb; if right_ep!=0 { let to = ep.0*8+ep.1; let from = to+7; push_move(from,to,None,true); } }
             }
         }
 
@@ -398,7 +373,7 @@ impl Board {
             }
         }
 
-        moves.into_vec()
+        moves
     }
 
     pub(crate) fn generate_piece_moves(&self, from: Square, piece: Piece) -> Vec<Move> {
@@ -482,34 +457,20 @@ impl Board {
 
         let from_idx = from.0*8 + from.1;
         if color == Color::White {
-            // White captures: NW (origin not on FILE_A), NE (origin not on FILE_H)
-            let left = (((1u64 << from_idx) & !bb::FILE_A) << 7) & occ_them;
-            let right = (((1u64 << from_idx) & !bb::FILE_H) << 9) & occ_them;
+            // White captures: left (<<7, not on H-file), right (<<9, not on A-file)
+            let left = ((1u64 << from_idx) << 7) & !bb::FILE_H & occ_them;
+            let right = ((1u64 << from_idx) << 9) & !bb::FILE_A & occ_them;
             let mut caps = left | right;
             while caps != 0 { let to = caps.trailing_zeros() as usize; caps &= caps-1; let to_sq = Square(to/8,to%8); if to_sq.0 == 7 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { out.push(self.create_move(from, to_sq, Some(promo), false, false)); } } else { out.push(self.create_move(from, to_sq, None, false, false)); } }
-            // En passant from a specific white pawn 'from': check reachability to ep square
-            if let Some(ep) = self.en_passant_target {
-                let ep_bb = bb::sq_to_bb(ep);
-                let from_bb = 1u64 << from_idx;
-                let left_ep = ((from_bb & !bb::FILE_A) << 7) & ep_bb;
-                if left_ep != 0 { out.push(self.create_move(from, ep, None, false, true)); }
-                let right_ep = ((from_bb & !bb::FILE_H) << 9) & ep_bb;
-                if right_ep != 0 { out.push(self.create_move(from, ep, None, false, true)); }
-            }
+            // En passant
+            if let Some(ep) = self.en_passant_target { let ep_bb = bb::sq_to_bb(ep); let left_ep = ((1u64<<from_idx) << 7) & !bb::FILE_H & ep_bb; if left_ep!=0 { out.push(self.create_move(from, ep, None, false, true)); } let right_ep = ((1u64<<from_idx) << 9) & !bb::FILE_A & ep_bb; if right_ep!=0 { out.push(self.create_move(from, ep, None, false, true)); } }
         } else {
             // Black captures
-            let left = (((1u64 << from_idx) & !bb::FILE_A) >> 9) & occ_them;
-            let right = (((1u64 << from_idx) & !bb::FILE_H) >> 7) & occ_them;
+            let left = ((1u64 << from_idx) >> 9) & !bb::FILE_H & occ_them;
+            let right = ((1u64 << from_idx) >> 7) & !bb::FILE_A & occ_them;
             let mut caps = left | right;
             while caps != 0 { let to = caps.trailing_zeros() as usize; caps &= caps-1; let to_sq = Square(to/8,to%8); if to_sq.0 == 0 { for promo in [Piece::Queen,Piece::Rook,Piece::Bishop,Piece::Knight] { out.push(self.create_move(from, to_sq, Some(promo), false, false)); } } else { out.push(self.create_move(from, to_sq, None, false, false)); } }
-            if let Some(ep) = self.en_passant_target {
-                let ep_bb = bb::sq_to_bb(ep);
-                let from_bb = 1u64 << from_idx;
-                let sw = ((from_bb & !bb::FILE_H) >> 7) & ep_bb; // from southwest to target (black moves down)
-                if sw != 0 { out.push(self.create_move(from, ep, None, false, true)); }
-                let se = ((from_bb & !bb::FILE_A) >> 9) & ep_bb; // from southeast to target
-                if se != 0 { out.push(self.create_move(from, ep, None, false, true)); }
-            }
+            if let Some(ep) = self.en_passant_target { let ep_bb = bb::sq_to_bb(ep); let left_ep = ((1u64<<from_idx) >> 9) & !bb::FILE_H & ep_bb; if left_ep!=0 { out.push(self.create_move(from, ep, None, false, true)); } let right_ep = ((1u64<<from_idx) >> 7) & !bb::FILE_A & ep_bb; if right_ep!=0 { out.push(self.create_move(from, ep, None, false, true)); } }
         }
     }
 
@@ -558,14 +519,14 @@ impl Board {
 
     pub(crate) fn is_in_check(&self, color: Color) -> bool { if let Some(king_sq) = self.find_king(color) { self.is_square_attacked(king_sq, self.opponent_color(color)) } else { false } }
     pub(crate) fn is_fifty_move_draw(&self) -> bool { self.halfmove_clock >= 100 }
-    pub(crate) fn is_threefold_repetition(&self) -> bool { self.repetition_count.get(&self.hash).map_or(false, |c| *c >= 3) }
+    pub(crate) fn is_threefold_repetition(&self) -> bool { let current = self.hash; let mut count = 0; for &h in &self.position_history { if h == current { count += 1; } } count >= 3 }
 
     pub(crate) fn generate_moves(&mut self) -> Vec<Move> {
-        let current_color = self.current_color(); let opponent_color = self.opponent_color(current_color); let pseudo_moves = self.generate_pseudo_moves(); let mut legal_moves: SmallVec<[Move; 64]> = SmallVec::new();
+        let current_color = self.current_color(); let opponent_color = self.opponent_color(current_color); let pseudo_moves = self.generate_pseudo_moves(); let mut legal_moves = Vec::new();
         for m in pseudo_moves { if m.is_castling { let king_start_sq = m.from; let king_mid_sq = Square(m.from.0, (m.from.1 + m.to.1) / 2); let king_end_sq = m.to; if self.is_square_attacked(king_start_sq, opponent_color) || self.is_square_attacked(king_mid_sq, opponent_color) || self.is_square_attacked(king_end_sq, opponent_color) { continue; } }
             let info = self.make_move(&m); if !self.is_in_check(current_color) { legal_moves.push(m.clone()); } self.unmake_move(&m, info);
         }
-        legal_moves.into_vec()
+        legal_moves
     }
 
     pub(crate) fn is_checkmate(&mut self) -> bool { let color = self.current_color(); self.is_in_check(color) && self.generate_moves().is_empty() }
