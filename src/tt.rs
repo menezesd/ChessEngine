@@ -22,7 +22,7 @@ pub struct TTEntry {
 pub struct TranspositionTable {
     table: Vec<Option<TTEntry>>,
     mask: usize,
-    generation: u8,
+    pub generation: u8,
 }
 
 impl TranspositionTable {

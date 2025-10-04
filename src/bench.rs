@@ -103,9 +103,9 @@ impl BenchSuite {
     pub fn test_tuned_configs(&self, depth: u32, hash_mb: usize) -> Vec<ConfigResult> {
         let configs = vec![
             ("Default", SearchConfig::default()),
-            ("Tuned Optimal", SearchConfig::tuned_optimal()),
-            ("Tuned Balanced", SearchConfig::tuned_balanced()),
-            ("Tuned Fast", SearchConfig::tuned_fast()),
+            ("Aggressive", SearchConfig::aggressive_pruning()),
+            ("Conservative", SearchConfig::conservative_pruning()),
+            ("Deep LMR", SearchConfig::deep_lmr()),
         ];
         
         self.compare_configs(depth, hash_mb, configs)

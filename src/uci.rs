@@ -1,7 +1,9 @@
 use crate::search::SearchEngine;
-use crate::{Board, Move, TranspositionTable};
+use crate::{Board, Move, TranspositionTable, Square};
 use std::io::{self, BufRead, Write};
 use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 pub fn format_square(sq: crate::Square) -> String {
     format!("{}{}", (sq.1 as u8 + b'a') as char, sq.0 + 1)
@@ -91,6 +93,65 @@ pub fn parse_position_command(board: &mut Board, parts: &[&str]) {
     }
 }
 
+fn lazy_smp_search(
+    board: &mut Board, 
+    time_limit: Option<Instant>, 
+    num_threads: usize
+) -> (Move, i32) {
+    if num_threads == 1 {
+        let mut engine = SearchEngine::new();
+        let mv = engine.think(board, time_limit);
+        let score = board.evaluate();
+        return (mv, score);
+    }
+    
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = vec![];
+    
+    for thread_id in 0..num_threads {
+        let mut board_clone = board.clone();
+        let results_clone = Arc::clone(&results);
+        
+        let handle = thread::spawn(move || {
+            let mut engine = SearchEngine::new();
+            // Randomize search slightly per thread by using a different TT size
+            if thread_id > 0 {
+                engine.tt.resize(16 + thread_id % 4);
+            }
+            
+            let mv = engine.think(&mut board_clone, time_limit);
+            let score = board_clone.evaluate(); // Rough score estimate
+            
+            results_clone.lock().unwrap().push((mv, score, thread_id));
+        });
+        
+        handles.push(handle);
+    }
+    
+    // Wait for all threads
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    
+    // Pick best result (by score, or first if tied)
+    let results = results.lock().unwrap();
+    let best = results.iter().max_by_key(|(_, score, _)| *score);
+    
+    match best {
+        Some((mv, score, _)) => (*mv, *score),
+        None => {
+            // Fallback
+            let moves = board.generate_moves();
+            let fallback_move = moves.first().cloned().unwrap_or(Move {
+                from: Square(0, 0), to: Square(0, 0),
+                is_castling: false, is_en_passant: false,
+                promotion: None, captured_piece: None,
+            });
+            (fallback_move, 0)
+        }
+    }
+}
+
 pub fn run() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -99,6 +160,7 @@ pub fn run() {
     let mut time_left = Duration::from_secs(5);
     let mut inc = Duration::ZERO;
     let mut movetime: Option<Duration> = None;
+    let mut threads = 1usize;
     for line in stdin.lock().lines() {
         let line = line.unwrap();
         let parts: Vec<&str> = line.trim().split_whitespace().collect();
@@ -110,6 +172,7 @@ pub fn run() {
                 println!("id name MyRustEngine");
                 println!("id author Dean Menezes");
                 println!("option name Hash type spin default 1024 min 1 max 8192");
+                println!("option name Threads type spin default 1 min 1 max 64");
                 println!("option name Clear Hash type button");
                 println!("uciok");
             }
@@ -245,6 +308,12 @@ pub fn run() {
                                 tt.resize(mb);
                             }
                         }
+                    } else if n.eq_ignore_ascii_case("Threads") {
+                        if let Some(v) = value {
+                            if let Ok(t) = v.parse::<usize>() {
+                                threads = t.clamp(1, 64);
+                            }
+                        }
                     } else if n.eq_ignore_ascii_case("Clear Hash") {
                         tt.clear();
                     }
@@ -300,12 +369,11 @@ pub fn run() {
                     best_score = board.evaluate();
                     best_move = Some(mv);
                 } else {
-                    // Use engine.think() instead of find_best_move_with_time for better search quality
+                    // Use lazy SMP search for better performance
                     let max_time = movetime.unwrap_or_else(|| time_left / 30 + inc);
-                    let mut engine = SearchEngine::new();
                     let time_limit = Some(Instant::now() + max_time);
-                    let mv = engine.think(&mut board, time_limit);
-                    best_score = board.evaluate();
+                    let (mv, score) = lazy_smp_search(&mut board, time_limit, threads);
+                    best_score = score;
                     best_move = Some(mv);
                 }
                 // Always print a final info score line before bestmove

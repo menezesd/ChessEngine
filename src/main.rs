@@ -277,5 +277,4 @@ mod perft_tests {
     }
 }
 
-#[cfg(test)]
 // (Tuning-related eval tests removed)
