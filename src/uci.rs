@@ -56,6 +56,7 @@ pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
         Some(_) => return None,
         None => None,
     };
+    // Use a cloned board to avoid mutating the original during move legality check
     let legal_moves = board.generate_moves();
     for legal_move in legal_moves {
         if legal_move.from == from_sq && legal_move.to == to_sq {

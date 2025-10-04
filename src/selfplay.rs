@@ -73,6 +73,7 @@ pub fn generate_labeled_positions_vs_stockfish(cfg: &SelfPlayConfig) -> Vec<(Boa
     while reader.read_line(&mut line).unwrap_or(0) > 0 { if line.contains("uciok") { break; } line.clear(); }
     send("isready"); line.clear(); while reader.read_line(&mut line).unwrap_or(0)>0 { if line.contains("readyok") { break;} line.clear(); }
     for ply in 0..cfg.plies {
+        let fen_before = crate::feature_export::board_to_fen(&board);
         // Determine depth (dynamic late depth if configured)
         let depth_here = if ply >= cfg.late_depth_start_ply { cfg.sf_depth_late.unwrap_or(cfg.sf_depth) } else { cfg.sf_depth };
         // Evaluate current position with Stockfish to label before any move
@@ -91,7 +92,21 @@ pub fn generate_labeled_positions_vs_stockfish(cfg: &SelfPlayConfig) -> Vec<(Boa
         // Check adjudication: if eval suggests decisive advantage repeatedly
     if let Some(eval_cp) = cp { if eval_cp.abs() > cfg.adjudication_cp { adjudication_counter += 1; } else { adjudication_counter = 0; } last_cp = Some(eval_cp); }
         out.push((board.clone(), cp, mate, None));
-        if let Some(bm) = best_move { if let Some(mv) = crate::uci::parse_uci_move(&mut board, &bm) { board.make_move(&mv); } else { break; } } else { break; }
+        if let Some(bm) = best_move {
+            if let Some(mv) = crate::uci::parse_uci_move(&mut board, &bm) {
+                println!("[DEBUG] ply {}: FEN before move: {}", ply, fen_before);
+                println!("[DEBUG] ply {}: Stockfish bestmove: {}", ply, bm);
+                board.make_move(&mv);
+            } else {
+                println!("[DEBUG] parse_uci_move failed at ply {} for bestmove: {}", ply, bm);
+                println!("[DEBUG] FEN at failure: {}", fen_before);
+                break;
+            }
+        } else {
+            println!("[DEBUG] No bestmove returned by Stockfish at ply {}", ply);
+            println!("[DEBUG] FEN at failure: {}", fen_before);
+            break;
+        }
 
         // Optionally label the position after Stockfish's move (before our reply)
         if cfg.label_both_sides {
@@ -105,7 +120,11 @@ pub fn generate_labeled_positions_vs_stockfish(cfg: &SelfPlayConfig) -> Vec<(Boa
             }
             out.push((board.clone(), cp2, mate2, None));
         }
-        if board.generate_moves().is_empty() { break; }
+        if board.generate_moves().is_empty() {
+            println!("[DEBUG] No legal moves (checkmate/stalemate) at ply {}", ply);
+            println!("[DEBUG] FEN at no-legal-moves: {}", crate::feature_export::board_to_fen(&board));
+            break;
+        }
     // Our reply: random among top K
     if ply+1 < cfg.plies {
         if ply+1 < cfg.random_opening_plies { let moves = board.generate_moves(); if !moves.is_empty() { let idx = rand_index(moves.len() as u32) as usize; let mv = moves[idx]; let info = board.make_move(&mv); drop(info);} }
@@ -113,6 +132,7 @@ pub fn generate_labeled_positions_vs_stockfish(cfg: &SelfPlayConfig) -> Vec<(Boa
     }
         if board.generate_moves().is_empty() { break; }
         if ply >= cfg.min_plies_before_adjudication && adjudication_counter >= cfg.adjudication_repeats { // adjudication trigger
+            println!("[DEBUG] Adjudication triggered at ply {} (eval_cp = {:?}, repeats = {})", ply, last_cp, adjudication_counter);
             let result: i8 = if let Some(e) = last_cp { if e > 0 { 1 } else { -1 } } else { 0 };
             if let Some(last) = out.last_mut() { last.3 = Some(result); }
             break;

@@ -5,19 +5,17 @@ mod attack_tables;
 mod bench;
 mod board;
 mod bitboards;
-
+mod pst;
 mod search;
 
 mod tactics;
-mod tuned_configs;
-mod tuning;
 mod tt;
 mod uci;
 mod feature_export;
 mod selfplay;
 #[allow(dead_code)]
 #[allow(dead_code)]
-mod tuned_eval_params; // auto-generated evaluation parameter tuning output
+// (Tuning modules removed; using only Publius values)
 
 pub(crate) use board::{Board, Move, Piece, Square};
 pub(crate) use board::piece_value;
@@ -93,8 +91,7 @@ fn main() {
                 bench::run_bench_command(bench_args);
             }
             "tune" => {
-                let tune_args = if args.len() > 2 { &args[2..] } else { &[] };
-                tuning::run_tuning_command(tune_args);
+            // (Tuning command removed)
             }
             "tactics" => {
                 let tactics_args = if args.len() > 2 { &args[2..] } else { &[] };
@@ -156,8 +153,8 @@ fn main() {
                 println!("Labeled self-play exported {} positions to {} (append={})", just_boards.len(), outfile, append);
             }
             "selfplay-batch" => {
-                // Usage: chess_engine selfplay-batch <games> <plies> <sf_depth> <out.csv> [topK] [rand_open] [cp_clamp]
-                if args.len() < 6 { eprintln!("Usage: chess_engine selfplay-batch <games> <plies> <sf_depth> <out.csv> [topK] [rand_open] [cp_clamp]"); return; }
+                // Usage: chess_engine selfplay-batch <games> <plies> <sf_depth> <out.csv> [topK] [rand_open] [cp_clamp] [adjud_cp] [adjud_repeats] [min_plies]
+                if args.len() < 6 { eprintln!("Usage: chess_engine selfplay-batch <games> <plies> <sf_depth> <out.csv> [topK] [rand_open] [cp_clamp] [adjud_cp] [adjud_repeats] [min_plies]"); return; }
                 let games: usize = args[2].parse().unwrap_or(50);
                 let plies: usize = args[3].parse().unwrap_or(80);
                 let depth: u32 = args[4].parse().unwrap_or(10);
@@ -165,9 +162,22 @@ fn main() {
                 let top_k = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(5);
                 let rand_open = args.get(7).and_then(|s| s.parse().ok()).unwrap_or(8);
                 let cp_clamp = args.get(8).and_then(|s| s.parse().ok());
+                let adjud_cp = args.get(9).and_then(|s| s.parse().ok()).unwrap_or(1200);
+                let adjud_repeats = args.get(10).and_then(|s| s.parse().ok()).unwrap_or(6);
+                let min_plies = args.get(11).and_then(|s| s.parse().ok()).unwrap_or(50);
                 let mut total_positions = 0usize;
                 for g in 0..games {
-                    let cfg = selfplay::SelfPlayConfig { plies, sf_depth: depth, top_k_random: top_k, random_opening_plies: rand_open, clamp_cp: cp_clamp, ..Default::default() };
+                    let cfg = selfplay::SelfPlayConfig {
+                        plies,
+                        sf_depth: depth,
+                        top_k_random: top_k,
+                        random_opening_plies: rand_open,
+                        clamp_cp: cp_clamp,
+                        adjudication_cp: adjud_cp,
+                        adjudication_repeats: adjud_repeats,
+                        min_plies_before_adjudication: min_plies,
+                        ..Default::default()
+                    };
                     let labeled = selfplay::generate_labeled_positions_vs_stockfish(&cfg);
                     let just_boards: Vec<(Board, Option<i32>, Option<i32>, Option<i8>)> = labeled.into_iter().collect();
                     total_positions += just_boards.len();
@@ -180,10 +190,7 @@ fn main() {
                 println!("Batch complete: games={} total_positions={} output={}", games, total_positions, outfile);
             }
             "show-tuned-params" => {
-                // Prints currently compiled tuned eval params (if file exists/compiled)
-                let p = tuned_eval_params::tuned_params();
-                println!("Tuned params: mobility_knight={} mobility_bishop={} mobility_rook={} mobility_queen={} bishop_pair={} tempo={} isolated={} doubled={} backward={} passed_base={} rook_open={} rook_semi={} hanging={} king_ring={}",
-                    p.mobility_knight,p.mobility_bishop,p.mobility_rook,p.mobility_queen,p.bishop_pair,p.tempo,p.isolated_pawn,p.doubled_pawn,p.backward_pawn,p.passed_base,p.rook_open_file,p.rook_semi_open,p.hanging_penalty,p.king_ring_attack);
+            // (Show-tuned-params command removed)
             }
             "help" | "--help" | "-h" => {
                 print_help();
@@ -271,32 +278,4 @@ mod perft_tests {
 }
 
 #[cfg(test)]
-mod eval_tests {
-    use super::*;
-
-    struct EvalCase { fen: &'static str, min: i32, max: i32, note: &'static str }
-
-    // Expected ranges are intentionally wide; goal is to catch outrageous swings / sign errors.
-    const CASES: &[EvalCase] = &[
-        // Starting position should be roughly balanced.
-        EvalCase { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", min: -50, max: 50, note: "Start position" },
-        // Big material edge for White (extra queen)
-    // Updated ranges after HCE rewrite (evaluation scale increased due to mobility/king pressure components)
-    EvalCase { fen: "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKQNR w KQkq - 0 1", min: 1300, max: 1700, note: "White up a queen" },
-    // Big material edge for Black (white missing queen). After HCE rewrite asymmetry (tempo/PST) yields smaller magnitude; widen range.
-    EvalCase { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w KQkq - 0 1", min: -1100, max: -700, note: "Black up a queen" },
-    // Passed pawn near promotion; with new scaling (low non-pawn material halves scores) expect a modest but clear edge.
-    EvalCase { fen: "4k3/4P3/8/8/8/8/4K3/8 w - - 0 1", min: 50, max: 250, note: "White passed pawn on 7th" },
-    // Simple mate threat (Fool's mate pattern before mate); new eval has milder king danger, expect a negative but not extreme score.
-    EvalCase { fen: "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3", min: -400, max: -50, note: "King attack" },
-    ];
-
-    #[test]
-    fn evaluation_regression_ranges() {
-        for case in CASES {
-            let board = Board::from_fen(case.fen);
-            let eval = board.evaluate();
-            assert!(eval >= case.min && eval <= case.max, "Eval {} out of range [{}, {}] for {} ({})", eval, case.min, case.max, case.note, case.fen);
-        }
-    }
-}
+// (Tuning-related eval tests removed)

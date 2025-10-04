@@ -626,10 +626,10 @@ impl SearchEngine {
             return board.evaluate();
         }
         
-        // Prepare for singular extension
+        // Prepare for singular extension (only for lower bound, not mate score)
         if !is_root && depth > SINGULAR_DEPTH && sc.excluded_move.is_none() {
             if let Some(entry) = self.tt.probe(board.hash) {
-                if matches!(entry.bound_type, BoundType::LowerBound) && entry.score < EVAL_LIMIT {
+                if matches!(entry.bound_type, BoundType::LowerBound) && entry.score < EVAL_LIMIT && entry.score.abs() < MATE_SCORE - 100 {
                     singular_move = entry.best_move.clone();
                     singular_score = entry.score;
                     singular_extension = true;
@@ -667,15 +667,14 @@ impl SearchEngine {
         
         // NODE-LEVEL PRUNING
         if !was_null_move && !is_in_check_before_moving && !is_pv && !is_excluded && self.can_try_null_move(board) {
-            
             // STATIC NULL MOVE (Reverse Futility Pruning)
             if depth <= 6 {
                 let margin = 135 * depth as i32;
-                if eval - margin >= beta {
+                if eval - margin > beta {
                     return eval - margin;
                 }
             }
-            
+
             // RAZORING
             if depth <= 3 && eval + 200 * (depth as i32) < beta {
                 score = self.quiesce(board, ply, 0, alpha, beta);
@@ -686,39 +685,37 @@ impl SearchEngine {
                     return 0;
                 }
             }
-            
+
             // NULL MOVE PRUNING
             if eval > beta && depth > 1 {
-                // Set null move reduction
-                reduction = 3 + depth / 6 + if eval - beta > 200 { 1 } else { 0 };
-                
+                reduction = 4 + depth / 6 + if eval - beta > 200 { 1 } else { 0 };
                 // Do null move search
                 let (prev_ep, prev_hash, prev_halfmove) = board.make_null_move();
-                score = -self.search(board, sc, ply + 1, -beta, -beta + 1, depth.saturating_sub(1 + reduction), true, false);
+                score = -self.search(board, sc, ply + 1, -beta, -beta + 1, depth.saturating_sub(reduction), true, false);
                 board.unmake_null_move(prev_ep, prev_hash, prev_halfmove);
-                
+
                 if self.timer.is_stopping {
                     return 0;
                 }
-                
+
                 // NULL MOVE VERIFICATION
                 if depth.saturating_sub(reduction) > 5 && score >= beta {
                     score = self.search(board, sc, ply, alpha, beta, depth.saturating_sub(reduction + 4), true, false);
                 }
-                
+
                 if self.timer.is_stopping {
                     return 0;
                 }
-                
+
                 if score >= beta {
                     return score;
                 }
             }
         }
-        
+
         // SET FUTILITY PRUNING FLAG
         let can_do_futility = depth <= 6 && !is_in_check_before_moving && !is_pv && eval + 75 * (depth as i32) < beta;
-        
+
         // INTERNAL ITERATIVE REDUCTION
         if depth > 5 && !is_pv && tt_move.is_none() && !is_in_check_before_moving {
             new_depth = depth - 1;
@@ -832,13 +829,10 @@ impl SearchEngine {
             // LATE MOVE REDUCTION
             if depth > 1 && quiet_moves_tried > 3 && !is_capture && mv.promotion.is_none() 
                 && !is_in_check_before_moving && !move_gives_check {
-                
-                reduction = self.get_lmr_reduction(is_pv, depth, moves_tried, improving);
+                reduction = 1 + (depth / 4).min(3) + if !is_pv { 1 } else { 0 } + if !improving { 1 } else { 0 };
                 reduction = reduction.min(new_depth - 1);
-                
                 if reduction > 0 {
                     score = -self.search(board, sc, ply + 1, -alpha - 1, -alpha, new_depth - reduction, false, false);
-                    
                     if score <= alpha {
                         board.unmake_move(mv, move_info);
                         if self.timer.is_stopping {
@@ -937,7 +931,7 @@ impl SearchEngine {
         best_score
     }
     
-    // Quiescence search based on Publius
+    // Quiescence search
     pub fn quiesce(
         &mut self,
         board: &mut Board,
@@ -1159,17 +1153,26 @@ impl SearchEngine {
     }
     
     fn order_moves(&self, moves: &mut Vec<Move>, board: &Board, tt_move: Option<&Move>, ply: usize) {
-        // Simple move ordering - hash move first, then captures, then killers, then history
+        // Simple move ordering: TT move, PV move, killers, captures (MVV-LVA), history
         moves.sort_by_key(|mv| {
             let mut score = 0;
-            
-            // Hash move gets highest priority
+            // TT move highest
             if let Some(hash_mv) = tt_move {
                 if mv == hash_mv {
-                    return -10000;
+                    return -100000;
                 }
             }
-            
+            // PV move (if available in PV line)
+            // (Assume PV move is in self.pv.line[ply][0] if available)
+            if let Some(pv_move) = self.pv.get_best_move() {
+                if *mv == pv_move {
+                    return -90000;
+                }
+            }
+            // Killers
+            if self.history.is_killer(*mv, ply) {
+                score -= 8000;
+            }
             // Captures by MVV-LVA
             if let Some(victim) = mv.captured_piece {
                 score -= 1000 + crate::piece_value(victim);
@@ -1177,15 +1180,8 @@ impl SearchEngine {
                     score += crate::piece_value(attacker) / 10;
                 }
             }
-            
-            // Killers
-            if self.history.is_killer(*mv, ply) {
-                score -= 500;
-            }
-            
             // History score
             score -= self.history.get_score(board, *mv) / 100;
-            
             score
         });
     }
