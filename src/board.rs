@@ -204,10 +204,69 @@ impl Board {
         let mut game_phase = 0;
         let phase_table = [0, 1, 1, 2, 4, 0]; // Pawn, Knight, Bishop, Rook, Queen, King
 
-        // ...for each piece, accumulate mg/eg values and phase...
-        // For each term, add to mg_* and eg_*
-        // For each non-pawn, non-king piece, add phase_table[piece] to game_phase
-        // At the end, interpolate each term:
+        // Material and piece-square evaluation
+        let piece_bb = [
+            (self.white_pawns, Color::White, Piece::Pawn),
+            (self.white_knights, Color::White, Piece::Knight),
+            (self.white_bishops, Color::White, Piece::Bishop),
+            (self.white_rooks, Color::White, Piece::Rook),
+            (self.white_queens, Color::White, Piece::Queen),
+            (self.white_king, Color::White, Piece::King),
+            (self.black_pawns, Color::Black, Piece::Pawn),
+            (self.black_knights, Color::Black, Piece::Knight),
+            (self.black_bishops, Color::Black, Piece::Bishop),
+            (self.black_rooks, Color::Black, Piece::Rook),
+            (self.black_queens, Color::Black, Piece::Queen),
+            (self.black_king, Color::Black, Piece::King),
+        ];
+
+        for (mut bb, color, piece) in piece_bb {
+            let piece_idx = match piece {
+                Piece::Pawn => 0, Piece::Knight => 1, Piece::Bishop => 2,
+                Piece::Rook => 3, Piece::Queen => 4, Piece::King => 5,
+            };
+            
+            while bb != 0 {
+                let sq_idx = bb.trailing_zeros() as usize;
+                bb &= bb - 1; // Clear lowest bit
+                
+                let material_val = material_arr[piece_idx];
+                let sign = if color == Color::White { 1 } else { -1 };
+                
+                mg_material += sign * material_val;
+                eg_material += sign * material_val;
+                
+                // Add to game phase (non-pawn, non-king pieces)
+                if piece != Piece::Pawn && piece != Piece::King {
+                    game_phase += phase_table[piece_idx];
+                }
+            }
+        }
+
+        // Bishop pair bonus
+        let white_bishop_count = self.white_bishops.count_ones();
+        let black_bishop_count = self.black_bishops.count_ones();
+        if white_bishop_count >= 2 {
+            mg_bishop_pair += BISHOP_PAIR;
+            eg_bishop_pair += BISHOP_PAIR;
+        }
+        if black_bishop_count >= 2 {
+            mg_bishop_pair -= BISHOP_PAIR;
+            eg_bishop_pair -= BISHOP_PAIR;
+        }
+
+        // Tempo bonus (side to move gets small bonus)
+        if self.white_to_move {
+            mg_tempo += TEMPO;
+            eg_tempo += TEMPO;
+        } else {
+            mg_tempo -= TEMPO;
+            eg_tempo -= TEMPO;
+        }
+
+        // Sum all components
+        mg = mg_material + mg_piece_square + mg_mob + mg_king + mg_bishop_pair + mg_rook_files + mg_pawn_structure + mg_hanging + mg_tempo;
+        eg = eg_material + eg_piece_square + eg_mob + eg_king + eg_bishop_pair + eg_rook_files + eg_pawn_structure + eg_hanging + eg_tempo;
         let max_game_phase = 24;
         let mg_phase_val = game_phase.min(max_game_phase);
         let eg_phase_val = max_game_phase - mg_phase_val;
@@ -231,7 +290,29 @@ impl Board {
         }
     }
 
-    pub fn evaluate_with_breakdown(&self) -> EvalBreakdown { self.evaluate_with_breakdown_params(&EvalParams::default()) }
+    pub fn evaluate_with_breakdown(&self) -> EvalBreakdown { 
+        // Use Publius-inspired evaluation parameters
+        let publius_params = EvalParams {
+            material: [100, 320, 330, 500, 900, 0],  // Standard material values
+            mobility_knight: 4,
+            mobility_bishop: 5,
+            mobility_rook: 2,
+            mobility_queen: 1,
+            bishop_pair: 50,
+            tempo: 20,
+            isolated_pawn: 10,
+            doubled_pawn: 10,
+            backward_pawn: 8,
+            passed_base: 20,
+            passed_per_rank: 10,
+            rook_open_file: 20,
+            rook_semi_open: 10,
+            hanging_penalty: 50,
+            king_ring_attack: 8,
+            endgame_threshold: 1300,
+        };
+        self.evaluate_with_breakdown_params(&publius_params)
+    }
 
     pub(crate) fn new() -> Self {
         // Initialize bitboards for starting position
