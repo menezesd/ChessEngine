@@ -405,10 +405,46 @@ impl SearchEngine {
         })
     }
     
+    pub fn search_to_depth(&mut self, board: &mut Board, depth: u32) -> Move {
+        let mut sc = SearchContext::new();
+        sc.clear();
+        
+        self.pv.clear();
+        self.history.clear();
+        self.tt.age();
+        self.timer.start();
+        self.timer.deadline = None; // No time limit for depth search
+        
+        let best_move = self.iterate_to_depth(board, &mut sc, depth);
+        
+        // Emergency fallback if no move found
+        if let None = best_move {
+            let legal_moves = board.generate_moves();
+            if !legal_moves.is_empty() {
+                return legal_moves[0];
+            }
+        }
+        
+        best_move.unwrap_or_else(|| {
+            // Last resort - return a dummy move
+            Move {
+                from: Square(0, 0),
+                to: Square(0, 0),
+                is_castling: false,
+                is_en_passant: false,
+                promotion: None,
+                captured_piece: None,
+            }
+        })
+    }
+    
     pub fn iterate(&mut self, board: &mut Board, sc: &mut SearchContext) -> Option<Move> {
+        self.iterate_to_depth(board, sc, 50)
+    }
+    
+    pub fn iterate_to_depth(&mut self, board: &mut Board, sc: &mut SearchContext, max_depth: u32) -> Option<Move> {
         let mut val = 0;
         let mut cur_val = 0;
-        let max_depth = 50; // Default max depth
         
         for depth in 1..=max_depth {
             self.timer.root_depth = depth;

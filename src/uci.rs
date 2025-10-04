@@ -292,11 +292,10 @@ pub fn run() {
                 tt.start_new_search();
                 let mut best_move: Option<Move> = None;
                 let mut best_score: i32 = 0;
-                if let Some(_d) = fixed_depth {
-                    // Use search engine for fixed depth (with time limit)
+                if let Some(d) = fixed_depth {
+                    // Use search engine for fixed depth (no time limit)
                     let mut engine = SearchEngine::new();
-                    let time_limit = Some(Instant::now() + std::time::Duration::from_millis(5000));
-                    let mv = engine.think(&mut board, time_limit);
+                    let mv = engine.search_to_depth(&mut board, d);
                     best_score = board.evaluate();
                     best_move = Some(mv);
                 } else {
