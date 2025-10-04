@@ -451,7 +451,7 @@ impl SearchEngine {
             self.timer.refresh_stats();
             
             // Print root info
-            self.print_root_info();
+            // self.print_root_info();  // Commented out to follow UCI protocol
             
             // Stop searching because of soft time limit
             if self.timer.should_not_start_iteration() || self.timer.is_stopping {
@@ -882,7 +882,7 @@ impl SearchEngine {
                 // Display PV if at root
                 if is_root {
                     self.pv.update(ply, *mv);
-                    self.pv.display(score);
+                    // self.pv.display(score);  // Commented out to follow UCI protocol
                 }
                 
                 return score;
@@ -897,7 +897,7 @@ impl SearchEngine {
                     best_move = Some(*mv);
                     self.pv.update(ply, *mv);
                     if is_root {
-                        self.pv.display(score);
+                        // self.pv.display(score);  // Commented out to follow UCI protocol
                     }
                 }
             }
