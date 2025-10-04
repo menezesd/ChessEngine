@@ -207,8 +207,9 @@ impl Board {
         let mut wp=self.white_pawns; while wp!=0 { let sq=wp.trailing_zeros() as usize; wp&=wp-1; white_pawns_by_file[sq%8]+=1; }
         let mut bp=self.black_pawns; while bp!=0 { let sq=bp.trailing_zeros() as usize; bp&=bp-1; black_pawns_by_file[sq%8]+=1; }
         let white_bishop_count = self.white_bishops.count_ones(); let black_bishop_count = self.black_bishops.count_ones();
-        let w_king_sq = self.white_king.trailing_zeros() as usize; let b_king_sq = self.black_king.trailing_zeros() as usize;
-        let king_ring = |sq: usize| -> u64 { crate::attack_tables::get_attack_tables().king_attacks(sq) | (1u64<<sq) };
+        let w_king_sq = if self.white_king != 0 { self.white_king.trailing_zeros() as usize } else { 0 }; 
+        let b_king_sq = if self.black_king != 0 { self.black_king.trailing_zeros() as usize } else { 0 };
+        let king_ring = |sq: usize| -> u64 { if sq < 64 { crate::attack_tables::get_attack_tables().king_attacks(sq) | (1u64<<sq) } else { 0 } };
         let w_ring = king_ring(w_king_sq); let b_ring = king_ring(b_king_sq);
         let mut white_attacks: u64 = 0; let mut black_attacks: u64 = 0;
         let piece_sets = [

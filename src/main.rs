@@ -20,7 +20,7 @@ mod selfplay;
 mod tuned_eval_params; // auto-generated evaluation parameter tuning output
 
 pub(crate) use board::{Board, Move, Piece, Square};
-pub(crate) use board::{mvv_lva_score, piece_value};
+pub(crate) use board::piece_value;
 pub(crate) use tt::TranspositionTable;
 use search::SearchEngine;
 

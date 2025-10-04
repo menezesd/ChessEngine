@@ -1,4 +1,3 @@
-use crate::mvv_lva_score;
 use crate::search::SearchEngine;
 use crate::{Board, Move, TranspositionTable};
 use std::io::{self, BufRead, Write};
@@ -89,181 +88,6 @@ pub fn parse_position_command(board: &mut Board, parts: &[&str]) {
             i += 1;
         }
     }
-}
-
-pub fn find_best_move_with_time(
-    board: &mut Board,
-    tt: &mut TranspositionTable,
-    max_time: Duration,
-    start_time: Instant,
-) -> Option<Move> {
-    let mut best_move: Option<Move> = None;
-    let mut depth = 1;
-    let mut last_depth_time = Duration::from_millis(1);
-    const SAFETY_MARGIN: Duration = Duration::from_millis(5);
-    const TIME_GROWTH_FACTOR: f32 = 2.0;
-    let mut engine = SearchEngine::new();
-    // Provide a soft deadline so search can abort cleanly before the hard limit
-    let soft = max_time.saturating_sub(SAFETY_MARGIN);
-    engine.timer.deadline = Some(start_time + soft);
-    let mut best_score = -crate::MATE_SCORE * 2;
-    while start_time.elapsed() + SAFETY_MARGIN < max_time {
-        let elapsed = start_time.elapsed();
-        let time_remaining = max_time.checked_sub(elapsed).unwrap_or_default();
-        if last_depth_time.mul_f32(TIME_GROWTH_FACTOR) + SAFETY_MARGIN > time_remaining {
-            break;
-        }
-        let depth_start = Instant::now();
-        let nodes_before = engine.timer.node_count;
-        let mut legal_moves = board.generate_moves();
-        if legal_moves.is_empty() {
-            return None;
-        }
-        if legal_moves.len() == 1 {
-            return Some(legal_moves[0]);
-        }
-        legal_moves.sort_by_key(|m| -mvv_lva_score(m, board));
-        if let Some(entry) = tt.probe(board.hash) {
-            if let Some(hm) = &entry.best_move {
-                if let Some(pos) = legal_moves.iter().position(|m| m == hm) {
-                    legal_moves.swap(0, pos);
-                }
-            }
-        }
-        // Adaptive aspiration window
-        let (mut alpha, mut beta) = if depth <= 3 || best_move.is_none() {
-            // Wide window for shallow depths or first search
-            (-crate::MATE_SCORE * 2, crate::MATE_SCORE * 2)
-        } else {
-            // Narrow window based on previous score and depth
-            let window = if depth <= 6 { 25 } else if depth <= 10 { 50 } else { 75 };
-            (best_score - window, best_score + window)
-        };
-        
-        let mut searches = 0;
-        let mut new_best_move: Option<Move>;
-        let mut fail_high_count = 0;
-        let mut fail_low_count = 0;
-        
-        loop {
-            searches += 1;
-            new_best_move = None;
-            best_score = -crate::MATE_SCORE * 2;
-            
-            for m in &legal_moves {
-                if start_time.elapsed() + SAFETY_MARGIN >= max_time { break; }
-                let info = board.make_move(m);
-                let mut sc = crate::search::SearchContext::new();
-                let score = -engine.search(board, &mut sc, 1, -beta, -alpha, depth - 1, false, false);
-                board.unmake_move(m, info);
-                if score > best_score { best_score = score; new_best_move = Some(*m); }
-                alpha = alpha.max(best_score);
-                if alpha >= beta { break; }
-            }
-            
-            if start_time.elapsed() + SAFETY_MARGIN >= max_time { break; }
-            
-            // Check aspiration window bounds
-            if best_score <= alpha {
-                // Fail low - widen down
-                fail_low_count += 1;
-                let expand = if fail_low_count == 1 { 75 } else { 200 };
-                alpha = best_score - expand;
-                if searches >= 3 { alpha = -crate::MATE_SCORE * 2; }
-            } else if best_score >= beta {
-                // Fail high - widen up
-                fail_high_count += 1;
-                let expand = if fail_high_count == 1 { 75 } else { 200 };
-                beta = best_score + expand;
-                if searches >= 3 { beta = crate::MATE_SCORE * 2; }
-            } else {
-                // Score within window - success
-                break;
-            }
-            
-            if searches >= 4 {
-                // Give up on aspiration after too many searches
-                alpha = -crate::MATE_SCORE * 2;
-                beta = crate::MATE_SCORE * 2;
-            }
-            
-            // Move best move to front for re-search
-            if let Some(mv) = new_best_move {
-                if let Some(pos) = legal_moves.iter().position(|m| *m == mv) {
-                    legal_moves.swap(0, pos);
-                }
-            }
-        }
-        if start_time.elapsed() + SAFETY_MARGIN < max_time {
-            best_move = new_best_move;
-            last_depth_time = depth_start.elapsed();
-            // History aging is handled internally by the SearchEngine
-            // Print UCI info for this completed depth
-            let depth_time = last_depth_time.as_millis().max(1) as u128;
-            let nodes = (engine.timer.node_count - nodes_before) as u128;
-            let nps = (nodes * 1000) / depth_time;
-            let pv = board.extract_pv(tt, 30);
-            let pv_str = pv.iter().map(|m| format_uci_move(m)).collect::<Vec<_>>().join(" ");
-            println!("info depth {} score cp {} time {} nodes {} nps {} pv {}",
-                depth,
-                best_score,
-                last_depth_time.as_millis(),
-                nodes,
-                nps,
-                pv_str);
-            depth += 1;
-        } else {
-            // Time ran out mid-depth; keep the best move found in this iteration.
-            if best_move.is_none() { best_move = new_best_move; }
-            break;
-        }
-    }
-    best_move
-}
-
-pub fn find_best_move_fixed_depth(
-    board: &mut Board,
-    tt: &mut TranspositionTable,
-    max_depth: u32,
-) -> Option<Move> {
-    let mut best_move: Option<Move> = None;
-    let mut engine = SearchEngine::new();
-    let mut best_score = -crate::MATE_SCORE * 2;
-    for depth in 1..=max_depth {
-        let nodes_before = engine.timer.node_count;
-        let mut legal_moves = board.generate_moves();
-        if legal_moves.is_empty() { return None; }
-        if legal_moves.len() == 1 { return Some(legal_moves[0]); }
-        legal_moves.sort_by_key(|m| -mvv_lva_score(m, board));
-        if let Some(entry) = tt.probe(board.hash) { if let Some(hm) = &entry.best_move { if let Some(pos) = legal_moves.iter().position(|m| m == hm) { legal_moves.swap(0, pos); } } }
-        let mut alpha = -crate::MATE_SCORE * 2;
-        let mut beta = crate::MATE_SCORE * 2;
-        best_score = -crate::MATE_SCORE * 2;
-        let mut new_best_move: Option<Move> = None;
-        for m in &legal_moves {
-            let info = board.make_move(m);
-            let mut sc = crate::search::SearchContext::new();
-            let score = -engine.search(board, &mut sc, 1, -beta, -alpha, depth - 1, false, false);
-            board.unmake_move(m, info);
-            if score > best_score { best_score = score; new_best_move = Some(*m); }
-            alpha = alpha.max(best_score);
-            if alpha >= beta { break; }
-        }
-        best_move = new_best_move;
-        // Per-depth info
-        let nodes = (engine.timer.node_count - nodes_before) as u128;
-        // No wall-clock here; report time as 0 and nps as nodes (pseudo)
-        let pv = board.extract_pv(tt, 30);
-        let pv_str = pv.iter().map(|m| format_uci_move(m)).collect::<Vec<_>>().join(" ");
-        println!("info depth {} score cp {} time {} nodes {} nps {} pv {}",
-            depth,
-            best_score,
-            0,
-            nodes,
-            nodes,
-            pv_str);
-    }
-    best_move
 }
 
 pub fn run() {
@@ -476,14 +300,13 @@ pub fn run() {
                     best_score = board.evaluate();
                     best_move = Some(mv);
                 } else {
+                    // Use engine.think() instead of find_best_move_with_time for better search quality
                     let max_time = movetime.unwrap_or_else(|| time_left / 30 + inc);
-                    let start = Instant::now();
-                    best_move = find_best_move_with_time(&mut board, &mut tt, max_time, start);
-                    if let Some(ref mv) = best_move {
-                        let info = board.make_move(mv);
-                        best_score = board.evaluate();
-                        board.unmake_move(mv, info);
-                    }
+                    let mut engine = SearchEngine::new();
+                    let time_limit = Some(Instant::now() + max_time);
+                    let mv = engine.think(&mut board, time_limit);
+                    best_score = board.evaluate();
+                    best_move = Some(mv);
                 }
                 // Always print a final info score line before bestmove
                 if let Some(ref mv) = best_move {

@@ -1,0 +1,9 @@
+[Event "ChessEngine vs Stockfish"]
+[Site "?"]
+[Date "2025.10.04"]
+[Round "?"]
+[White "ChessEngine"]
+[Black "Stockfish"]
+[Result "*"]
+
+1. g3 d5 2. Na3 e5 3. e3 h5 4. Nb1 Nc6 5. Na3 h4 6. Ne2 Bg4 7. d3 hxg3 8. Nb1 Qf6 9. fxg3 Bf3 10. Nd2 Bxh1 11. Nb1 Rxh2 12. Nd2 Qf2# *
