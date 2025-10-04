@@ -236,6 +236,16 @@ impl Board {
                 mg_material += sign * material_val;
                 eg_material += sign * material_val;
                 
+                // Piece-square table values
+                let pst_sq = if color == Color::White {
+                    sq_idx
+                } else {
+                    // Flip for black perspective
+                    (7 - sq_idx / 8) * 8 + (sq_idx % 8)
+                };
+                mg_piece_square += sign * PST_MG[piece_idx][pst_sq];
+                eg_piece_square += sign * PST_EG[piece_idx][pst_sq];
+                
                 // Add to game phase (non-pawn, non-king pieces)
                 if piece != Piece::Pawn && piece != Piece::King {
                     game_phase += phase_table[piece_idx];
@@ -255,6 +265,248 @@ impl Board {
             eg_bishop_pair -= BISHOP_PAIR;
         }
 
+        // Mobility evaluation
+        let all_occ = self.all_pieces();
+        let white_occ = self.white_pieces();
+        let black_occ = self.black_pieces();
+        
+        // White mobility
+        let mut white_knights = self.white_knights;
+        while white_knights != 0 {
+            let sq = white_knights.trailing_zeros() as usize;
+            white_knights &= white_knights - 1;
+            let mobility = crate::attack_tables::get_attack_tables()
+                .knight_attacks(sq).count_ones() as i32;
+            mg_mob += mobility * MOBILITY_KNIGHT;
+            eg_mob += mobility * MOBILITY_KNIGHT;
+        }
+        
+        let mut white_bishops = self.white_bishops;
+        while white_bishops != 0 {
+            let sq = white_bishops.trailing_zeros() as usize;
+            white_bishops &= white_bishops - 1;
+            let mobility = crate::bitboards::bishop_attacks_from(
+                Square(sq / 8, sq % 8), all_occ
+            ).count_ones() as i32;
+            mg_mob += mobility * MOBILITY_BISHOP;
+            eg_mob += mobility * MOBILITY_BISHOP;
+        }
+        
+        let mut white_rooks = self.white_rooks;
+        while white_rooks != 0 {
+            let sq = white_rooks.trailing_zeros() as usize;
+            white_rooks &= white_rooks - 1;
+            let mobility = crate::bitboards::rook_attacks_from(
+                Square(sq / 8, sq % 8), all_occ
+            ).count_ones() as i32;
+            mg_mob += mobility * MOBILITY_ROOK;
+            eg_mob += mobility * MOBILITY_ROOK;
+            
+            // Rook on open/semi-open files
+            let file = sq % 8;
+            let file_mask = 0x0101010101010101u64 << file;
+            let white_pawns_on_file = (self.white_pawns & file_mask).count_ones();
+            let black_pawns_on_file = (self.black_pawns & file_mask).count_ones();
+            
+            if white_pawns_on_file == 0 && black_pawns_on_file == 0 {
+                mg_rook_files += ROOK_OPEN_FILE;
+                eg_rook_files += ROOK_OPEN_FILE;
+            } else if white_pawns_on_file == 0 {
+                mg_rook_files += ROOK_SEMI_OPEN;
+                eg_rook_files += ROOK_SEMI_OPEN;
+            }
+        }
+        
+        let mut white_queens = self.white_queens;
+        while white_queens != 0 {
+            let sq = white_queens.trailing_zeros() as usize;
+            white_queens &= white_queens - 1;
+            let bishop_mob = crate::bitboards::bishop_attacks_from(
+                Square(sq / 8, sq % 8), all_occ
+            ).count_ones() as i32;
+            let rook_mob = crate::bitboards::rook_attacks_from(
+                Square(sq / 8, sq % 8), all_occ
+            ).count_ones() as i32;
+            let mobility = bishop_mob + rook_mob;
+            mg_mob += mobility * MOBILITY_QUEEN;
+            eg_mob += mobility * MOBILITY_QUEEN;
+        }
+        
+        // Black mobility (subtract)
+        let mut black_knights = self.black_knights;
+        while black_knights != 0 {
+            let sq = black_knights.trailing_zeros() as usize;
+            black_knights &= black_knights - 1;
+            let mobility = crate::attack_tables::get_attack_tables()
+                .knight_attacks(sq).count_ones() as i32;
+            mg_mob -= mobility * MOBILITY_KNIGHT;
+            eg_mob -= mobility * MOBILITY_KNIGHT;
+        }
+        
+        let mut black_bishops = self.black_bishops;
+        while black_bishops != 0 {
+            let sq = black_bishops.trailing_zeros() as usize;
+            black_bishops &= black_bishops - 1;
+            let mobility = crate::bitboards::bishop_attacks_from(
+                Square(sq / 8, sq % 8), all_occ
+            ).count_ones() as i32;
+            mg_mob -= mobility * MOBILITY_BISHOP;
+            eg_mob -= mobility * MOBILITY_BISHOP;
+        }
+        
+        let mut black_rooks = self.black_rooks;
+        while black_rooks != 0 {
+            let sq = black_rooks.trailing_zeros() as usize;
+            black_rooks &= black_rooks - 1;
+            let mobility = crate::bitboards::rook_attacks_from(
+                Square(sq / 8, sq % 8), all_occ
+            ).count_ones() as i32;
+            mg_mob -= mobility * MOBILITY_ROOK;
+            eg_mob -= mobility * MOBILITY_ROOK;
+            
+            // Rook on open/semi-open files
+            let file = sq % 8;
+            let file_mask = 0x0101010101010101u64 << file;
+            let white_pawns_on_file = (self.white_pawns & file_mask).count_ones();
+            let black_pawns_on_file = (self.black_pawns & file_mask).count_ones();
+            
+            if white_pawns_on_file == 0 && black_pawns_on_file == 0 {
+                mg_rook_files -= ROOK_OPEN_FILE;
+                eg_rook_files -= ROOK_OPEN_FILE;
+            } else if black_pawns_on_file == 0 {
+                mg_rook_files -= ROOK_SEMI_OPEN;
+                eg_rook_files -= ROOK_SEMI_OPEN;
+            }
+        }
+        
+        let mut black_queens = self.black_queens;
+        while black_queens != 0 {
+            let sq = black_queens.trailing_zeros() as usize;
+            black_queens &= black_queens - 1;
+            let bishop_mob = crate::bitboards::bishop_attacks_from(
+                Square(sq / 8, sq % 8), all_occ
+            ).count_ones() as i32;
+            let rook_mob = crate::bitboards::rook_attacks_from(
+                Square(sq / 8, sq % 8), all_occ
+            ).count_ones() as i32;
+            let mobility = bishop_mob + rook_mob;
+            mg_mob -= mobility * MOBILITY_QUEEN;
+            eg_mob -= mobility * MOBILITY_QUEEN;
+        }
+        
+        // Pawn structure evaluation
+        for file in 0..8 {
+            let file_mask = 0x0101010101010101u64 << file;
+            let white_pawns_on_file = (self.white_pawns & file_mask).count_ones();
+            let black_pawns_on_file = (self.black_pawns & file_mask).count_ones();
+            
+            // Doubled pawns
+            if white_pawns_on_file > 1 {
+                mg_pawn_structure -= DOUBLED_PAWN * (white_pawns_on_file as i32 - 1);
+                eg_pawn_structure -= DOUBLED_PAWN * (white_pawns_on_file as i32 - 1);
+            }
+            if black_pawns_on_file > 1 {
+                mg_pawn_structure += DOUBLED_PAWN * (black_pawns_on_file as i32 - 1);
+                eg_pawn_structure += DOUBLED_PAWN * (black_pawns_on_file as i32 - 1);
+            }
+            
+            // Isolated pawns
+            let left_file = if file > 0 { file - 1 } else { 0 };
+            let right_file = if file < 7 { file + 1 } else { 7 };
+            let adjacent_mask = if file == 0 {
+                0x0202020202020202u64
+            } else if file == 7 {
+                0x4040404040404040u64
+            } else {
+                (0x0101010101010101u64 << left_file) | (0x0101010101010101u64 << right_file)
+            };
+            
+            if white_pawns_on_file > 0 && (self.white_pawns & adjacent_mask) == 0 {
+                mg_pawn_structure -= ISOLATED_PAWN;
+                eg_pawn_structure -= ISOLATED_PAWN;
+            }
+            if black_pawns_on_file > 0 && (self.black_pawns & adjacent_mask) == 0 {
+                mg_pawn_structure += ISOLATED_PAWN;
+                eg_pawn_structure += ISOLATED_PAWN;
+            }
+        }
+        
+        // King safety (simplified - count attacks on king ring)
+        let white_king_sq = self.white_king.trailing_zeros() as usize;
+        let black_king_sq = self.black_king.trailing_zeros() as usize;
+        
+        let white_king_ring = crate::attack_tables::get_attack_tables().king_attacks(white_king_sq);
+        let black_king_ring = crate::attack_tables::get_attack_tables().king_attacks(black_king_sq);
+        
+        // Count black attacks on white king ring
+        let mut black_attacks_on_white_king = 0;
+        let mut bb = black_occ & !self.black_king; // All black pieces except king
+        while bb != 0 {
+            let sq = bb.trailing_zeros() as usize;
+            bb &= bb - 1;
+            
+            let attacks = match self.piece_at(Square(sq / 8, sq % 8)).unwrap().1 {
+                Piece::Pawn => {
+                    let rank = sq / 8;
+                    let file = sq % 8;
+                    let mut pawn_attacks = 0u64;
+                    if rank > 0 {
+                        if file > 0 { pawn_attacks |= 1u64 << ((rank - 1) * 8 + file - 1); }
+                        if file < 7 { pawn_attacks |= 1u64 << ((rank - 1) * 8 + file + 1); }
+                    }
+                    pawn_attacks
+                },
+                Piece::Knight => crate::attack_tables::get_attack_tables().knight_attacks(sq),
+                Piece::Bishop => crate::bitboards::bishop_attacks_from(Square(sq / 8, sq % 8), all_occ),
+                Piece::Rook => crate::bitboards::rook_attacks_from(Square(sq / 8, sq % 8), all_occ),
+                Piece::Queen => {
+                    crate::bitboards::bishop_attacks_from(Square(sq / 8, sq % 8), all_occ) |
+                    crate::bitboards::rook_attacks_from(Square(sq / 8, sq % 8), all_occ)
+                },
+                Piece::King => crate::attack_tables::get_attack_tables().king_attacks(sq),
+            };
+            
+            if (attacks & white_king_ring) != 0 {
+                black_attacks_on_white_king += (attacks & white_king_ring).count_ones() as i32;
+            }
+        }
+        
+        // Count white attacks on black king ring
+        let mut white_attacks_on_black_king = 0;
+        let mut bb = white_occ & !self.white_king;
+        while bb != 0 {
+            let sq = bb.trailing_zeros() as usize;
+            bb &= bb - 1;
+            
+            let attacks = match self.piece_at(Square(sq / 8, sq % 8)).unwrap().1 {
+                Piece::Pawn => {
+                    let rank = sq / 8;
+                    let file = sq % 8;
+                    let mut pawn_attacks = 0u64;
+                    if rank < 7 {
+                        if file > 0 { pawn_attacks |= 1u64 << ((rank + 1) * 8 + file - 1); }
+                        if file < 7 { pawn_attacks |= 1u64 << ((rank + 1) * 8 + file + 1); }
+                    }
+                    pawn_attacks
+                },
+                Piece::Knight => crate::attack_tables::get_attack_tables().knight_attacks(sq),
+                Piece::Bishop => crate::bitboards::bishop_attacks_from(Square(sq / 8, sq % 8), all_occ),
+                Piece::Rook => crate::bitboards::rook_attacks_from(Square(sq / 8, sq % 8), all_occ),
+                Piece::Queen => {
+                    crate::bitboards::bishop_attacks_from(Square(sq / 8, sq % 8), all_occ) |
+                    crate::bitboards::rook_attacks_from(Square(sq / 8, sq % 8), all_occ)
+                },
+                Piece::King => crate::attack_tables::get_attack_tables().king_attacks(sq),
+            };
+            
+            if (attacks & black_king_ring) != 0 {
+                white_attacks_on_black_king += (attacks & black_king_ring).count_ones() as i32;
+            }
+        }
+        
+        mg_king += (white_attacks_on_black_king - black_attacks_on_white_king) * KING_RING_ATTACK;
+        eg_king += (white_attacks_on_black_king - black_attacks_on_white_king) * KING_RING_ATTACK;
+        
         // Tempo bonus (side to move gets small bonus)
         if self.white_to_move {
             mg_tempo += TEMPO;
