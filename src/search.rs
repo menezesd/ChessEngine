@@ -666,7 +666,7 @@ impl SearchEngine {
                 }
                 
                 // NULL MOVE VERIFICATION
-                if depth - reduction > 5 && score >= beta {
+                if depth.saturating_sub(reduction) > 5 && score >= beta {
                     score = self.search(board, sc, ply, alpha, beta, depth.saturating_sub(reduction + 4), true, false);
                 }
                 

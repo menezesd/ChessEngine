@@ -1,0 +1,24 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Training data files (optional - you may want to include these)
+*.csv
+__pycache__/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Log files
+*.log

@@ -302,6 +302,30 @@ pub fn run() {
                 let score = board.evaluate();
                 println!("Static evaluation: {}", score);
             }
+            "evalbreakdown" => {
+                let br = board.evaluate_with_breakdown();
+                let feats = crate::feature_export::extract_features(&board); // includes granular counts
+                println!("Eval breakdown: material={} pst={} mobility={} king_ring={} bishop_pair={} rook_files={} pawn_structure={} hanging={} tempo={} pre_scale={} scaled={}",
+                    br.material, br.piece_square, br.mobility, br.king_ring, br.bishop_pair, br.rook_files, br.pawn_structure, br.hanging, br.tempo, br.pre_scale_total, br.scaled_total);
+                println!("Granular: mob_kn_w={} mob_kn_b={} mob_bi_w={} mob_bi_b={} mob_r_w={} mob_r_b={} mob_q_w={} mob_q_b={} isolated_w={} isolated_b={} doubled_w={} doubled_b={} backward_w={} backward_b={} passed_w={} passed_b={} kingring_attacks_w={} kingring_attacks_b={}",
+                    feats.mob_kn_w,feats.mob_kn_b,feats.mob_bi_w,feats.mob_bi_b,feats.mob_r_w,feats.mob_r_b,feats.mob_q_w,feats.mob_q_b,feats.isolated_w,feats.isolated_b,feats.doubled_w,feats.doubled_b,feats.backward_w,feats.backward_b,feats.passed_w,feats.passed_b,feats.kingring_attacks_w,feats.kingring_attacks_b);
+            }
+            "dumpfeatures" => {
+                // dumpfeatures json|csv (default json)
+                let format = parts.get(1).copied().unwrap_or("json").to_lowercase();
+                let f = crate::feature_export::extract_features(&board);
+                if format=="csv" {
+                    println!("{}", crate::feature_export::ExportedFeatures::csv_header());
+                    println!("{}", f.to_csv_line());
+                } else {
+                    // Manual JSON serialization to avoid adding serde dependency
+                    println!("{{\n  \"fen\": \"{}\",\n  \"material\": {},\n  \"piece_square\": {},\n  \"mobility\": {},\n  \"king_ring\": {},\n  \"bishop_pair\": {},\n  \"rook_files\": {},\n  \"pawn_structure\": {},\n  \"hanging\": {},\n  \"tempo\": {},\n  \"scaled_eval\": {},\n  \"pre_scale_eval\": {},\n  \"mob_kn_w\": {}, \"mob_kn_b\": {}, \"mob_bi_w\": {}, \"mob_bi_b\": {}, \"mob_r_w\": {}, \"mob_r_b\": {}, \"mob_q_w\": {}, \"mob_q_b\": {},\n  \"isolated_w\": {}, \"isolated_b\": {}, \"doubled_w\": {}, \"doubled_b\": {}, \"backward_w\": {}, \"backward_b\": {}, \"passed_w\": {}, \"passed_b\": {},\n  \"kingring_attacks_w\": {}, \"kingring_attacks_b\": {}\n}}",
+                        f.fen,f.material,f.piece_square,f.mobility,f.king_ring,f.bishop_pair,f.rook_files,f.pawn_structure,f.hanging,f.tempo,f.scaled_eval,f.pre_scale_eval,
+                        f.mob_kn_w,f.mob_kn_b,f.mob_bi_w,f.mob_bi_b,f.mob_r_w,f.mob_r_b,f.mob_q_w,f.mob_q_b,
+                        f.isolated_w,f.isolated_b,f.doubled_w,f.doubled_b,f.backward_w,f.backward_b,f.passed_w,f.passed_b,
+                        f.kingring_attacks_w,f.kingring_attacks_b);
+                }
+            }
             "testmoves" => {
                 println!("Testing individual moves:");
                 let moves = board.generate_moves();

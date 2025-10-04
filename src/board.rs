@@ -129,7 +129,118 @@ pub(crate) struct Board {
     pub(crate) position_history: Vec<u64>,
 }
 
+// Evaluation component breakdown for instrumentation / tuning
+pub struct EvalBreakdown {
+        pub material: i32,
+        pub piece_square: i32,
+        pub mobility: i32,
+        pub king_ring: i32,
+        pub bishop_pair: i32,
+        pub rook_files: i32,
+        pub pawn_structure: i32,
+        pub hanging: i32,
+        pub tempo: i32,
+        pub endgame_scale_applied: bool,
+        pub scaled_total: i32,
+        pub pre_scale_total: i32,
+}
+
+// Centralized tunable parameters
+#[derive(Clone)]
+pub struct EvalParams {
+    pub material: [i32;6],
+    pub mobility_knight: i32,
+    pub mobility_bishop: i32,
+    pub mobility_rook: i32,
+    pub mobility_queen: i32,
+    pub bishop_pair: i32,
+    pub tempo: i32,
+    pub isolated_pawn: i32,
+    pub doubled_pawn: i32,
+    pub backward_pawn: i32,
+    pub passed_base: i32,
+    pub passed_per_rank: i32,
+    pub rook_open_file: i32,
+    pub rook_semi_open: i32,
+    pub hanging_penalty: i32,
+    pub king_ring_attack: i32,
+    pub endgame_threshold: i32,
+}
+
+impl Default for EvalParams {
+    fn default() -> Self { Self {
+        material: [100,325,330,500,950,0],
+        mobility_knight:4, mobility_bishop:5, mobility_rook:3, mobility_queen:2,
+        bishop_pair:30, tempo:8,
+        isolated_pawn:15, doubled_pawn:12, backward_pawn:10,
+        passed_base:12, passed_per_rank:8,
+        rook_open_file:15, rook_semi_open:7,
+        hanging_penalty:20, king_ring_attack:4,
+        endgame_threshold:2000,
+    }}
+}
+
 impl Board {
+    pub fn evaluate_with_breakdown_params(&self, params: &EvalParams) -> EvalBreakdown {
+        // Constants duplicated (could be DRY'd via associated consts)
+        let material_arr = params.material;
+        const PST: [[i32;64];6] = [
+            [0,0,0,0,0,0,0,0, -5,-1,-6,-8,-3, 3, 6,-4, -8,-2,-2,-4, 1, 1, 8,-3, -6, 0,-3,-1,-1,-2, 1,-1,  6, 4, 3, 2,-2, 0, 7, 7, 30,32,27,21,18,17,26,27, 80,78,72,61,66,59,74,84, 0,0,0,0,0,0,0,0],
+            [-50,-10,-40,-30,-20,-30,-10,-20,-20,-40,-10, 0, 0,15,-10,-15,-25,-5,10,10,15,10, 5,-15,-10, 5,15,10,25,15,15, 0, -5,10,15,40,25,30,10,15, -5,25,15,30,40,60,35,20, -35,-20,35,20,10,30, 5,-10,-80,-40,-15,-25,30,-50,-10,-60],
+            [-20,-5,-10,-15,-10,-10,-25,-15, 5,15,15, 5,10,20,30, 0, 0,15,15,15,15,25,18,10, -5,15,15,25,30,12,10, 5, -5, 5,19,35,25,35, 7, 0,-10,37,40,38,35,45,37, 0,-15,16,-18,-13,15,30,20, 10,22,22,27,27,19,10,20, 0],
+            [-10, 0, 5,10,10, 5,-20,-15,-25,-5,-10,-5, 0,10,-5,-25,-25,-10, 0,-5, 5, 0,-5,-15,-15,-10, 5,10,15,10, 5,-10,-10, 5, 5,10,15,10, 2, 0, -5,15,15,15,15,20,10, 5, 5,10,10,10,10,15, 8, 8, 5,10,10,10,10, 5, 0, 0],
+            [-30,-25,-20,-40,-10,-30,-15,-30,-15,-15,-25,-15,-15,-15,-25,-20,-10,-20,10, 5,10,15, 8, 5,-10,20,15,30,25,20,25,15, 0,15,20,35,45,30,45,25, -5,10,15,35,35,25,15,10,-15,10,15,25,35,15,20, 0, 0,15,15,20,20,10,15, 0],
+            [-10,30,12,-30,10,-20,25,10, 5,10, 0,-30,-20,-10, 5, 5,-10,-10,-15,-30,-30,-20,-10,-20,-30, 0,-20,-25,-30,-25,-20,-30,-15,-20,-10,-20,-20,-15,-10,-20,-10,15, 5,-5,-10, 5,15, 5, 5,-10,-5, -5, -5,-25,-20,-30, 5,-10, 2, 0,0,0,0,0]
+        ];
+    let (MOBILITY_KNIGHT,MOBILITY_BISHOP,MOBILITY_ROOK,MOBILITY_QUEEN) = (params.mobility_knight,params.mobility_bishop,params.mobility_rook,params.mobility_queen);
+    let (BISHOP_PAIR,TEMPO) = (params.bishop_pair, params.tempo);
+    let (ISOLATED_PAWN,DOUBLED_PAWN,BACKWARD_PAWN) = (params.isolated_pawn, params.doubled_pawn, params.backward_pawn);
+    let (PASSED_BASE,PASSED_PER_RANK) = (params.passed_base, params.passed_per_rank);
+    let (ROOK_OPEN_FILE,ROOK_SEMI_OPEN) = (params.rook_open_file, params.rook_semi_open);
+    let (HANGING_PENALTY,KING_RING_ATTACK) = (params.hanging_penalty, params.king_ring_attack);
+
+    let mut material = 0; let mut piece_square = 0; let mut mobility = 0; let mut king_ring_score = 0; let mut bishop_pair_score = 0; let mut rook_files = 0; let mut pawn_structure = 0; let mut hanging = 0; let mut tempo = 0;
+        let us_white = self.white_to_move; let occ = self.all_pieces();
+
+        // File pawn counts
+        let mut white_pawns_by_file=[0u8;8]; let mut black_pawns_by_file=[0u8;8];
+        let mut wp=self.white_pawns; while wp!=0 { let sq=wp.trailing_zeros() as usize; wp&=wp-1; white_pawns_by_file[sq%8]+=1; }
+        let mut bp=self.black_pawns; while bp!=0 { let sq=bp.trailing_zeros() as usize; bp&=bp-1; black_pawns_by_file[sq%8]+=1; }
+        let white_bishop_count = self.white_bishops.count_ones(); let black_bishop_count = self.black_bishops.count_ones();
+        let w_king_sq = self.white_king.trailing_zeros() as usize; let b_king_sq = self.black_king.trailing_zeros() as usize;
+        let king_ring = |sq: usize| -> u64 { crate::attack_tables::get_attack_tables().king_attacks(sq) | (1u64<<sq) };
+        let w_ring = king_ring(w_king_sq); let b_ring = king_ring(b_king_sq);
+        let mut white_attacks: u64 = 0; let mut black_attacks: u64 = 0;
+        let piece_sets = [
+            (self.white_pawns, Color::White, Piece::Pawn),(self.white_knights,Color::White,Piece::Knight),(self.white_bishops,Color::White,Piece::Bishop),(self.white_rooks,Color::White,Piece::Rook),(self.white_queens,Color::White,Piece::Queen),(self.white_king,Color::White,Piece::King),
+            (self.black_pawns, Color::Black, Piece::Pawn),(self.black_knights,Color::Black,Piece::Knight),(self.black_bishops,Color::Black,Piece::Bishop),(self.black_rooks,Color::Black,Piece::Rook),(self.black_queens,Color::Black,Piece::Queen),(self.black_king,Color::Black,Piece::King),
+        ];
+    for (mut bb,color,piece) in piece_sets { while bb!=0 { let sq = bb.trailing_zeros() as usize; bb&=bb-1; let rank=sq/8; let file=sq%8; let mirrored=7-rank; let psq_index = if color==Color::White {rank*8+file} else {mirrored*8+file}; let base = material_arr[match piece{Piece::Pawn=>0,Piece::Knight=>1,Piece::Bishop=>2,Piece::Rook=>3,Piece::Queen=>4,Piece::King=>5}]; let psq = PST[match piece{Piece::Pawn=>0,Piece::Knight=>1,Piece::Bishop=>2,Piece::Rook=>3,Piece::Queen=>4,Piece::King=>5}][psq_index]; if color==Color::White { material+=base; piece_square+=psq; } else { material-=base; piece_square-=psq; }
+            use crate::bitboards as bbm; let sq_struct = Square(rank,file); let targets:u64 = match piece { Piece::Knight=>bbm::knight_attacks_from(sq_struct) & !self.pieces_of_color(color), Piece::Bishop=>bbm::bishop_attacks_from(sq_struct, occ) & !self.pieces_of_color(color), Piece::Rook=>bbm::rook_attacks_from(sq_struct, occ) & !self.pieces_of_color(color), Piece::Queen=>(bbm::rook_attacks_from(sq_struct,occ)|bbm::bishop_attacks_from(sq_struct,occ)) & !self.pieces_of_color(color), Piece::King=>bbm::king_attacks_from(sq_struct) & !self.pieces_of_color(color), Piece::Pawn=>{ let attacks = if color==Color::White { crate::attack_tables::get_attack_tables().pawn_attacks(sq,0)} else { crate::attack_tables::get_attack_tables().pawn_attacks(sq,1)}; attacks & !self.pieces_of_color(color)} }; let mob_cnt = targets.count_ones() as i32; let mob_val = match piece { Piece::Knight=>mob_cnt*MOBILITY_KNIGHT, Piece::Bishop=>mob_cnt*MOBILITY_BISHOP, Piece::Rook=>mob_cnt*MOBILITY_ROOK, Piece::Queen=>mob_cnt*MOBILITY_QUEEN, _=>0 }; if color==Color::White { mobility+=mob_val; king_ring_score += (targets & b_ring).count_ones() as i32 * KING_RING_ATTACK; white_attacks|=targets; } else { mobility-=mob_val; king_ring_score -= (targets & w_ring).count_ones() as i32 * KING_RING_ATTACK; black_attacks|=targets; } } }
+    if white_bishop_count>=2 { bishop_pair_score += BISHOP_PAIR; } if black_bishop_count>=2 { bishop_pair_score -= BISHOP_PAIR; }
+        // Rook files
+        let mut wr=self.white_rooks; while wr!=0 { let sq=wr.trailing_zeros() as usize; wr&=wr-1; let f=sq%8; let file_pawns = white_pawns_by_file[f]+black_pawns_by_file[f]; if file_pawns==0 { rook_files += ROOK_OPEN_FILE; } else if black_pawns_by_file[f]==0 { rook_files += ROOK_SEMI_OPEN; } }
+        let mut br=self.black_rooks; while br!=0 { let sq=br.trailing_zeros() as usize; br&=br-1; let f=sq%8; let file_pawns = white_pawns_by_file[f]+black_pawns_by_file[f]; if file_pawns==0 { rook_files -= ROOK_OPEN_FILE; } else if white_pawns_by_file[f]==0 { rook_files -= ROOK_SEMI_OPEN; } }
+        // Pawn structure loop (similar to evaluate)
+        let file_mask = |f:usize| -> u64 {0x0101010101010101u64 << f};
+    for f in 0..8 { if white_pawns_by_file[f] > 1 { pawn_structure -= DOUBLED_PAWN as i32 * (white_pawns_by_file[f] as i32 -1); } if black_pawns_by_file[f] > 1 { pawn_structure += DOUBLED_PAWN as i32 * (black_pawns_by_file[f] as i32 -1); } let left= if f>0 {white_pawns_by_file[f-1]} else {0}; let right= if f<7 {white_pawns_by_file[f+1]} else {0}; if white_pawns_by_file[f]>0 && left==0 && right==0 { pawn_structure -= ISOLATED_PAWN; } let leftb= if f>0 {black_pawns_by_file[f-1]} else {0}; let rightb= if f<7 {black_pawns_by_file[f+1]} else {0}; if black_pawns_by_file[f]>0 && leftb==0 && rightb==0 { pawn_structure += ISOLATED_PAWN; }
+            let mut wp_file = self.white_pawns & file_mask(f); while wp_file!=0 { let sq=wp_file.trailing_zeros() as usize; wp_file&=wp_file-1; let rank=sq/8; let mut blocked=false; 'outer: for cf in f.saturating_sub(1)..=usize::min(f+1,7){ let mut bp_scan=self.black_pawns & file_mask(cf); while bp_scan!=0 { let bsq=bp_scan.trailing_zeros() as usize; bp_scan&=bp_scan-1; let br=bsq/8; if br>rank { blocked=true; break 'outer; } } } if !blocked { pawn_structure += PASSED_BASE + (rank as i32)*PASSED_PER_RANK; } if rank<7 { let forward_sq = sq + 8; let left_attack = if f>0 && forward_sq+7 < 64 { self.black_pawns & (1u64 << (forward_sq+7)) } else {0}; let right_attack = if f<7 && forward_sq+9 < 64 { self.black_pawns & (1u64 << (forward_sq+9)) } else {0}; if left_attack|right_attack!=0 { pawn_structure -= BACKWARD_PAWN; } } }
+            let mut bp_file = self.black_pawns & file_mask(f); while bp_file!=0 { let sq=bp_file.trailing_zeros() as usize; bp_file&=bp_file-1; let rank=sq/8; let mut blocked=false; 'outerb: for cf in f.saturating_sub(1)..=usize::min(f+1,7){ let mut wp_scan=self.white_pawns & file_mask(cf); while wp_scan!=0 { let wsq=wp_scan.trailing_zeros() as usize; wp_scan&=wp_scan-1; let wr=wsq/8; if wr<rank { blocked=true; break 'outerb; } } } if !blocked { pawn_structure -= PASSED_BASE + ((7-rank) as i32)*PASSED_PER_RANK; } if rank>0 { let forward_sq=sq-8; let left_attack = if f>0 && forward_sq >= 9 { self.white_pawns & (1u64 << (forward_sq-9)) } else {0}; let right_attack = if f<7 && forward_sq >=7 { self.white_pawns & (1u64 << (forward_sq-7)) } else {0}; if left_attack|right_attack!=0 { pawn_structure += BACKWARD_PAWN; } } }
+        }
+        // Hanging
+        let mut w_iter = self.white_pieces() & !(1u64<<w_king_sq); while w_iter!=0 { let sq=w_iter.trailing_zeros() as usize; w_iter&=w_iter-1; if (black_attacks & (1u64<<sq))!=0 && (white_attacks & (1u64<<sq))==0 { hanging -= HANGING_PENALTY; } }
+        let mut b_iter = self.black_pieces() & !(1u64<<b_king_sq); while b_iter!=0 { let sq=b_iter.trailing_zeros() as usize; b_iter&=b_iter-1; if (white_attacks & (1u64<<sq))!=0 && (black_attacks & (1u64<<sq))==0 { hanging += HANGING_PENALTY; } }
+        tempo += if us_white { TEMPO } else { -TEMPO };
+    let mut total = material + piece_square + mobility + king_ring_score + bishop_pair_score + rook_files + pawn_structure + hanging + tempo;
+        let non_pawn_material_white = (self.white_knights.count_ones()+self.white_bishops.count_ones()) as i32*325 + self.white_rooks.count_ones() as i32*500 + self.white_queens.count_ones() as i32*950;
+        let non_pawn_material_black = (self.black_knights.count_ones()+self.black_bishops.count_ones()) as i32*325 + self.black_rooks.count_ones() as i32*500 + self.black_queens.count_ones() as i32*950;
+        let total_np = non_pawn_material_white + non_pawn_material_black; let pre_scale = total; let mut scaled = total; let mut scaled_flag=false;
+        if total_np < params.endgame_threshold { let scale = 32 + total_np / 80; scaled = scaled * scale / 64; scaled_flag=true; }
+    EvalBreakdown { material, piece_square, mobility, king_ring: king_ring_score, bishop_pair: bishop_pair_score, rook_files, pawn_structure, hanging, tempo, endgame_scale_applied: scaled_flag, scaled_total: if self.white_to_move { scaled } else { -scaled }, pre_scale_total: if self.white_to_move { pre_scale } else { -pre_scale } }
+    }
+
+    pub fn evaluate_with_breakdown(&self) -> EvalBreakdown { self.evaluate_with_breakdown_params(&EvalParams::default()) }
+
     pub(crate) fn new() -> Self {
         // Initialize bitboards for starting position
         let white_pawns = 0xFF00u64; // Rank 2
@@ -731,186 +842,7 @@ impl Board {
     }
 
     pub(crate) fn evaluate(&self) -> i32 {
-        let mut score = 0;
-        const MATERIAL_MG: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
-        const MATERIAL_EG: [i32; 6] = [94, 281, 297, 512, 936, 20000];
-        const PST_MG: [[i32; 64]; 6] = [
-            [0,0,0,0,0,0,0,0,-35,-1,-20,-23,-15,24,38,-22,-26,-4,-4,-10,3,3,33,-12,-27,-2,-5,12,17,6,10,-25,-14,13,6,21,23,12,17,-23,-6,7,26,31,65,56,25,-20,98,134,61,95,68,126,34,-11,0,0,0,0,0,0,0,0],
-            [-105,-21,-58,-33,-17,-28,-19,-23,-29,-53,-12,-3,-1,18,-14,-19,-23,-9,12,10,19,17,25,-16,-13,4,16,13,28,19,21,-8,-9,17,19,53,37,69,18,22,-47,60,37,65,84,129,73,44,-73,-41,72,36,23,62,7,-17,-167,-89,-34,-49,61,-97,-15,-107],
-            [-33,-3,-14,-21,-13,-12,-39,-21,4,15,16,0,7,21,33,1,0,15,15,15,14,27,18,10,-6,13,13,26,34,12,10,4,-4,5,19,50,37,37,7,-2,-16,37,43,40,35,50,37,-2,-26,16,-18,-13,30,59,18,-47,-29,4,-82,-37,-25,-42,7,-8],
-            [-19,-13,1,17,16,7,-37,-26,-44,-16,-20,-9,-1,11,-6,-71,-45,-25,-16,-17,3,0,-5,-33,-36,-26,-12,-1,9,-7,6,-23,-24,-11,7,26,24,35,-8,-20,-5,19,26,36,17,45,61,16,27,32,58,62,80,67,26,44,32,42,32,51,63,9,31,43],
-            [-1,-18,-9,10,-15,-25,-31,-50,-35,-8,11,2,8,15,-3,1,-14,2,-11,-2,-5,2,14,5,-9,-26,-9,-10,-2,-4,3,-3,-27,-27,-16,-16,-1,17,-2,1,-13,-17,7,8,29,56,47,57,-24,-39,-5,1,-16,57,28,54,-28,0,29,12,59,44,43,45],
-            [-15,36,12,-54,8,-28,34,14,1,7,-8,-64,-43,-16,9,8,-14,-14,-22,-46,-44,-30,-15,-27,-49,-1,-27,-39,-46,-44,-33,-51,-17,-20,-12,-27,-30,-25,-14,-36,-9,24,2,-16,-20,6,22,-22,29,-1,-20,-7,-8,-4,-38,-29,-65,23,16,-15,-56,-34,2,13]
-        ];
-        const PST_EG: [[i32; 64]; 6] = [
-            [0,0,0,0,0,0,0,0,13,8,8,10,13,0,2,-7,4,7,-6,1,0,-5,-1,-8,13,9,-3,-7,-7,-8,3,-1,32,24,13,5,-2,4,17,17,94,100,85,67,56,53,82,84,178,173,158,134,147,132,165,187,0,0,0,0,0,0,0,0],
-            [-29,-51,-23,-15,-22,-18,-50,-64,-42,-20,-10,-5,-2,-20,-23,-44,-23,-3,-1,15,10,-3,-20,-22,-18,-6,16,25,16,17,4,-18,-17,3,22,22,22,11,8,-18,-24,-20,10,9,-1,-9,-19,-41,-25,-8,-25,-2,-9,-25,-24,-52,-58,-38,-13,-28,-31,-27,-63,-99],
-            [-23,-9,-23,-5,-9,-16,-5,-17,-14,-18,-7,-1,4,-9,-15,-27,-12,-3,8,10,13,3,-7,-15,-6,3,13,19,7,10,-3,-9,-3,9,12,9,14,10,3,2,2,-8,0,-1,-2,6,0,4,-8,-4,7,-12,-3,-13,-4,-14,-14,-21,-11,-8,-7,-9,-17,-24],
-            [-9,2,3,-1,-5,-13,4,-20,-6,-6,0,2,-9,-9,-11,-3,-4,0,-5,-1,-7,-12,-8,-16,3,5,8,4,-5,-6,-8,-11,4,3,13,1,2,1,-1,2,7,7,7,5,4,-3,-5,-3,11,13,13,11,-3,3,8,3,13,10,18,15,12,12,8,5],
-            [-33,-28,-22,-43,-5,-32,-20,-41,-22,-23,-30,-16,-16,-23,-36,-32,-16,-27,15,6,9,17,10,5,-18,28,19,47,31,34,39,23,3,22,24,45,57,40,57,36,-20,6,9,49,47,35,19,9,-17,20,32,41,58,25,30,0,-9,22,22,27,27,19,10,20],
-            [-53,-34,-21,-11,-28,-14,-24,-43,-27,-11,4,13,14,4,-5,-17,-19,-3,11,21,23,16,7,-9,-18,-4,21,24,27,23,9,-11,-8,22,24,27,26,33,26,3,10,17,23,15,20,45,44,13,-12,17,14,17,17,38,23,11,-74,-35,-18,-18,-11,15,4,-17]
-        ];
-        fn square_to_index(rank: usize, file: usize) -> usize { rank * 8 + file }
-        fn piece_to_index(piece: Piece) -> usize { match piece { Piece::Pawn => 0, Piece::Knight => 1, Piece::Bishop => 2, Piece::Rook => 3, Piece::Queen => 4, Piece::King => 5 } }
-        let mut white_material_mg = 0; let mut black_material_mg = 0; let mut _white_material_eg = 0; let mut _black_material_eg = 0; let mut white_bishop_count = 0; let mut black_bishop_count = 0; let mut white_pawns_by_file = [0; 8]; let mut black_pawns_by_file = [0; 8];
-        // Count pieces and material using bitboards
-        white_bishop_count = self.white_bishops.count_ones() as usize;
-        black_bishop_count = self.black_bishops.count_ones() as usize;
-        
-        // Count material
-        white_material_mg += self.white_pawns.count_ones() as i32 * MATERIAL_MG[0];
-        white_material_mg += self.white_knights.count_ones() as i32 * MATERIAL_MG[1];
-        white_material_mg += self.white_bishops.count_ones() as i32 * MATERIAL_MG[2];
-        white_material_mg += self.white_rooks.count_ones() as i32 * MATERIAL_MG[3];
-        white_material_mg += self.white_queens.count_ones() as i32 * MATERIAL_MG[4];
-        
-        black_material_mg += self.black_pawns.count_ones() as i32 * MATERIAL_MG[0];
-        black_material_mg += self.black_knights.count_ones() as i32 * MATERIAL_MG[1];
-        black_material_mg += self.black_bishops.count_ones() as i32 * MATERIAL_MG[2];
-        black_material_mg += self.black_rooks.count_ones() as i32 * MATERIAL_MG[3];
-        black_material_mg += self.black_queens.count_ones() as i32 * MATERIAL_MG[4];
-        
-        // Count pawns by file
-        let mut wp = self.white_pawns;
-        while wp != 0 {
-            let sq_idx = wp.trailing_zeros() as usize;
-            wp &= wp - 1;
-            let file = sq_idx % 8;
-            white_pawns_by_file[file] += 1;
-        }
-        let mut bp = self.black_pawns;
-        while bp != 0 {
-            let sq_idx = bp.trailing_zeros() as usize;
-            bp &= bp - 1;
-            let file = sq_idx % 8;
-            black_pawns_by_file[file] += 1;
-        }
-        let total_material_mg = white_material_mg + black_material_mg;
-        let max_material = 2 * (MATERIAL_MG[1]*2 + MATERIAL_MG[2]*2 + MATERIAL_MG[3]*2 + MATERIAL_MG[4] + MATERIAL_MG[0]*8);
-        let phase = (total_material_mg as f32) / (max_material as f32);
-        let phase = phase.min(1.0).max(0.0);
-        let mut mg_score = 0; let mut eg_score = 0;
-        // PST evaluation using bitboards
-        let pieces = [
-            (self.white_pawns, Color::White, 0),
-            (self.white_knights, Color::White, 1),
-            (self.white_bishops, Color::White, 2),
-            (self.white_rooks, Color::White, 3),
-            (self.white_queens, Color::White, 4),
-            (self.white_king, Color::White, 5),
-            (self.black_pawns, Color::Black, 0),
-            (self.black_knights, Color::Black, 1),
-            (self.black_bishops, Color::Black, 2),
-            (self.black_rooks, Color::Black, 3),
-            (self.black_queens, Color::Black, 4),
-            (self.black_king, Color::Black, 5),
-        ];
-        
-        for (mut bb, color, piece_idx) in pieces {
-            while bb != 0 {
-                let sq_idx_raw = bb.trailing_zeros() as usize;
-                bb &= bb - 1;
-                let rank = sq_idx_raw / 8;
-                let file = sq_idx_raw % 8;
-                // PST tables are defined from White's perspective (rank 0 = White back rank).
-                // Therefore: use (rank,file) directly for White, and mirror vertically for Black.
-                let sq_idx = if color == Color::White {
-                    square_to_index(rank, file)
-                } else {
-                    square_to_index(7 - rank, file)
-                };
-                let mg_value = MATERIAL_MG[piece_idx] + PST_MG[piece_idx][sq_idx];
-                let eg_value = MATERIAL_EG[piece_idx] + PST_EG[piece_idx][sq_idx];
-                if color == Color::White {
-                    mg_score += mg_value;
-                    eg_score += eg_value;
-                } else {
-                    mg_score -= mg_value;
-                    eg_score -= eg_value;
-                }
-            }
-        }
-        let position_score = (phase * mg_score as f32 + (1.0 - phase) * eg_score as f32) as i32; score += position_score;
-        if white_bishop_count >= 2 { score += 30; } if black_bishop_count >= 2 { score -= 30; }
-        // Rook evaluation using bitboards
-        let mut wr = self.white_rooks;
-        while wr != 0 {
-            let sq_idx = wr.trailing_zeros() as usize;
-            wr &= wr - 1;
-            let file = sq_idx % 8;
-            let file_pawns = white_pawns_by_file[file] + black_pawns_by_file[file];
-            if file_pawns == 0 {
-                score += 15; // Open file bonus
-            } else if black_pawns_by_file[file] == 0 {
-                score += 7; // Semi-open file bonus
-            }
-        }
-        let mut br = self.black_rooks;
-        while br != 0 {
-            let sq_idx = br.trailing_zeros() as usize;
-            br &= br - 1;
-            let file = sq_idx % 8;
-            let file_pawns = white_pawns_by_file[file] + black_pawns_by_file[file];
-            if file_pawns == 0 {
-                score -= 15; // Open file bonus
-            } else if white_pawns_by_file[file] == 0 {
-                score -= 7; // Semi-open file bonus
-            }
-        }
-        for file in 0..8 { if white_pawns_by_file[file] > 0 { let left_file = if file>0 { white_pawns_by_file[file-1] } else { 0 }; let right_file = if file<7 { white_pawns_by_file[file+1] } else { 0 }; if left_file==0 && right_file==0 { score -= 12; } }
-            if black_pawns_by_file[file] > 0 { let left_file = if file>0 { black_pawns_by_file[file-1] } else { 0 }; let right_file = if file<7 { black_pawns_by_file[file+1] } else { 0 }; if left_file==0 && right_file==0 { score += 12; } }
-            // Passed pawn evaluation using bitboards
-            let file_mask = 1u64 << file | if file > 0 { 1u64 << (file - 1) } else { 0 } | if file < 7 { 1u64 << (file + 1) } else { 0 };
-            
-            // Check white pawns on this file
-            let white_pawns_file = self.white_pawns & (0x0101010101010101u64 << file);
-            let mut wp_file = white_pawns_file;
-            while wp_file != 0 {
-                let sq_idx = wp_file.trailing_zeros() as usize;
-                wp_file &= wp_file - 1;
-                let rank = sq_idx / 8;
-                
-                // Check if this pawn is passed (no enemy pawns ahead in adjacent files)
-                let ahead_mask = if rank == 0 { 0 } else { 
-                    let mut mask = 0u64;
-                    for check_file in file.saturating_sub(1)..=(file+1).min(7) {
-                        for check_rank in 0..rank {
-                            mask |= 1u64 << (check_rank * 8 + check_file);
-                        }
-                    }
-                    mask
-                };
-                if (self.black_pawns & ahead_mask) == 0 {
-                    let bonus = 10 + (7 - rank as i32) * 7;
-                    score += bonus;
-                }
-            }
-            
-            // Check black pawns on this file
-            let black_pawns_file = self.black_pawns & (0x0101010101010101u64 << file);
-            let mut bp_file = black_pawns_file;
-            while bp_file != 0 {
-                let sq_idx = bp_file.trailing_zeros() as usize;
-                bp_file &= bp_file - 1;
-                let rank = sq_idx / 8;
-                
-                // Check if this pawn is passed (no enemy pawns ahead in adjacent files)
-                let ahead_mask = if rank == 7 { 0 } else { 
-                    let mut mask = 0u64;
-                    for check_file in file.saturating_sub(1)..=(file+1).min(7) {
-                        for check_rank in (rank+1)..8 {
-                            mask |= 1u64 << (check_rank * 8 + check_file);
-                        }
-                    }
-                    mask
-                };
-                if (self.white_pawns & ahead_mask) == 0 {
-                    let bonus = 10 + rank as i32 * 7;
-                    score -= bonus;
-                }
-            }
-        }
-        if self.white_to_move { score } else { -score }
+        self.evaluate_with_breakdown().scaled_total
     }
 
     // --- SEE helpers and SEE ---
