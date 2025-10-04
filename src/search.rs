@@ -233,6 +233,18 @@ impl PvCollector {
         println!(" (score: {})", score);
     }
     
+    pub fn print_uci_info(&self, depth: u32, score: i32, nodes: u64, time_ms: u128) {
+        if self.size[0] == 0 {
+            return;
+        }
+        
+        print!("info depth {} score cp {} nodes {} time {} pv", depth, score, nodes, time_ms);
+        for i in 0..self.size[0].min(10) {
+            print!(" {}", self.move_to_string(self.line[0][i]));
+        }
+        println!();
+    }
+    
     fn move_to_string(&self, mv: Move) -> String {
         let from_file = (b'a' + mv.from.1 as u8) as char;
         let from_rank = (b'1' + mv.from.0 as u8) as char;
@@ -882,7 +894,7 @@ impl SearchEngine {
                 // Display PV if at root
                 if is_root {
                     self.pv.update(ply, *mv);
-                    // self.pv.display(score);  // Commented out to follow UCI protocol
+                    self.pv.print_uci_info(self.timer.root_depth, score, self.timer.node_count, self.timer.start_time.elapsed().as_millis());
                 }
                 
                 return score;
@@ -897,7 +909,7 @@ impl SearchEngine {
                     best_move = Some(*mv);
                     self.pv.update(ply, *mv);
                     if is_root {
-                        // self.pv.display(score);  // Commented out to follow UCI protocol
+                        self.pv.print_uci_info(self.timer.root_depth, score, self.timer.node_count, self.timer.start_time.elapsed().as_millis());
                     }
                 }
             }
