@@ -3,6 +3,12 @@ use std::io;
 use std::io::{BufRead, Write};
 use std::mem; // For size_of
 use std::time::{Duration, Instant};
+// Module declarations for split code
+mod types;
+mod zobrist;
+mod utils;
+mod board;
+mod perft;
 
 // --- Crates ---
 use once_cell::sync::Lazy;
