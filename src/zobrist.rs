@@ -1,5 +1,6 @@
 use once_cell::sync::Lazy;
 use rand::prelude::*;
+use crate::types::{Piece, Color, Square};
 
 /// Struct to hold all Zobrist keys
 pub struct ZobristKeys {
@@ -44,26 +45,26 @@ impl ZobristKeys {
 pub static ZOBRIST: Lazy<ZobristKeys> = Lazy::new(ZobristKeys::new);
 
 /// Helper to map Piece enum to index
-pub fn piece_to_zobrist_index(piece: crate::types::Piece) -> usize {
+pub fn piece_to_zobrist_index(piece: Piece) -> usize {
     match piece {
-        crate::types::Piece::Pawn => 0,
-        crate::types::Piece::Knight => 1,
-        crate::types::Piece::Bishop => 2,
-        crate::types::Piece::Rook => 3,
-        crate::types::Piece::Queen => 4,
-        crate::types::Piece::King => 5,
+        Piece::Pawn => 0,
+        Piece::Knight => 1,
+        Piece::Bishop => 2,
+        Piece::Rook => 3,
+        Piece::Queen => 4,
+        Piece::King => 5,
     }
 }
 
 /// Helper to map Color enum to index
-pub fn color_to_zobrist_index(color: crate::types::Color) -> usize {
+pub fn color_to_zobrist_index(color: Color) -> usize {
     match color {
-        crate::types::Color::White => 0,
-        crate::types::Color::Black => 1,
+        Color::White => 0,
+        Color::Black => 1,
     }
 }
 
 /// Helper to map Square to index (0-63)
-pub fn square_to_zobrist_index(sq: crate::types::Square) -> usize {
+pub fn square_to_zobrist_index(sq: Square) -> usize {
     sq.0 * 8 + sq.1
 }
