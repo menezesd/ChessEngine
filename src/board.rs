@@ -1,14 +1,57 @@
+
+
 use std::time::{Duration, Instant};
 
 use crate::constants::MATE_SCORE;
 use crate::transposition_table::{BoundType, TranspositionTable};
 use crate::types::{
-    bitboard_for_square, file_to_index, format_square, rank_to_index, Bitboard, Color, Move, Piece,
-    Square,
+    bitboard_for_square, file_to_index, format_square, rank_to_index, square_index, Bitboard,
+    Color, Move, Piece, Square,
 };
 use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
 };
+use once_cell::sync::Lazy;
+use crate::magic;
+use crate::search_control;
+use crate::uci_info;
+
+static KNIGHT_ATTACKS: Lazy<[Bitboard; 64]> = Lazy::new(|| {
+    let mut table = [0u64; 64];
+    for (index, slot) in table.iter_mut().enumerate() {
+        let bit = 1u64 << index;
+        let mut attacks = 0u64;
+        // Mask the source bit before shifting to avoid wrapping across files
+        attacks |= (bit & Board::NOT_FILE_H) << 17; // +2 rank, +1 file
+        attacks |= (bit & Board::NOT_FILE_A) << 15; // +2 rank, -1 file
+        attacks |= (bit & Board::NOT_FILE_GH) << 10; // +1 rank, +2 files
+        attacks |= (bit & Board::NOT_FILE_AB) << 6; // +1 rank, -2 files
+        attacks |= (bit & Board::NOT_FILE_A) >> 17; // -2 rank, -1 file
+        attacks |= (bit & Board::NOT_FILE_H) >> 15; // -2 rank, +1 file
+        attacks |= (bit & Board::NOT_FILE_AB) >> 10; // -1 rank, -2 files
+        attacks |= (bit & Board::NOT_FILE_GH) >> 6; // -1 rank, +2 files
+        *slot = attacks;
+    }
+    table
+});
+
+static KING_ATTACKS: Lazy<[Bitboard; 64]> = Lazy::new(|| {
+    let mut table = [0u64; 64];
+    for (index, slot) in table.iter_mut().enumerate() {
+        let bit = 1u64 << index;
+        let mut attacks = 0u64;
+        attacks |= bit << 8;
+        attacks |= bit >> 8;
+        attacks |= (bit & Board::NOT_FILE_H) << 1;
+        attacks |= (bit & Board::NOT_FILE_A) >> 1;
+        attacks |= (bit & Board::NOT_FILE_H) << 9;
+        attacks |= (bit & Board::NOT_FILE_A) << 7;
+        attacks |= (bit & Board::NOT_FILE_A) >> 9;
+        attacks |= (bit & Board::NOT_FILE_H) >> 7;
+        *slot = attacks;
+    }
+    table
+});
 
 const CASTLE_WHITE_KINGSIDE: u8 = 0b0001;
 const CASTLE_WHITE_QUEENSIDE: u8 = 0b0010;
@@ -86,7 +129,41 @@ pub struct Board {
     pub hash: u64,
 }
 
+impl Default for Board {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Board {
+    const FILE_A: Bitboard = 0x0101010101010101;
+    const FILE_B: Bitboard = 0x0202020202020202;
+    const FILE_G: Bitboard = 0x4040404040404040;
+    const FILE_H: Bitboard = 0x8080808080808080;
+    const NOT_FILE_A: Bitboard = !Self::FILE_A;
+    const NOT_FILE_H: Bitboard = !Self::FILE_H;
+    const NOT_FILE_AB: Bitboard = !Self::FILE_A & !Self::FILE_B;
+    const NOT_FILE_GH: Bitboard = !Self::FILE_G & !Self::FILE_H;
+
+    fn square_from_index(index: usize) -> Square {
+        Square(index / 8, index % 8)
+    }
+
+    fn knight_attacks(square: Square) -> Bitboard {
+        KNIGHT_ATTACKS[square_index(square)]
+    }
+
+    fn king_attacks(square: Square) -> Bitboard {
+        KING_ATTACKS[square_index(square)]
+    }
+
+    fn rook_attacks(square: Square, occupancy: Bitboard) -> Bitboard {
+        magic::rook_attacks(square, occupancy)
+    }
+
+    fn bishop_attacks(square: Square, occupancy: Bitboard) -> Bitboard {
+        magic::bishop_attacks(square, occupancy)
+    }
     fn empty() -> Self {
         Board {
             bitboards: [[0; 6]; 2],
@@ -99,9 +176,7 @@ impl Board {
         }
     }
 
-    fn update_all_occupancy(&mut self) {
-        self.all_occupancy = self.occupancy[0] | self.occupancy[1];
-    }
+    // all_occupancy is updated incrementally in place_piece_at and remove_piece_at
 
     pub fn piece_at(&self, square: Square) -> Option<(Color, Piece)> {
         let mask = bitboard_for_square(square);
@@ -117,6 +192,147 @@ impl Board {
         None
     }
 
+    fn add_leaper_moves<F>(
+        &self,
+        color: Color,
+        mut pieces: Bitboard,
+        attack_fn: F,
+        include_quiet: bool,
+        moves: &mut Vec<Move>,
+    ) where
+        F: Fn(Square) -> Bitboard,
+    {
+        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
+        while pieces != 0 {
+            let from_index = pieces.trailing_zeros() as usize;
+            pieces &= pieces - 1;
+            let from = Self::square_from_index(from_index);
+            let attacks = attack_fn(from);
+
+            if include_quiet {
+                let mut quiet_targets = attacks & !self.all_occupancy;
+                while quiet_targets != 0 {
+                    let to_index = quiet_targets.trailing_zeros() as usize;
+                    quiet_targets &= quiet_targets - 1;
+                    let to = Self::square_from_index(to_index);
+                    self.add_move(moves, color, from, to, None, false, false);
+                }
+            }
+
+            let mut capture_targets = attacks & self.occupancy[opponent_idx];
+            while capture_targets != 0 {
+                let to_index = capture_targets.trailing_zeros() as usize;
+                capture_targets &= capture_targets - 1;
+                let to = Self::square_from_index(to_index);
+                self.add_move(moves, color, from, to, None, false, false);
+            }
+        }
+    }
+
+    fn add_sliding_moves<F>(
+        &self,
+        color: Color,
+        mut pieces: Bitboard,
+        attack_fn: F,
+        include_quiet: bool,
+        moves: &mut Vec<Move>,
+    ) where
+        F: Fn(Square, Bitboard) -> Bitboard,
+    {
+        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
+        while pieces != 0 {
+            let from_index = pieces.trailing_zeros() as usize;
+            pieces &= pieces - 1;
+            let from = Self::square_from_index(from_index);
+            let attacks = attack_fn(from, self.all_occupancy);
+
+            if include_quiet {
+                let mut quiet_targets = attacks & !self.all_occupancy;
+                while quiet_targets != 0 {
+                    let to_index = quiet_targets.trailing_zeros() as usize;
+                    quiet_targets &= quiet_targets - 1;
+                    let to = Self::square_from_index(to_index);
+                    self.add_move(moves, color, from, to, None, false, false);
+                }
+            }
+
+            let mut capture_targets = attacks & self.occupancy[opponent_idx];
+            while capture_targets != 0 {
+                let to_index = capture_targets.trailing_zeros() as usize;
+                capture_targets &= capture_targets - 1;
+                let to = Self::square_from_index(to_index);
+                self.add_move(moves, color, from, to, None, false, false);
+            }
+        }
+    }
+
+    fn add_pawn_tactical_moves(&self, color: Color, moves: &mut Vec<Move>) {
+        let color_idx = color_to_zobrist_index(color);
+        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
+        let dir: isize = if color == Color::White { 1 } else { -1 };
+        let promotion_rank = if color == Color::White { 7 } else { 0 };
+        let mut pawns = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Pawn)];
+
+        while pawns != 0 {
+            let from_index = pawns.trailing_zeros() as usize;
+            pawns &= pawns - 1;
+            let from = Self::square_from_index(from_index);
+
+            let forward_rank = from.0 as isize + dir;
+            if (0..8).contains(&forward_rank) {
+                let forward_sq = Square(forward_rank as usize, from.1);
+                if forward_sq.0 == promotion_rank {
+                    let forward_mask = bitboard_for_square(forward_sq);
+                    if self.all_occupancy & forward_mask == 0 {
+                        for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
+                            self.add_move(
+                                moves,
+                                color,
+                                from,
+                                forward_sq,
+                                Some(promo),
+                                false,
+                                false,
+                            );
+                        }
+                    }
+                }
+            }
+
+            let capture_rank = from.0 as isize + dir;
+            if (0..8).contains(&capture_rank) {
+                for df in [-1, 1] {
+                    let capture_file = from.1 as isize + df;
+                    if !(0..8).contains(&capture_file) {
+                        continue;
+                    }
+                    let target_sq = Square(capture_rank as usize, capture_file as usize);
+                    let target_mask = bitboard_for_square(target_sq);
+
+                    if self.occupancy[opponent_idx] & target_mask != 0 {
+                        if target_sq.0 == promotion_rank {
+                            for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
+                                self.add_move(
+                                    moves,
+                                    color,
+                                    from,
+                                    target_sq,
+                                    Some(promo),
+                                    false,
+                                    false,
+                                );
+                            }
+                        } else {
+                            self.add_move(moves, color, from, target_sq, None, false, false);
+                        }
+                    } else if Some(target_sq) == self.en_passant_target {
+                        self.add_move(moves, color, from, target_sq, None, false, true);
+                    }
+                }
+            }
+        }
+    }
+
     fn remove_piece_at(&mut self, square: Square) -> Option<(Color, Piece)> {
         let mask = bitboard_for_square(square);
         for color_idx in 0..2 {
@@ -125,7 +341,8 @@ impl Board {
                     if self.bitboards[color_idx][piece_idx] & mask != 0 {
                         self.bitboards[color_idx][piece_idx] &= !mask;
                         self.occupancy[color_idx] &= !mask;
-                        self.update_all_occupancy();
+                        // incremental update to combined occupancy
+                        self.all_occupancy &= !mask;
                         return Some((color_from_index(color_idx), piece_from_index(piece_idx)));
                     }
                 }
@@ -140,7 +357,8 @@ impl Board {
         let piece_idx = piece_to_zobrist_index(piece.1);
         self.bitboards[color_idx][piece_idx] |= mask;
         self.occupancy[color_idx] |= mask;
-        self.update_all_occupancy();
+        // incremental update to combined occupancy
+        self.all_occupancy |= mask;
     }
 
     fn set_piece_at(
@@ -211,7 +429,7 @@ impl Board {
         for (rank_idx, rank_str) in parts[0].split('/').enumerate() {
             let mut file = 0;
             for c in rank_str.chars() {
-                if c.is_digit(10) {
+                if c.is_ascii_digit() {
                     file += c.to_digit(10).unwrap() as usize;
                 } else {
                     let (color, piece) = match c {
@@ -513,411 +731,267 @@ impl Board {
     }
 
     // --- Move Generation (largely unchanged logic, but uses new Move struct) ---
-    // Note: Most generate_* functions remain &self, as they only read the board
-    // generate_moves() will become &mut self because it uses make/unmake
+    // Provide "into" variants that accept a reusable buffer to avoid allocations.
 
+    fn generate_pseudo_moves_into(&self, moves: &mut Vec<Move>) {
+        moves.clear();
+        let color = self.current_color();
+        self.generate_pawn_moves_for(color, moves);
+        self.generate_knight_moves_for(color, moves);
+        self.generate_bishop_moves_for(color, moves);
+        self.generate_rook_moves_for(color, moves);
+        self.generate_queen_moves_for(color, moves);
+        self.generate_king_moves_for(color, moves);
+    }
+
+    #[allow(dead_code)]
     fn generate_pseudo_moves(&self) -> Vec<Move> {
-        // ... implementation remains the same conceptually ...
-        // ... but needs to populate `captured_piece` in the Move struct ...
-        // This requires looking at the target square *before* creating the move.
-
         let mut moves = Vec::new();
-        let color = if self.white_to_move {
-            Color::White
-        } else {
-            Color::Black
-        };
-
-        for rank in 0..8 {
-            for file in 0..8 {
-                if let Some((c, piece)) = self.get_square(rank, file) {
-                    if c == color {
-                        let from = Square(rank, file);
-                        moves.extend(self.generate_piece_moves(from, piece));
-                    }
-                }
-            }
-        }
+        self.generate_pseudo_moves_into(&mut moves);
         moves
     }
 
-    fn generate_piece_moves(&self, from: Square, piece: Piece) -> Vec<Move> {
-        match piece {
-            Piece::Pawn => self.generate_pawn_moves(from),
-            Piece::Knight => self.generate_knight_moves(from),
-            Piece::Bishop => {
-                self.generate_sliding_moves(from, &[(1, 1), (1, -1), (-1, 1), (-1, -1)])
-            }
-            Piece::Rook => self.generate_sliding_moves(from, &[(1, 0), (-1, 0), (0, 1), (0, -1)]),
-            Piece::Queen => self.generate_sliding_moves(
-                from,
-                &[
-                    (1, 0),
-                    (-1, 0),
-                    (0, 1),
-                    (0, -1),
-                    (1, 1),
-                    (1, -1),
-                    (-1, 1),
-                    (-1, -1),
-                ],
-            ),
-            Piece::King => self.generate_king_moves(from),
-        }
-    }
-
-    // Helper to create a move, checking for captures
-    fn create_move(
+    #[allow(clippy::too_many_arguments)]
+    fn add_move(
         &self,
+        moves: &mut Vec<Move>,
+        color: Color,
         from: Square,
         to: Square,
         promotion: Option<Piece>,
         is_castling: bool,
         is_en_passant: bool,
-    ) -> Move {
+    ) {
         let captured_piece = if is_en_passant {
-            // Color doesn't matter here, just the piece type
             Some(Piece::Pawn)
         } else if !is_castling {
-            self.get_square(to.0, to.1).map(|(_, p)| p)
+            self.piece_at(to)
+                .and_then(|(c, p)| if c != color { Some(p) } else { None })
         } else {
             None
         };
 
-        Move {
+        moves.push(Move {
             from,
             to,
             promotion,
             is_castling,
             is_en_passant,
             captured_piece,
-        }
+        });
     }
 
-    // Modify generation functions to use `create_move`
-    fn generate_pawn_moves(&self, from: Square) -> Vec<Move> {
-        let color = if self.white_to_move {
-            Color::White
-        } else {
-            Color::Black
-        };
-        let mut moves = Vec::new();
+    fn generate_pawn_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+        let color_idx = color_to_zobrist_index(color);
+        let opponent_color = self.opponent_color(color);
+        let opponent_idx = color_to_zobrist_index(opponent_color);
         let dir: isize = if color == Color::White { 1 } else { -1 };
         let start_rank = if color == Color::White { 1 } else { 6 };
         let promotion_rank = if color == Color::White { 7 } else { 0 };
 
-        let r = from.0 as isize;
-        let f = from.1 as isize;
+        let mut pawns = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Pawn)];
+        while pawns != 0 {
+            let from_index = pawns.trailing_zeros() as usize;
+            pawns &= pawns - 1;
+            let from = Self::square_from_index(from_index);
+            let forward_rank = from.0 as isize + dir;
+            let forward_file = from.1 as isize;
 
-        // Forward move
-        let forward_r = r + dir;
-        if forward_r >= 0 && forward_r < 8 {
-            let forward_sq = Square(forward_r as usize, f as usize);
-            if self.get_square(forward_sq.0, forward_sq.1).is_none() {
-                if forward_sq.0 == promotion_rank {
-                    for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                        moves.push(self.create_move(from, forward_sq, Some(promo), false, false));
-                    }
-                } else {
-                    moves.push(self.create_move(from, forward_sq, None, false, false));
-                    // Double forward from starting rank
-                    if r == start_rank as isize {
-                        let double_forward_r = r + 2 * dir;
-                        let double_forward_sq = Square(double_forward_r as usize, f as usize);
-                        if self
-                            .get_square(double_forward_sq.0, double_forward_sq.1)
-                            .is_none()
-                        {
-                            moves.push(self.create_move(
+            if (0..8).contains(&forward_rank) {
+                let forward_sq = Square(forward_rank as usize, forward_file as usize);
+                let forward_mask = bitboard_for_square(forward_sq);
+                if self.all_occupancy & forward_mask == 0 {
+                    if forward_sq.0 == promotion_rank {
+                        for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
+                            self.add_move(
+                                moves,
+                                color,
                                 from,
-                                double_forward_sq,
-                                None,
+                                forward_sq,
+                                Some(promo),
                                 false,
                                 false,
-                            ));
+                            );
                         }
-                    }
-                }
-            }
-        }
-
-        // Captures
-        if forward_r >= 0 && forward_r < 8 {
-            for df in [-1, 1] {
-                let capture_f = f + df;
-                if capture_f >= 0 && capture_f < 8 {
-                    let target_sq = Square(forward_r as usize, capture_f as usize);
-                    // Regular capture
-                    if let Some((target_color, _)) = self.get_square(target_sq.0, target_sq.1) {
-                        if target_color != color {
-                            if target_sq.0 == promotion_rank {
-                                for promo in
-                                    [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
-                                {
-                                    moves.push(self.create_move(
-                                        from,
-                                        target_sq,
-                                        Some(promo),
-                                        false,
-                                        false,
-                                    ));
+                    } else {
+                        self.add_move(moves, color, from, forward_sq, None, false, false);
+                        if from.0 == start_rank {
+                            let double_rank = forward_rank + dir;
+                            if (0..8).contains(&double_rank) {
+                                let double_sq = Square(double_rank as usize, forward_file as usize);
+                                let double_mask = bitboard_for_square(double_sq);
+                                if self.all_occupancy & double_mask == 0 {
+                                    self.add_move(
+                                        moves, color, from, double_sq, None, false, false,
+                                    );
                                 }
-                            } else {
-                                moves.push(self.create_move(from, target_sq, None, false, false));
                             }
                         }
                     }
-                    // En passant capture
-                    else if Some(target_sq) == self.en_passant_target {
-                        moves.push(self.create_move(from, target_sq, None, false, true));
+                }
+            }
+
+            let capture_rank = from.0 as isize + dir;
+            if (0..8).contains(&capture_rank) {
+                for df in [-1, 1] {
+                    let capture_file = from.1 as isize + df;
+                    if !(0..8).contains(&capture_file) {
+                        continue;
+                    }
+                    let target_sq = Square(capture_rank as usize, capture_file as usize);
+                    let target_mask = bitboard_for_square(target_sq);
+                    if self.occupancy[opponent_idx] & target_mask != 0 {
+                        if target_sq.0 == promotion_rank {
+                            for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
+                                self.add_move(
+                                    moves,
+                                    color,
+                                    from,
+                                    target_sq,
+                                    Some(promo),
+                                    false,
+                                    false,
+                                );
+                            }
+                        } else {
+                            self.add_move(moves, color, from, target_sq, None, false, false);
+                        }
+                    } else if Some(target_sq) == self.en_passant_target {
+                        self.add_move(moves, color, from, target_sq, None, false, true);
                     }
                 }
             }
         }
-
-        moves
     }
 
-    fn generate_knight_moves(&self, from: Square) -> Vec<Move> {
-        let mut moves = Vec::new();
-        let deltas = [
-            (2, 1),
-            (1, 2),
-            (-1, 2),
-            (-2, 1),
-            (-2, -1),
-            (-1, -2),
-            (1, -2),
-            (2, -1),
-        ];
-        let (rank, file) = (from.0 as isize, from.1 as isize);
-        let color = self.current_color();
+    fn generate_knight_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+        let color_idx = color_to_zobrist_index(color);
+        let knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
+        self.add_leaper_moves(color, knights, Self::knight_attacks, true, moves);
+    }
 
-        for (dr, df) in deltas {
-            let (nr, nf) = (rank + dr, file + df);
-            if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
-                let to_sq = Square(nr as usize, nf as usize);
-                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
-                    if c != color {
-                        moves.push(self.create_move(from, to_sq, None, false, false));
-                    }
-                } else {
-                    moves.push(self.create_move(from, to_sq, None, false, false));
-                }
-            }
+    fn generate_bishop_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+        let color_idx = color_to_zobrist_index(color);
+        let bishops = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)];
+        self.add_sliding_moves(color, bishops, Self::bishop_attacks, true, moves);
+    }
+
+    fn generate_rook_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+        let color_idx = color_to_zobrist_index(color);
+        let rooks = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)];
+        self.add_sliding_moves(color, rooks, Self::rook_attacks, true, moves);
+    }
+
+    fn generate_queen_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+        let color_idx = color_to_zobrist_index(color);
+        let queens = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
+        self.add_sliding_moves(
+            color,
+            queens,
+            |sq, occ| Self::rook_attacks(sq, occ) | Self::bishop_attacks(sq, occ),
+            true,
+            moves,
+        );
+    }
+
+    fn generate_king_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+        let color_idx = color_to_zobrist_index(color);
+        let kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        self.add_leaper_moves(color, kings, Self::king_attacks, true, moves);
+
+        if kings == 0 {
+            return;
         }
-        moves
-    }
 
-    fn generate_sliding_moves(&self, from: Square, directions: &[(isize, isize)]) -> Vec<Move> {
-        let mut moves = Vec::new();
-        let (rank, file) = (from.0 as isize, from.1 as isize);
-        let color = self.current_color();
-
-        for &(dr, df) in directions {
-            let mut r = rank + dr;
-            let mut f = file + df;
-            while r >= 0 && r < 8 && f >= 0 && f < 8 {
-                let to_sq = Square(r as usize, f as usize);
-                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
-                    if c != color {
-                        // Capture
-                        moves.push(self.create_move(from, to_sq, None, false, false));
-                    }
-                    break; // Stop searching in this direction (blocked)
-                } else {
-                    // Empty square
-                    moves.push(self.create_move(from, to_sq, None, false, false));
-                }
-                r += dr;
-                f += df;
-            }
-        }
-        moves
-    }
-
-    fn generate_king_moves(&self, from: Square) -> Vec<Move> {
-        let mut moves = Vec::new();
-        let deltas = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1),
-        ];
-        let (rank, file) = (from.0, from.1);
-        let color = self.current_color();
+        let from_index = kings.trailing_zeros() as usize;
+        let from = Self::square_from_index(from_index);
         let back_rank = if color == Color::White { 0 } else { 7 };
 
-        // Normal King moves
-        for (dr, df) in deltas {
-            let (nr, nf) = (rank as isize + dr, file as isize + df);
-            if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
-                let to_sq = Square(nr as usize, nf as usize);
-                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
-                    if c != color {
-                        moves.push(self.create_move(from, to_sq, None, false, false));
-                    }
-                } else {
-                    moves.push(self.create_move(from, to_sq, None, false, false));
-                }
-            }
-        }
-
-        // Castling (only check conditions, legality check is separate)
-        // Check if king is on its home rank and original square first
         if from == Square(back_rank, 4) {
-            // Kingside
+            let king_side_path = [Square(back_rank, 5), Square(back_rank, 6)];
+            let queen_side_path = [
+                Square(back_rank, 1),
+                Square(back_rank, 2),
+                Square(back_rank, 3),
+            ];
+
             if self.has_castling_right(color, 'K')
-                && self.get_square(back_rank, 5).is_none()
-                && self.get_square(back_rank, 6).is_none()
-                // Rook must be present
-                && self.get_square(back_rank, 7) == Some((color, Piece::Rook))
-            // Squares cannot be attacked (checked later in generate_moves)
+                && king_side_path
+                    .iter()
+                    .all(|sq| self.all_occupancy & bitboard_for_square(*sq) == 0)
+                && (self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)]
+                    & bitboard_for_square(Square(back_rank, 7)))
+                    != 0
             {
-                let to_sq = Square(back_rank, 6);
-                moves.push(self.create_move(from, to_sq, None, true, false));
+                self.add_move(moves, color, from, Square(back_rank, 6), None, true, false);
             }
-            // Queenside
+
             if self.has_castling_right(color, 'Q')
-                 && self.get_square(back_rank, 1).is_none()
-                 && self.get_square(back_rank, 2).is_none()
-                 && self.get_square(back_rank, 3).is_none()
-                 // Rook must be present
-                 && self.get_square(back_rank, 0) == Some((color, Piece::Rook))
-            // Squares cannot be attacked (checked later in generate_moves)
+                && queen_side_path
+                    .iter()
+                    .all(|sq| self.all_occupancy & bitboard_for_square(*sq) == 0)
+                && (self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)]
+                    & bitboard_for_square(Square(back_rank, 0)))
+                    != 0
             {
-                let to_sq = Square(back_rank, 2);
-                moves.push(self.create_move(from, to_sq, None, true, false));
+                self.add_move(moves, color, from, Square(back_rank, 2), None, true, false);
             }
         }
-
-        moves
     }
 
     // --- Check Detection (Refactored) ---
 
     // Finds the king of the specified color
     fn find_king(&self, color: Color) -> Option<Square> {
-        for r in 0..8 {
-            for f in 0..8 {
-                if self.get_square(r, f) == Some((color, Piece::King)) {
-                    return Some(Square(r, f));
-                }
-            }
+        let color_idx = color_to_zobrist_index(color);
+        let king_bb = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        if king_bb == 0 {
+            None
+        } else {
+            let index = king_bb.trailing_zeros() as usize;
+            Some(Self::square_from_index(index))
         }
-        None
     }
 
     // Checks if a square is attacked by the opponent WITHOUT cloning
     // Takes &self because it only reads the state
     fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
-        let target_r = square.0 as isize;
-        let target_f = square.1 as isize;
+        let color_idx = color_to_zobrist_index(attacker_color);
+        let square_mask = bitboard_for_square(square);
 
-        // 1. Check for Pawn attacks
-        let pawn_dir: isize = if attacker_color == Color::White {
-            1
+        let pawns = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Pawn)];
+        if attacker_color == Color::White {
+            let attacks = ((pawns & Self::NOT_FILE_H) << 9) | ((pawns & Self::NOT_FILE_A) << 7);
+            if attacks & square_mask != 0 {
+                return true;
+            }
         } else {
-            -1
-        };
-        let pawn_start_r = target_r - pawn_dir; // Where an attacking pawn would be
-        if pawn_start_r >= 0 && pawn_start_r < 8 {
-            for df in [-1, 1] {
-                let pawn_start_f = target_f + df;
-                if pawn_start_f >= 0 && pawn_start_f < 8 {
-                    if self.get_square(pawn_start_r as usize, pawn_start_f as usize)
-                        == Some((attacker_color, Piece::Pawn))
-                    {
-                        return true;
-                    }
-                }
+            let attacks = ((pawns & Self::NOT_FILE_A) >> 9) | ((pawns & Self::NOT_FILE_H) >> 7);
+            if attacks & square_mask != 0 {
+                return true;
             }
         }
 
-        // 2. Check for Knight attacks
-        let knight_deltas = [
-            (2, 1),
-            (1, 2),
-            (-1, 2),
-            (-2, 1),
-            (-2, -1),
-            (-1, -2),
-            (1, -2),
-            (2, -1),
-        ];
-        for (dr, df) in knight_deltas {
-            let r = target_r + dr;
-            let f = target_f + df;
-            if r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if self.get_square(r as usize, f as usize) == Some((attacker_color, Piece::Knight))
-                {
-                    return true;
-                }
-            }
+        let knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
+        if Self::knight_attacks(square) & knights != 0 {
+            return true;
         }
 
-        // 3. Check for King attacks (for castling checks mainly, kings can't attack kings directly otherwise)
-        let king_deltas = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1),
-        ];
-        for (dr, df) in king_deltas {
-            let r = target_r + dr;
-            let f = target_f + df;
-            if r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if self.get_square(r as usize, f as usize) == Some((attacker_color, Piece::King)) {
-                    return true;
-                }
-            }
+        let kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        if Self::king_attacks(square) & kings != 0 {
+            return true;
         }
 
-        // 4. Check for Sliding piece attacks (Rook, Bishop, Queen)
-        let sliding_directions = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1), // Rook/Queen directions
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1), // Bishop/Queen directions
-        ];
+        let bishop_like = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)]
+            | self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
+        if Self::bishop_attacks(square, self.all_occupancy) & bishop_like != 0 {
+            return true;
+        }
 
-        for (i, &(dr, df)) in sliding_directions.iter().enumerate() {
-            let is_diagonal = i >= 4;
-            let mut r = target_r + dr;
-            let mut f = target_f + df;
-
-            while r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if let Some((piece_color, piece)) = self.get_square(r as usize, f as usize) {
-                    if piece_color == attacker_color {
-                        // Is it the correct type of slider?
-                        let can_attack = match piece {
-                            Piece::Queen => true,
-                            Piece::Rook => !is_diagonal,
-                            Piece::Bishop => is_diagonal,
-                            _ => false, // Pawn, Knight, King handled already or can't attack this way
-                        };
-                        if can_attack {
-                            return true;
-                        }
-                    }
-                    // Any piece (own or other) blocks further sliding checks in this direction
-                    break;
-                }
-                r += dr;
-                f += df;
-            }
+        let rook_like = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)]
+            | self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
+        if Self::rook_attacks(square, self.all_occupancy) & rook_like != 0 {
+            return true;
         }
 
         // No attackers found
@@ -934,13 +1008,17 @@ impl Board {
     }
 
     // Generates only fully legal moves, takes &mut self
-    pub fn generate_moves(&mut self) -> Vec<Move> {
+    // Generates only fully legal moves, takes &mut self
+    pub fn generate_moves_into(&mut self, out: &mut Vec<Move>) {
+        // Use a temporary buffer for pseudo moves (caller may reuse `out` across calls)
+        let mut pseudo = Vec::new();
+        self.generate_pseudo_moves_into(&mut pseudo);
+
+        out.clear();
         let current_color = self.current_color();
         let opponent_color = self.opponent_color(current_color);
-        let pseudo_moves = self.generate_pseudo_moves(); // Still generates based on current state
-        let mut legal_moves = Vec::new();
 
-        for m in pseudo_moves {
+        for m in pseudo {
             // Special check for castling legality (squares king passes over cannot be attacked)
             if m.is_castling {
                 let king_start_sq = m.from;
@@ -959,24 +1037,36 @@ impl Board {
             let info = self.make_move(&m); // Make the move temporarily
             if !self.is_in_check(current_color) {
                 // Check if the player who moved is now safe
-                legal_moves.push(m.clone()); // If safe, it's a legal move
+                out.push(m); // If safe, it's a legal move
             }
             self.unmake_move(&m, info); // Unmake the move to restore state for next iteration
         }
-        legal_moves
+    }
+
+    #[allow(dead_code)]
+    pub fn generate_moves(&mut self) -> Vec<Move> {
+        let mut out = Vec::new();
+        self.generate_moves_into(&mut out);
+        out
     }
 
     // --- Game State Checks (need &mut self if they use generate_moves) ---
 
     // is_checkmate and is_stalemate now need &mut self
+    #[allow(dead_code)]
     fn is_checkmate(&mut self) -> bool {
         let color = self.current_color();
-        self.is_in_check(color) && self.generate_moves().is_empty()
+        let mut buf = Vec::new();
+        self.generate_moves_into(&mut buf);
+        self.is_in_check(color) && buf.is_empty()
     }
 
+    #[allow(dead_code)]
     fn is_stalemate(&mut self) -> bool {
         let color = self.current_color();
-        !self.is_in_check(color) && self.generate_moves().is_empty()
+        let mut buf = Vec::new();
+        self.generate_moves_into(&mut buf);
+        !self.is_in_check(color) && buf.is_empty()
     }
 
     fn evaluate(&self) -> i32 {
@@ -1076,255 +1166,206 @@ impl Board {
             ],
         ];
 
-        // Helper function to convert 2D board coordinates to 1D array index
-        fn square_to_index(rank: usize, file: usize) -> usize {
-            rank * 8 + file
-        }
+        // ...existing code...
 
-        // Piece type to index mapping
-        fn piece_to_index(piece: Piece) -> usize {
-            match piece {
-                Piece::Pawn => 0,
-                Piece::Knight => 1,
-                Piece::Bishop => 2,
-                Piece::Rook => 3,
-                Piece::Queen => 4,
-                Piece::King => 5,
-            }
-        }
+        // Count material and piece-square table contributions by iterating bitboards
+        let mut mg_score: i32 = 0;
+        let mut eg_score: i32 = 0;
 
-        // Count pieces for game phase detection and other features
-        let mut white_material_mg = 0;
-        let mut black_material_mg = 0;
-        let mut white_material_eg = 0;
-        let mut black_material_eg = 0;
-        let mut white_bishop_count = 0;
-        let mut black_bishop_count = 0;
-        let mut white_pawns_by_file = [0; 8];
-        let mut black_pawns_by_file = [0; 8];
-        let mut white_king_pos = (0, 0);
-        let mut black_king_pos = (0, 0);
+        // Pawn file counts for pawn-structure heuristics
+        let mut white_pawns_by_file = [0u32; 8];
+        let mut black_pawns_by_file = [0u32; 8];
 
-        // First pass: Count pieces and positions
-        for rank in 0..8 {
-            for file in 0..8 {
-                if let Some((color, piece)) = self.get_square(rank, file) {
-                    let piece_idx = piece_to_index(piece);
+        // Bishop counts
+        let white_bishops = self.bitboards[color_to_zobrist_index(Color::White)][piece_to_zobrist_index(Piece::Bishop)];
+        let black_bishops = self.bitboards[color_to_zobrist_index(Color::Black)][piece_to_zobrist_index(Piece::Bishop)];
+        let white_bishop_count = white_bishops.count_ones();
+        let black_bishop_count = black_bishops.count_ones();
 
-                    if color == Color::White {
-                        if piece == Piece::Bishop {
-                            white_bishop_count += 1;
-                        } else if piece == Piece::King {
-                            white_king_pos = (rank, file);
-                        } else if piece == Piece::Pawn {
-                            white_pawns_by_file[file] += 1;
-                        }
+        // Iterate each color and piece type
+        for color_idx in 0..2 {
+            let color = color_from_index(color_idx);
+            for piece_idx in 0..6 {
+                let mut bb = self.bitboards[color_idx][piece_idx];
+                if bb == 0 {
+                    continue;
+                }
+                let piece_mg = MATERIAL_MG[piece_idx];
+                let piece_eg = MATERIAL_EG[piece_idx];
 
-                        white_material_mg += MATERIAL_MG[piece_idx];
-                        white_material_eg += MATERIAL_EG[piece_idx];
+                while bb != 0 {
+                    let sq = bb.trailing_zeros() as usize;
+                    bb &= bb - 1;
+
+                    // Convert sq (0..63) to rank,file
+                    let rank = sq / 8;
+                    let file = sq % 8;
+
+                    // PST index: white pieces are flipped vertically
+                    let pst_idx = if color == Color::White {
+                        (7 - rank) * 8 + file
                     } else {
-                        if piece == Piece::Bishop {
-                            black_bishop_count += 1;
-                        } else if piece == Piece::King {
-                            black_king_pos = (rank, file);
-                        } else if piece == Piece::Pawn {
+                        rank * 8 + file
+                    };
+
+                    // Add for white, subtract for black so score is white minus black
+                    if color == Color::White {
+                        mg_score += piece_mg + PST_MG[piece_idx][pst_idx];
+                        eg_score += piece_eg + PST_EG[piece_idx][pst_idx];
+                    } else {
+                        mg_score -= piece_mg + PST_MG[piece_idx][pst_idx];
+                        eg_score -= piece_eg + PST_EG[piece_idx][pst_idx];
+                    }
+
+                    // Pawn file counting
+                    if piece_idx == piece_to_zobrist_index(Piece::Pawn) {
+                        if color == Color::White {
+                            white_pawns_by_file[file] += 1;
+                        } else {
                             black_pawns_by_file[file] += 1;
                         }
-
-                        black_material_mg += MATERIAL_MG[piece_idx];
-                        black_material_eg += MATERIAL_EG[piece_idx];
                     }
                 }
             }
         }
 
-        // Calculate game phase based on remaining material
-        let total_material_mg = white_material_mg + black_material_mg;
+        // Calculate game phase
+        let total_material_mg = {
+            let mut sum = 0i32;
+            for idx in 0..6 {
+                let white_bb = self.bitboards[0][idx];
+                let black_bb = self.bitboards[1][idx];
+                let cnt = (white_bb.count_ones() + black_bb.count_ones()) as i32;
+                sum += cnt * MATERIAL_MG[idx];
+            }
+            sum
+        };
         let max_material = 2
             * (MATERIAL_MG[1] * 2
                 + MATERIAL_MG[2] * 2
                 + MATERIAL_MG[3] * 2
                 + MATERIAL_MG[4]
                 + MATERIAL_MG[0] * 8);
-        let phase = (total_material_mg as f32) / (max_material as f32);
+        let mut phase = (total_material_mg as f32) / (max_material as f32);
+        phase = phase.clamp(0.0, 1.0);
 
-        // Clamp phase between 0 (endgame) and 1 (middlegame)
-        let phase = phase.min(1.0).max(0.0);
-
-        // Second pass: Evaluate pieces with position
-        let mut mg_score = 0;
-        let mut eg_score = 0;
-
-        for rank in 0..8 {
-            for file in 0..8 {
-                if let Some((color, piece)) = self.get_square(rank, file) {
-                    let piece_idx = piece_to_index(piece);
-
-                    // Get 1D index for piece square tables
-                    let sq_idx = if color == Color::White {
-                        square_to_index(7 - rank, file) // White pieces are flipped vertically
-                    } else {
-                        square_to_index(rank, file) // Black pieces use the table as-is
-                    };
-
-                    let mg_value = MATERIAL_MG[piece_idx] + PST_MG[piece_idx][sq_idx];
-                    let eg_value = MATERIAL_EG[piece_idx] + PST_EG[piece_idx][sq_idx];
-
-                    if color == Color::White {
-                        mg_score += mg_value;
-                        eg_score += eg_value;
-                    } else {
-                        mg_score -= mg_value;
-                        eg_score -= eg_value;
-                    }
-                }
-            }
-        }
-
-        // Interpolate between middlegame and endgame scores based on phase
         let position_score = (phase * mg_score as f32 + (1.0 - phase) * eg_score as f32) as i32;
         score += position_score;
 
-        // Additional evaluation factors
-
-        // 1. Bishop pair bonus
+        // Bishop pair bonus
         if white_bishop_count >= 2 {
-            score += 30; // Bonus for having both bishops
+            score += 30;
         }
         if black_bishop_count >= 2 {
-            score -= 30; // Same bonus for black
+            score -= 30;
         }
 
-        // 2. Rook on open files
+        // Rook on open/semi-open files and pawn-structure penalties
         for file in 0..8 {
-            for rank in 0..8 {
-                if let Some((color, piece)) = self.get_square(rank, file) {
-                    if piece == Piece::Rook {
-                        let file_pawns = white_pawns_by_file[file] + black_pawns_by_file[file];
+            let fpawns = (white_pawns_by_file[file] + black_pawns_by_file[file]) as i32;
 
-                        if file_pawns == 0 {
-                            // Open file
-                            let bonus = 15;
-                            if color == Color::White {
-                                score += bonus;
-                            } else {
-                                score -= bonus;
-                            }
-                        } else if (color == Color::White && black_pawns_by_file[file] == 0)
-                            || (color == Color::Black && white_pawns_by_file[file] == 0)
-                        {
-                            // Semi-open file
-                            let bonus = 7;
-                            if color == Color::White {
-                                score += bonus;
-                            } else {
-                                score -= bonus;
-                            }
-                        }
+            // Rooks on file: iterate rook bitboards
+            let white_rooks = self.bitboards[color_to_zobrist_index(Color::White)][piece_to_zobrist_index(Piece::Rook)];
+            let black_rooks = self.bitboards[color_to_zobrist_index(Color::Black)][piece_to_zobrist_index(Piece::Rook)];
+            let file_mask = Board::FILE_A << file; // FILE_n mask
+
+            if white_rooks & file_mask != 0 {
+                if fpawns == 0 {
+                    score += 15;
+                } else if black_pawns_by_file[file] == 0 {
+                    score += 7;
+                }
+            }
+            if black_rooks & file_mask != 0 {
+                if fpawns == 0 {
+                    score -= 15;
+                } else if white_pawns_by_file[file] == 0 {
+                    score -= 7;
+                }
+            }
+
+            // Pawn structure: isolated / doubled / passed
+            let wpf = white_pawns_by_file[file] as i32;
+            let bpf = black_pawns_by_file[file] as i32;
+
+            if wpf > 0 {
+                let left = if file > 0 { white_pawns_by_file[file - 1] } else { 0 };
+                let right = if file < 7 { white_pawns_by_file[file + 1] } else { 0 };
+                if left == 0 && right == 0 {
+                    score -= 12;
+                }
+                if wpf > 1 {
+                    score -= 12 * (wpf - 1);
+                }
+            }
+            if bpf > 0 {
+                let left = if file > 0 { black_pawns_by_file[file - 1] } else { 0 };
+                let right = if file < 7 { black_pawns_by_file[file + 1] } else { 0 };
+                if left == 0 && right == 0 {
+                    score += 12;
+                }
+                if bpf > 1 {
+                    score += 12 * (bpf - 1);
+                }
+            }
+
+            // Passed pawn detection (approximate): no enemy pawns in same or adjacent files ahead
+            // For white: pawn ranks increase; for black: decrease
+            // We'll scan each pawn on this file to decide passedness
+            // White passed pawns
+            let mut wpawns_on_file = self.bitboards[color_to_zobrist_index(Color::White)][piece_to_zobrist_index(Piece::Pawn)] & file_mask;
+            while wpawns_on_file != 0 {
+                let sq = wpawns_on_file.trailing_zeros() as usize;
+                wpawns_on_file &= wpawns_on_file - 1;
+                let rank = sq / 8;
+                let mut is_passed = true;
+                // check black pawns ahead on same or adjacent files
+                for _r in 0..rank {
+                    // unused small-range mask (kept for clarity)
+                    let _adj_mask = (Board::FILE_A << file) | (if file > 0 { Board::FILE_A << (file - 1) } else { 0 }) | (if file < 7 { Board::FILE_A << (file + 1) } else { 0 });
+                    // simpler check: iterate black pawns and compare ranks
+                    let bb = self.bitboards[color_to_zobrist_index(Color::Black)][piece_to_zobrist_index(Piece::Pawn)];
+                    // mask to same/adj files
+                    let file_adj_mask = (Board::FILE_A << file) | (if file > 0 { Board::FILE_A << (file - 1) } else { 0 }) | (if file < 7 { Board::FILE_A << (file + 1) } else { 0 });
+                    // all squares with index < rank*8
+                    let ahead_mask = if rank * 8 >= 64 { u64::MAX } else { (1u64 << (rank * 8)) - 1 };
+                    if bb & file_adj_mask & ahead_mask != 0 {
+                        is_passed = false;
                     }
+                }
+                if is_passed {
+                    let bonus = 10 + (7 - rank as i32) * 7;
+                    score += bonus;
+                }
+            }
+
+            // Black passed pawns
+            let mut bpawns_on_file = self.bitboards[color_to_zobrist_index(Color::Black)][piece_to_zobrist_index(Piece::Pawn)] & file_mask;
+            while bpawns_on_file != 0 {
+                let sq = bpawns_on_file.trailing_zeros() as usize;
+                bpawns_on_file &= bpawns_on_file - 1;
+                let rank = sq / 8;
+                let mut is_passed = true;
+                // check white pawns ahead on same or adjacent files
+                for r in (rank+1)..8 {
+                    let file_adj_mask = (Board::FILE_A << file) | (if file > 0 { Board::FILE_A << (file - 1) } else { 0 }) | (if file < 7 { Board::FILE_A << (file + 1) } else { 0 });
+                    let ahead_mask = if (r + 1) * 8 >= 64 {
+                        0u64
+                    } else {
+                        !((1u64 << ((r + 1) * 8)) - 1)
+                    };
+                    let bb = self.bitboards[color_to_zobrist_index(Color::White)][piece_to_zobrist_index(Piece::Pawn)];
+                    if bb & file_adj_mask & ahead_mask != 0 {
+                        is_passed = false;
+                    }
+                }
+                if is_passed {
+                    let bonus = 10 + rank as i32 * 7;
+                    score -= bonus;
                 }
             }
         }
 
-        // 3. Pawn structure
-        for file in 0..8 {
-            // Isolated pawns
-            if white_pawns_by_file[file] > 0 {
-                let left_file = if file > 0 {
-                    white_pawns_by_file[file - 1]
-                } else {
-                    0
-                };
-                let right_file = if file < 7 {
-                    white_pawns_by_file[file + 1]
-                } else {
-                    0
-                };
-
-                if left_file == 0 && right_file == 0 {
-                    score -= 12; // Isolated pawn penalty
-                }
-            }
-
-            if black_pawns_by_file[file] > 0 {
-                let left_file = if file > 0 {
-                    black_pawns_by_file[file - 1]
-                } else {
-                    0
-                };
-                let right_file = if file < 7 {
-                    black_pawns_by_file[file + 1]
-                } else {
-                    0
-                };
-
-                if left_file == 0 && right_file == 0 {
-                    score += 12; // Isolated pawn penalty for black
-                }
-            }
-
-            // Doubled pawns penalty
-            if white_pawns_by_file[file] > 1 {
-                score -= 12 * (white_pawns_by_file[file] - 1); // Penalty for each doubled pawn
-            }
-
-            if black_pawns_by_file[file] > 1 {
-                score += 12 * (black_pawns_by_file[file] - 1); // Penalty for black
-            }
-
-            // Passed pawns
-            for rank in 0..8 {
-                if let Some((Color::White, Piece::Pawn)) = self.get_square(rank, file) {
-                    let mut is_passed = true;
-
-                    // Check if there are any black pawns ahead on same or adjacent files
-                    for check_rank in 0..rank {
-                        for check_file in file.saturating_sub(1)..=(file + 1).min(7) {
-                            if let Some((Color::Black, Piece::Pawn)) =
-                                self.get_square(check_rank, check_file)
-                            {
-                                is_passed = false;
-                                break;
-                            }
-                        }
-                        if !is_passed {
-                            break;
-                        }
-                    }
-
-                    if is_passed {
-                        // Bonus increases as pawn advances
-                        let bonus = 10 + (7 - rank as i32) * 7;
-                        score += bonus;
-                    }
-                } else if let Some((Color::Black, Piece::Pawn)) = self.get_square(rank, file) {
-                    let mut is_passed = true;
-
-                    // Check if there are any white pawns ahead on same or adjacent files
-                    for check_rank in (rank + 1)..8 {
-                        for check_file in file.saturating_sub(1)..=(file + 1).min(7) {
-                            if let Some((Color::White, Piece::Pawn)) =
-                                self.get_square(check_rank, check_file)
-                            {
-                                is_passed = false;
-                                break;
-                            }
-                        }
-                        if !is_passed {
-                            break;
-                        }
-                    }
-
-                    if is_passed {
-                        // Bonus increases as pawn advances
-                        let bonus = 10 + rank as i32 * 7;
-                        score -= bonus;
-                    }
-                }
-            }
-        }
-
-        // Return score relative to the current player to move
         if self.white_to_move {
             score
         } else {
@@ -1340,6 +1381,7 @@ impl Board {
         depth: u32,
         mut alpha: i32, // Keep mutable
         mut beta: i32,  // Keep mutable
+        moves_buf: &mut Vec<Move>,
     ) -> i32 {
         let original_alpha = alpha; // Store original alpha for TT bounds
         let current_hash = self.hash; // Get hash for current position
@@ -1360,21 +1402,30 @@ impl Board {
             }
             // Use best move from TT for move ordering, even if depth wasn't sufficient
             // Must clone the move here as entry is borrowed
-            hash_move = entry.best_move.clone();
+            hash_move = entry.best_move;
         }
+
+        // Cooperative stop check
+        if search_control::should_stop() {
+            return 0; // best-effort early exit
+        }
+
+        // Count this node and check node limit
+        search_control::node_visited();
 
         // --- Base Case: Depth 0 ---
         if depth == 0 {
             // Call quiescence search at leaf nodes
-            return self.quiesce(tt, alpha, beta); // Pass TT to quiesce
+            return self.quiesce(tt, alpha, beta, moves_buf); // Pass TT and moves buffer to quiesce
         }
 
         // --- Generate Moves ---
-        let mut legal_moves = self.generate_moves(); // Needs &mut self
-        legal_moves.sort_by_key(|m| -mvv_lva_score(m, self));
+    moves_buf.clear();
+    self.generate_moves_into(moves_buf);
+    moves_buf.sort_by_key(|m| -mvv_lva_score(m, self));
 
         // --- Check for Checkmate / Stalemate ---
-        if legal_moves.is_empty() {
+        if moves_buf.is_empty() {
             let current_color = self.current_color();
             return if self.is_in_check(current_color) {
                 -(MATE_SCORE - (100 - depth as i32)) // Checkmate score depends on depth
@@ -1386,34 +1437,39 @@ impl Board {
         // --- Move Ordering ---
         // Basic: Try hash move first if available
         if let Some(hm) = &hash_move {
-            if let Some(pos) = legal_moves.iter().position(|m| m == hm) {
+            if let Some(pos) = moves_buf.iter().position(|m| m == hm) {
                 // Swap hash move to the front
-                legal_moves.swap(0, pos);
+                moves_buf.swap(0, pos);
             }
         }
         // TODO: Implement more sophisticated move ordering (captures, killers, history)
 
-        // --- Iterate Through Moves ---
-        let mut best_score = -MATE_SCORE * 2; // Initialize with very low score
+    // --- Iterate Through Moves ---
+    let mut best_score = -MATE_SCORE * 2; // Initialize with very low score
         let mut best_move_found: Option<Move> = None;
 
-        for (i, m) in legal_moves.iter().enumerate() {
-            let info = self.make_move(&m);
-            let score = if i == 0 {
-                -self.negamax(tt, depth - 1, -beta, -alpha)
+    // Child buffer reused for recursive calls to avoid borrowing the current moves_buf
+    let mut child_buf: Vec<Move> = Vec::new();
+    for (i, m) in moves_buf.iter().enumerate() {
+            if search_control::should_stop() {
+                break;
+            }
+            let info = self.make_move(m);
+                let score = if i == 0 {
+                -self.negamax(tt, depth - 1, -beta, -alpha, &mut child_buf)
             } else {
-                let mut score = -self.negamax(tt, depth - 1, -alpha - 1, -alpha);
+                let mut score = -self.negamax(tt, depth - 1, -alpha - 1, -alpha, &mut child_buf);
                 if score > alpha && score < beta {
-                    score = -self.negamax(tt, depth - 1, -beta, -alpha);
+                    score = -self.negamax(tt, depth - 1, -beta, -alpha, &mut child_buf);
                 }
                 score
             };
-            self.unmake_move(&m, info);
+            self.unmake_move(m, info);
 
             // --- Update Alpha/Beta and Best Score ---
             if score > best_score {
                 best_score = score;
-                best_move_found = Some(m.clone()); // Store the best move *found* so far
+                best_move_found = Some(*m); // Store the best move *found* so far
             }
 
             alpha = alpha.max(best_score);
@@ -1434,20 +1490,30 @@ impl Board {
             BoundType::Exact // Score is within the alpha-beta window
         };
 
-        tt.store(current_hash, depth, best_score, bound_type, best_move_found); // Store result
+    tt.store(current_hash, depth, best_score, bound_type, best_move_found); // Store result
 
         best_score
     }
 
     // Quiescence search (also takes TT, but primarily for passing down)
+    #[allow(clippy::only_used_in_recursion)]
     fn quiesce(
         &mut self,
         tt: &mut TranspositionTable, // Pass TT along (though not used directly here yet)
         mut alpha: i32,
         beta: i32,
+        moves_buf: &mut Vec<Move>,
     ) -> i32 {
         // --- Standing Pat Score ---
         let stand_pat_score = self.evaluate();
+
+        // Cooperative stop check at quiescence entry
+        if search_control::should_stop() {
+            return stand_pat_score;
+        }
+
+        // Count this node
+        search_control::node_visited();
 
         // --- Alpha-Beta Pruning Check (Standing Pat) ---
         if stand_pat_score >= beta {
@@ -1455,28 +1521,34 @@ impl Board {
         }
         alpha = alpha.max(stand_pat_score); // Update lower bound
 
-        // --- Generate Only Tactical Moves ---
-        let mut tactical_moves = self.generate_tactical_moves();
-        tactical_moves.sort_by_key(|m| -mvv_lva_score(m, self));
+            // --- Generate Only Tactical Moves ---
+        moves_buf.clear();
+        self.generate_tactical_moves_into(moves_buf);
+        moves_buf.sort_by_key(|m| -mvv_lva_score(m, self));
 
-        // TODO: Add move ordering for tactical moves (e.g., MVV-LVA)
+            // TODO: Add move ordering for tactical moves (e.g., MVV-LVA)
 
-        // --- Iterate Through Tactical Moves ---
-        let mut best_score = stand_pat_score; // Start with the standing pat score
+            // --- Iterate Through Tactical Moves ---
+            let mut best_score = stand_pat_score; // Start with the standing pat score
 
+        // Clone the generated list so we can safely mutate the shared buffer during recursion
+        let tactical_moves = moves_buf.clone();
         for m in tactical_moves {
-            let info = self.make_move(&m);
-            // Recursive call passes TT, alpha, beta
-            let score = -self.quiesce(tt, -beta, -alpha);
-            self.unmake_move(&m, info);
+                if search_control::should_stop() {
+                    break;
+                }
+                let info = self.make_move(&m);
+                // Recursive call passes TT, alpha, beta and the shared moves buffer
+                let score = -self.quiesce(tt, -beta, -alpha, moves_buf);
+                self.unmake_move(&m, info);
 
-            best_score = best_score.max(score);
-            alpha = alpha.max(best_score);
+                best_score = best_score.max(score);
+                alpha = alpha.max(best_score);
 
-            if alpha >= beta {
-                break; // Beta cutoff
+                if alpha >= beta {
+                    break; // Beta cutoff
+                }
             }
-        }
 
         // Note: We typically don't store quiescence results directly in the main TT
         // in the same way as fixed-depth search, as the 'depth' concept is different.
@@ -1487,134 +1559,156 @@ impl Board {
 
     // Add a function to generate only tactical moves (captures, promotions)
     // This function needs &mut self because legality checking involves make/unmake
+    #[allow(dead_code)]
     pub fn generate_tactical_moves(&mut self) -> Vec<Move> {
         let current_color = self.current_color();
-
-        // 1. Generate Pseudo-Tactical Moves (faster than generating all pseudo moves)
+        let color_idx = color_to_zobrist_index(current_color);
         let mut pseudo_tactical_moves = Vec::new();
-        for r in 0..8 {
-            for f in 0..8 {
-                if let Some((c, piece)) = self.get_square(r, f) {
-                    if c == current_color {
-                        let from = Square(r, f);
-                        // Generate moves for this piece, but only keep captures/promotions
-                        match piece {
-                            Piece::Pawn => {
-                                // Check pawn captures and promotions specifically
-                                self.generate_pawn_tactical_moves(from, &mut pseudo_tactical_moves);
-                            }
-                            _ => {
-                                // For other pieces, generate their moves and filter
-                                let piece_moves = self.generate_piece_moves(from, piece);
-                                for m in piece_moves {
-                                    // Keep captures (or en passant)
-                                    if m.captured_piece.is_some() || m.is_en_passant {
-                                        pseudo_tactical_moves.push(m);
-                                    }
-                                    // Note: Promotions are handled by generate_pawn_tactical_moves
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
-        // 2. Check Legality (Filter out moves that leave the king in check)
+        self.add_pawn_tactical_moves(current_color, &mut pseudo_tactical_moves);
+
+        let knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
+        self.add_leaper_moves(
+            current_color,
+            knights,
+            Self::knight_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let bishops = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)];
+        self.add_sliding_moves(
+            current_color,
+            bishops,
+            Self::bishop_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let rooks = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)];
+        self.add_sliding_moves(
+            current_color,
+            rooks,
+            Self::rook_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let queens = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
+        self.add_sliding_moves(
+            current_color,
+            queens,
+            |sq, occ| Self::rook_attacks(sq, occ) | Self::bishop_attacks(sq, occ),
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        self.add_leaper_moves(
+            current_color,
+            kings,
+            Self::king_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
         let mut legal_tactical_moves = Vec::new();
         for m in pseudo_tactical_moves {
-            // Skip castling as it's not typically considered a tactical move for quiescence
             if m.is_castling {
                 continue;
             }
 
-            // Check general legality: Does the move leave the king in check?
-            let info = self.make_move(&m); // Make the move temporarily
+            let info = self.make_move(&m);
             if !self.is_in_check(current_color) {
-                // Check if the player who moved is now safe
-                legal_tactical_moves.push(m.clone()); // If safe, it's a legal tactical move
+                legal_tactical_moves.push(m);
             }
-            self.unmake_move(&m, info); // Unmake the move to restore state
+            self.unmake_move(&m, info);
         }
 
         legal_tactical_moves
     }
 
-    // Helper specifically for pawn captures and promotions
-    fn generate_pawn_tactical_moves(&self, from: Square, moves: &mut Vec<Move>) {
-        let color = self.current_color();
-        let dir: isize = if color == Color::White { 1 } else { -1 };
-        let promotion_rank = if color == Color::White { 7 } else { 0 };
+    pub fn generate_tactical_moves_into(&mut self, out: &mut Vec<Move>) {
+        out.clear();
+        let current_color = self.current_color();
+        let color_idx = color_to_zobrist_index(current_color);
+        let mut pseudo_tactical_moves = Vec::new();
 
-        let r = from.0 as isize;
-        let f = from.1 as isize;
+        self.add_pawn_tactical_moves(current_color, &mut pseudo_tactical_moves);
 
-        let forward_r = r + dir;
+        let knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
+        self.add_leaper_moves(
+            current_color,
+            knights,
+            Self::knight_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
 
-        // Check Promotions (forward move resulting in promotion)
-        if forward_r >= 0 && forward_r < 8 {
-            let forward_sq = Square(forward_r as usize, f as usize);
-            if forward_sq.0 == promotion_rank
-                && self.get_square(forward_sq.0, forward_sq.1).is_none()
-            {
-                for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                    moves.push(self.create_move(from, forward_sq, Some(promo), false, false));
-                }
+        let bishops = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)];
+        self.add_sliding_moves(
+            current_color,
+            bishops,
+            Self::bishop_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let rooks = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)];
+        self.add_sliding_moves(
+            current_color,
+            rooks,
+            Self::rook_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let queens = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
+        self.add_sliding_moves(
+            current_color,
+            queens,
+            |sq, occ| Self::rook_attacks(sq, occ) | Self::bishop_attacks(sq, occ),
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        self.add_leaper_moves(
+            current_color,
+            kings,
+            Self::king_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        for m in pseudo_tactical_moves {
+            if m.is_castling {
+                continue;
             }
-        }
 
-        // Check Captures and Capture-Promotions
-        if forward_r >= 0 && forward_r < 8 {
-            for df in [-1, 1] {
-                let capture_f = f + df;
-                if capture_f >= 0 && capture_f < 8 {
-                    let target_sq = Square(forward_r as usize, capture_f as usize);
-
-                    // Regular capture
-                    if let Some((target_color, _)) = self.get_square(target_sq.0, target_sq.1) {
-                        if target_color != color {
-                            if target_sq.0 == promotion_rank {
-                                // Capture with promotion
-                                for promo in
-                                    [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
-                                {
-                                    moves.push(self.create_move(
-                                        from,
-                                        target_sq,
-                                        Some(promo),
-                                        false,
-                                        false,
-                                    ));
-                                }
-                            } else {
-                                // Normal capture
-                                moves.push(self.create_move(from, target_sq, None, false, false));
-                            }
-                        }
-                    }
-                    // En passant capture
-                    else if Some(target_sq) == self.en_passant_target {
-                        // Check if the en passant target square matches the potential capture square
-                        moves.push(self.create_move(from, target_sq, None, false, true));
-                    }
-                }
+            let info = self.make_move(&m);
+            if !self.is_in_check(current_color) {
+                out.push(m);
             }
+            self.unmake_move(&m, info);
         }
     }
 
     // --- Perft (for testing, now takes &mut self) ---
+    #[allow(dead_code)]
     pub fn perft(&mut self, depth: usize) -> u64 {
         if depth == 0 {
             return 1;
         }
 
-        let moves = self.generate_moves();
+        let mut mvbuf = Vec::new();
+        self.generate_moves_into(&mut mvbuf);
         if depth == 1 {
-            return moves.len() as u64;
+            return mvbuf.len() as u64;
         }
 
         let mut nodes = 0;
-        for m in moves {
+        for m in mvbuf {
             let info = self.make_move(&m);
             nodes += self.perft(depth - 1);
             self.unmake_move(&m, info);
@@ -1640,6 +1734,7 @@ impl Board {
     }
 
     // Add a print function for debugging
+    #[allow(dead_code)]
     fn print(&self) {
         println!("  +---+---+---+---+---+---+---+---+");
         for rank in (0..8).rev() {
@@ -1742,18 +1837,19 @@ pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     // if we just want to *find* the move without changing state yet.
     // A temporary clone *might* be acceptable here, or we pass the pre-generated list.
     // Let's generate moves here.
-    let legal_moves = board.generate_moves(); // Needs &mut borrow
+    let mut legal_moves = Vec::new();
+    board.generate_moves_into(&mut legal_moves);
 
     for legal_move in legal_moves {
         if legal_move.from == from_sq && legal_move.to == to_sq {
             // Check for promotion match
             if legal_move.promotion == promotion_piece {
                 // Found the move! Return a clone of it.
-                return Some(legal_move.clone());
+                return Some(legal_move);
             }
             // If no promotion specified by user AND move is not a promotion, it's a match
             else if promotion_piece.is_none() && legal_move.promotion.is_none() {
-                return Some(legal_move.clone());
+                return Some(legal_move);
             }
         }
     }
@@ -1761,25 +1857,54 @@ pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     None // No matching legal move found
 }
 
+#[allow(dead_code)]
 pub fn find_best_move(
     board: &mut Board,
     tt: &mut TranspositionTable,
     max_depth: u32,
 ) -> Option<Move> {
-    let mut best_move: Option<Move> = None;
-    let mut best_score = -MATE_SCORE * 2;
+    find_best_move_with_sink(board, tt, max_depth, None, None, false)
+}
 
-    let legal_moves = board.generate_moves();
+pub fn find_best_move_with_sink(
+    board: &mut Board,
+    tt: &mut TranspositionTable,
+    max_depth: u32,
+    sink: Option<std::sync::Arc<std::sync::Mutex<Option<Move>>>>,
+    info_sender: Option<std::sync::mpsc::Sender<uci_info::Info>>,
+    _is_ponder: bool,
+) -> Option<Move> {
+    let mut best_move: Option<Move> = None;
+    let mut _best_score = -MATE_SCORE * 2;
+
+    let mut legal_moves = Vec::new();
+    board.generate_moves_into(&mut legal_moves);
     if legal_moves.is_empty() {
         return None;
     }
     if legal_moves.len() == 1 {
         return Some(legal_moves[0]); // No need to search further
     }
-    let mut root_moves = legal_moves.clone(); // Reuse for move ordering
+    let mut root_moves = legal_moves; // Reuse for move ordering (moved instead of clone)
+
+    // Helper to build a PV string from the transposition table starting at the current hash
+    fn build_pv_string(tt: &TranspositionTable, start_hash: u64) -> String {
+        let mut pv = Vec::new();
+        if let Some(entry) = tt.probe(start_hash) {
+            if let Some(mv) = entry.best_move {
+                pv.push(mv);
+            }
+        }
+        let pv_strs: Vec<String> = pv.iter().map(|m| format!("{}{}", format_square(m.from), format_square(m.to))).collect();
+        pv_strs.join(" ")
+    }
 
     // Iterative Deepening Loop
+    let search_start = Instant::now();
+
     for depth in 1..=max_depth {
+        let _depth_start = Instant::now();
+        let _nodes_before = crate::search_control::get_node_count();
         let mut alpha = -MATE_SCORE * 2;
         let beta = MATE_SCORE * 2;
         let mut current_best_score = -MATE_SCORE * 2;
@@ -1794,9 +1919,11 @@ pub fn find_best_move(
             }
         }
 
+        // Temporary moves buffer to pass into recursive negamax/quiesce calls
+        let mut mv_buf = Vec::new();
         for m in &root_moves {
             let info = board.make_move(m);
-            let score = -board.negamax(tt, depth - 1, -beta, -alpha);
+            let score = -board.negamax(tt, depth - 1, -beta, -alpha, &mut mv_buf);
             board.unmake_move(m, info);
 
             if score > current_best_score {
@@ -1808,8 +1935,51 @@ pub fn find_best_move(
         }
 
         if let Some(mv) = current_best_move {
-            best_score = current_best_score;
+            _best_score = current_best_score;
             best_move = Some(mv);
+
+            // publish intermediate best move to sink if provided
+            if let Some(ref s) = sink {
+                let mut lock = s.lock().unwrap();
+                *lock = best_move;
+            }
+
+            // Build structured Info and send to the info channel if present
+            if let Some(ref sender) = info_sender {
+                let nodes_after = crate::search_control::get_node_count();
+                let nodes_total = nodes_after;
+                let elapsed_ms = search_start.elapsed().as_millis();
+                let nps = if elapsed_ms > 0 {
+                    Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
+                } else {
+                    None
+                };
+                let pv = build_pv_string(tt, board.hash);
+                let mut info = uci_info::Info {
+                    depth: Some(depth),
+                    nodes: Some(nodes_total),
+                    nps,
+                    time_ms: Some(elapsed_ms),
+                    score_cp: None,
+                    score_mate: None,
+                    pv: Some(pv.clone()),
+                    seldepth: Some(depth),
+                    ponder: None,
+                };
+                if _best_score.abs() > (MATE_SCORE / 2) {
+                    let mate_in = (MATE_SCORE - _best_score.abs() + 1) / 2;
+                    info.score_mate = Some(mate_in);
+                } else {
+                    info.score_cp = Some(_best_score);
+                }
+                // If the caller indicated we are pondering, include the best move as 'ponder'
+                if _is_ponder {
+                    if let Some(bm) = best_move {
+                        info.ponder = Some(format!("{}{}", format_square(bm.from), format_square(bm.to)));
+                    }
+                }
+                let _ = sender.send(info);
+            }
 
             // Optional: reorder root_moves so best move is searched first in next iteration
             if let Some(pos) = root_moves.iter().position(|m| *m == mv) {
@@ -1821,11 +1991,24 @@ pub fn find_best_move(
     best_move
 }
 
+#[allow(dead_code)]
 pub fn find_best_move_with_time(
     board: &mut Board,
     tt: &mut TranspositionTable,
     max_time: Duration,
     start_time: Instant,
+) -> Option<Move> {
+    find_best_move_with_time_with_sink(board, tt, max_time, start_time, None, None, false)
+}
+
+pub fn find_best_move_with_time_with_sink(
+    board: &mut Board,
+    tt: &mut TranspositionTable,
+    max_time: Duration,
+    start_time: Instant,
+    sink: Option<std::sync::Arc<std::sync::Mutex<Option<Move>>>>,
+    info_sender: Option<std::sync::mpsc::Sender<uci_info::Info>>,
+    _is_ponder: bool,
 ) -> Option<Move> {
     let mut best_move: Option<Move> = None;
     let mut depth = 1;
@@ -1848,8 +2031,9 @@ pub fn find_best_move_with_time(
 
         let mut alpha = -MATE_SCORE * 2;
         let beta = MATE_SCORE * 2;
-        let mut best_score = -MATE_SCORE * 2;
-        let mut legal_moves = board.generate_moves();
+    let mut best_score = -MATE_SCORE * 2;
+        let mut legal_moves = Vec::new();
+        board.generate_moves_into(&mut legal_moves);
 
         if legal_moves.is_empty() {
             return None;
@@ -1871,13 +2055,15 @@ pub fn find_best_move_with_time(
 
         let mut new_best_move = None;
 
+        // Temporary moves buffer reused for recursive calls
+        let mut mv_buf = Vec::new();
         for m in &legal_moves {
             if start_time.elapsed() + SAFETY_MARGIN >= max_time {
                 break;
             }
 
             let info = board.make_move(m);
-            let score = -board.negamax(tt, depth - 1, -beta, -alpha);
+            let score = -board.negamax(tt, depth - 1, -beta, -alpha, &mut mv_buf);
             board.unmake_move(m, info);
 
             if score > best_score {
@@ -1889,9 +2075,70 @@ pub fn find_best_move_with_time(
         }
 
         // Only update result if completed full depth in time
-        if start_time.elapsed() + SAFETY_MARGIN < max_time {
-            best_move = new_best_move;
-            last_depth_time = depth_start.elapsed();
+            if start_time.elapsed() + SAFETY_MARGIN < max_time {
+                best_move = new_best_move;
+                // publish best move for this depth
+                if let Some(ref s) = sink {
+                    let mut lock = s.lock().unwrap();
+                    *lock = best_move;
+                }
+
+                // Send structured Info via channel if available
+                if let Some(ref sender) = info_sender {
+                    // Build PV by cloning board and following TT best moves
+                    fn build_pv_using_board(orig: &Board, tt: &TranspositionTable, max_ply: usize) -> String {
+                        let mut b = orig.clone();
+                        let mut pv = Vec::new();
+                        for _ in 0..max_ply {
+                            if let Some(entry) = tt.probe(b.hash) {
+                                if let Some(mv) = entry.best_move {
+                                    pv.push(mv);
+                                    let _info = b.make_move(&mv);
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        let pv_strs: Vec<String> = pv.iter().map(|m| format!("{}{}", format_square(m.from), format_square(m.to))).collect();
+                        pv_strs.join(" ")
+                    }
+
+                    let nodes_total = crate::search_control::get_node_count();
+                    let elapsed_ms = start_time.elapsed().as_millis();
+                    let nps = if elapsed_ms > 0 {
+                        Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
+                    } else {
+                        None
+                    };
+                    let pv = build_pv_using_board(board, tt, 20);
+                    let mut info = uci_info::Info {
+                        depth: Some(depth),
+                        nodes: Some(nodes_total),
+                        nps,
+                        time_ms: Some(elapsed_ms),
+                        score_cp: None,
+                        score_mate: None,
+                        pv: Some(pv),
+                        seldepth: None,
+                        ponder: None,
+                    };
+                    if best_score.abs() > (MATE_SCORE / 2) {
+                        let mate_in = (MATE_SCORE - best_score.abs() + 1) / 2;
+                        info.score_mate = Some(mate_in);
+                    } else {
+                        info.score_cp = Some(best_score);
+                    }
+                    if _is_ponder {
+                        if let Some(bm) = best_move {
+                            info.ponder = Some(format!("{}{}", format_square(bm.from), format_square(bm.to)));
+                        }
+                    }
+                    let _ = sender.send(info);
+                }
+
+                last_depth_time = depth_start.elapsed();
             depth += 1;
         } else {
             break;

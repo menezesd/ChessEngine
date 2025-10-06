@@ -17,24 +17,24 @@ impl ZobristKeys {
         let mut castling_keys = [[0; 2]; 2];
         let mut en_passant_keys = [0; 8];
 
-        for p_idx in 0..6 {
-            for c_idx in 0..2 {
-                for sq_idx in 0..64 {
-                    piece_keys[p_idx][c_idx][sq_idx] = rng.gen();
+        for p in piece_keys.iter_mut() {
+            for c in p.iter_mut() {
+                for sq in c.iter_mut() {
+                    *sq = rng.gen();
                 }
             }
         }
 
         let black_to_move_key = rng.gen();
 
-        for c_idx in 0..2 {
-            for side_idx in 0..2 {
-                castling_keys[c_idx][side_idx] = rng.gen();
+        for row in castling_keys.iter_mut() {
+            for slot in row.iter_mut() {
+                *slot = rng.gen();
             }
         }
 
-        for f_idx in 0..8 {
-            en_passant_keys[f_idx] = rng.gen();
+        for slot in en_passant_keys.iter_mut() {
+            *slot = rng.gen();
         }
 
         ZobristKeys {
