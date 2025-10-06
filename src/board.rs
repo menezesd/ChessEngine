@@ -1,18 +1,55 @@
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::constants::MATE_SCORE;
 use crate::transposition_table::{BoundType, TranspositionTable};
-use crate::types::{file_to_index, format_square, rank_to_index, Color, Move, Piece, Square};
+use crate::types::{
+    bitboard_for_square, file_to_index, format_square, rank_to_index, Bitboard, Color, Move, Piece,
+    Square,
+};
 use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
 };
+
+const CASTLE_WHITE_KINGSIDE: u8 = 0b0001;
+const CASTLE_WHITE_QUEENSIDE: u8 = 0b0010;
+const CASTLE_BLACK_KINGSIDE: u8 = 0b0100;
+const CASTLE_BLACK_QUEENSIDE: u8 = 0b1000;
+
+fn castling_bit(color: Color, side: char) -> u8 {
+    match (color, side) {
+        (Color::White, 'K') => CASTLE_WHITE_KINGSIDE,
+        (Color::White, 'Q') => CASTLE_WHITE_QUEENSIDE,
+        (Color::Black, 'K') => CASTLE_BLACK_KINGSIDE,
+        (Color::Black, 'Q') => CASTLE_BLACK_QUEENSIDE,
+        _ => 0,
+    }
+}
+
+fn piece_from_index(index: usize) -> Piece {
+    match index {
+        0 => Piece::Pawn,
+        1 => Piece::Knight,
+        2 => Piece::Bishop,
+        3 => Piece::Rook,
+        4 => Piece::Queen,
+        5 => Piece::King,
+        _ => unreachable!("invalid piece index"),
+    }
+}
+
+fn color_from_index(index: usize) -> Color {
+    match index {
+        0 => Color::White,
+        1 => Color::Black,
+        _ => unreachable!("invalid color index"),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct UnmakeInfo {
     captured_piece_info: Option<(Color, Piece)>,
     previous_en_passant_target: Option<Square>,
-    previous_castling_rights: HashSet<(Color, char)>,
+    previous_castling_rights: u8,
     previous_hash: u64, // Store previous hash for unmake
 }
 
@@ -29,7 +66,7 @@ fn piece_value(piece: Piece) -> i32 {
 
 pub fn mvv_lva_score(m: &Move, board: &Board) -> i32 {
     if let Some(victim) = m.captured_piece {
-        let attacker = board.squares[m.from.0][m.from.1].unwrap().1;
+        let attacker = board.piece_at(m.from).unwrap().1;
         let victim_value = piece_value(victim);
         let attacker_value = piece_value(attacker);
         victim_value * 10 - attacker_value // prioritize more valuable victims, less valuable attackers
@@ -40,17 +77,113 @@ pub fn mvv_lva_score(m: &Move, board: &Board) -> i32 {
 
 #[derive(Clone, Debug)]
 pub struct Board {
-    pub squares: [[Option<(Color, Piece)>; 8]; 8],
+    pub bitboards: [[Bitboard; 6]; 2],
+    pub occupancy: [Bitboard; 2],
+    pub all_occupancy: Bitboard,
     pub white_to_move: bool,
     pub en_passant_target: Option<Square>,
-    pub castling_rights: HashSet<(Color, char)>,
+    pub castling_rights: u8,
     pub hash: u64,
 }
 
 impl Board {
+    fn empty() -> Self {
+        Board {
+            bitboards: [[0; 6]; 2],
+            occupancy: [0; 2],
+            all_occupancy: 0,
+            white_to_move: true,
+            en_passant_target: None,
+            castling_rights: 0,
+            hash: 0,
+        }
+    }
+
+    fn update_all_occupancy(&mut self) {
+        self.all_occupancy = self.occupancy[0] | self.occupancy[1];
+    }
+
+    pub fn piece_at(&self, square: Square) -> Option<(Color, Piece)> {
+        let mask = bitboard_for_square(square);
+        for color_idx in 0..2 {
+            if self.occupancy[color_idx] & mask != 0 {
+                for piece_idx in 0..6 {
+                    if self.bitboards[color_idx][piece_idx] & mask != 0 {
+                        return Some((color_from_index(color_idx), piece_from_index(piece_idx)));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn remove_piece_at(&mut self, square: Square) -> Option<(Color, Piece)> {
+        let mask = bitboard_for_square(square);
+        for color_idx in 0..2 {
+            if self.occupancy[color_idx] & mask != 0 {
+                for piece_idx in 0..6 {
+                    if self.bitboards[color_idx][piece_idx] & mask != 0 {
+                        self.bitboards[color_idx][piece_idx] &= !mask;
+                        self.occupancy[color_idx] &= !mask;
+                        self.update_all_occupancy();
+                        return Some((color_from_index(color_idx), piece_from_index(piece_idx)));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn place_piece_at(&mut self, square: Square, piece: (Color, Piece)) {
+        let mask = bitboard_for_square(square);
+        let color_idx = color_to_zobrist_index(piece.0);
+        let piece_idx = piece_to_zobrist_index(piece.1);
+        self.bitboards[color_idx][piece_idx] |= mask;
+        self.occupancy[color_idx] |= mask;
+        self.update_all_occupancy();
+    }
+
+    fn set_piece_at(
+        &mut self,
+        square: Square,
+        piece: Option<(Color, Piece)>,
+    ) -> Option<(Color, Piece)> {
+        let previous = self.remove_piece_at(square);
+        if let Some(info) = piece {
+            self.place_piece_at(square, info);
+        }
+        previous
+    }
+
+    fn get_square(&self, rank: usize, file: usize) -> Option<(Color, Piece)> {
+        self.piece_at(Square(rank, file))
+    }
+
+    fn set_square(
+        &mut self,
+        rank: usize,
+        file: usize,
+        piece: Option<(Color, Piece)>,
+    ) -> Option<(Color, Piece)> {
+        self.set_piece_at(Square(rank, file), piece)
+    }
+
+    fn has_castling_right(&self, color: Color, side: char) -> bool {
+        let bit = castling_bit(color, side);
+        bit != 0 && (self.castling_rights & bit) != 0
+    }
+
+    fn add_castling_right(&mut self, color: Color, side: char) {
+        self.castling_rights |= castling_bit(color, side);
+    }
+
     pub fn new() -> Self {
-        // ... (initialization of squares, rights etc. as before) ...
-        let mut squares = [[None; 8]; 8];
+        let mut board = Board::empty();
+        board.castling_rights = CASTLE_WHITE_KINGSIDE
+            | CASTLE_WHITE_QUEENSIDE
+            | CASTLE_BLACK_KINGSIDE
+            | CASTLE_BLACK_QUEENSIDE;
+
         let back_rank = [
             Piece::Rook,
             Piece::Knight,
@@ -62,32 +195,17 @@ impl Board {
             Piece::Rook,
         ];
         for (i, piece) in back_rank.iter().enumerate() {
-            squares[0][i] = Some((Color::White, *piece));
-            squares[7][i] = Some((Color::Black, *piece));
-            squares[1][i] = Some((Color::White, Piece::Pawn));
-            squares[6][i] = Some((Color::Black, Piece::Pawn));
+            board.place_piece_at(Square(0, i), (Color::White, *piece));
+            board.place_piece_at(Square(7, i), (Color::Black, *piece));
+            board.place_piece_at(Square(1, i), (Color::White, Piece::Pawn));
+            board.place_piece_at(Square(6, i), (Color::Black, Piece::Pawn));
         }
-        let mut castling_rights = HashSet::new();
-        castling_rights.insert((Color::White, 'K'));
-        castling_rights.insert((Color::White, 'Q'));
-        castling_rights.insert((Color::Black, 'K'));
-        castling_rights.insert((Color::Black, 'Q'));
-
-        let mut board = Board {
-            squares,
-            white_to_move: true,
-            en_passant_target: None,
-            castling_rights,
-            hash: 0, // Initialize hash to 0 before calculating
-        };
         board.hash = board.calculate_initial_hash(); // Calculate hash after setting up board
         board
     }
 
     pub fn from_fen(fen: &str) -> Self {
-        // ... (parsing FEN as before) ...
-        let mut squares = [[None; 8]; 8];
-        let mut castling_rights = HashSet::new();
+        let mut board = Board::empty();
         let parts: Vec<&str> = fen.split_whitespace().collect();
         assert!(parts.len() >= 4, "FEN must have at least 4 parts");
         for (rank_idx, rank_str) in parts[0].split('/').enumerate() {
@@ -111,12 +229,12 @@ impl Board {
                         'k' => (Color::Black, Piece::King),
                         _ => panic!("Invalid piece char"),
                     };
-                    squares[7 - rank_idx][file] = Some((color, piece));
+                    board.place_piece_at(Square(7 - rank_idx, file), (color, piece));
                     file += 1;
                 }
             }
         }
-        let white_to_move = match parts[1] {
+        board.white_to_move = match parts[1] {
             "w" => true,
             "b" => false,
             _ => panic!("Invalid color"),
@@ -124,16 +242,16 @@ impl Board {
         for c in parts[2].chars() {
             match c {
                 'K' => {
-                    castling_rights.insert((Color::White, 'K'));
+                    board.add_castling_right(Color::White, 'K');
                 }
                 'Q' => {
-                    castling_rights.insert((Color::White, 'Q'));
+                    board.add_castling_right(Color::White, 'Q');
                 }
                 'k' => {
-                    castling_rights.insert((Color::Black, 'K'));
+                    board.add_castling_right(Color::Black, 'K');
                 }
                 'q' => {
-                    castling_rights.insert((Color::Black, 'Q'));
+                    board.add_castling_right(Color::Black, 'Q');
                 }
                 '-' => {}
                 _ => panic!("Invalid castle"),
@@ -150,13 +268,7 @@ impl Board {
             None
         };
 
-        let mut board = Board {
-            squares,
-            white_to_move,
-            en_passant_target,
-            castling_rights,
-            hash: 0, // Initialize hash to 0 before calculating
-        };
+        board.en_passant_target = en_passant_target;
         board.hash = board.calculate_initial_hash(); // Calculate hash after setting up board
         board
     }
@@ -165,14 +277,13 @@ impl Board {
     fn calculate_initial_hash(&self) -> u64 {
         let mut hash: u64 = 0;
 
-        // Pieces
-        for r in 0..8 {
-            for f in 0..8 {
-                if let Some((color, piece)) = self.squares[r][f] {
-                    let sq_idx = square_to_zobrist_index(Square(r, f));
-                    let p_idx = piece_to_zobrist_index(piece);
-                    let c_idx = color_to_zobrist_index(color);
-                    hash ^= ZOBRIST.piece_keys[p_idx][c_idx][sq_idx];
+        for color_idx in 0..2 {
+            for piece_idx in 0..6 {
+                let mut bb = self.bitboards[color_idx][piece_idx];
+                while bb != 0 {
+                    let sq_idx = bb.trailing_zeros() as usize;
+                    hash ^= ZOBRIST.piece_keys[piece_idx][color_idx][sq_idx];
+                    bb &= bb - 1;
                 }
             }
         }
@@ -183,16 +294,16 @@ impl Board {
         }
 
         // Castling rights
-        if self.castling_rights.contains(&(Color::White, 'K')) {
+        if self.has_castling_right(Color::White, 'K') {
             hash ^= ZOBRIST.castling_keys[0][0];
         }
-        if self.castling_rights.contains(&(Color::White, 'Q')) {
+        if self.has_castling_right(Color::White, 'Q') {
             hash ^= ZOBRIST.castling_keys[0][1];
         }
-        if self.castling_rights.contains(&(Color::Black, 'K')) {
+        if self.has_castling_right(Color::Black, 'K') {
             hash ^= ZOBRIST.castling_keys[1][0];
         }
-        if self.castling_rights.contains(&(Color::Black, 'Q')) {
+        if self.has_castling_right(Color::Black, 'Q') {
             hash ^= ZOBRIST.castling_keys[1][1];
         }
 
@@ -208,26 +319,19 @@ impl Board {
 
     pub fn make_move(&mut self, m: &Move) -> UnmakeInfo {
         let mut current_hash = self.hash;
-        let previous_hash = self.hash; // Store hash before changes
-
+        let previous_hash = self.hash;
         let color = self.current_color();
 
-        // Store previous state for unmaking
         let previous_en_passant_target = self.en_passant_target;
-        let previous_castling_rights = self.castling_rights.clone();
+        let previous_castling_rights = self.castling_rights;
 
-        // 1. Update hash: Side to move always changes
         current_hash ^= ZOBRIST.black_to_move_key;
 
-        // 2. Update hash: Remove old en passant target file (if any)
         if let Some(old_ep) = self.en_passant_target {
             current_hash ^= ZOBRIST.en_passant_keys[old_ep.1];
         }
 
-        // Determine captured piece *before* moving
         let mut captured_piece_info: Option<(Color, Piece)> = None;
-        let mut captured_sq_idx: Option<usize> = None;
-
         if m.is_en_passant {
             let capture_row = if color == Color::White {
                 m.to.0 - 1
@@ -235,151 +339,128 @@ impl Board {
                 m.to.0 + 1
             };
             let capture_sq = Square(capture_row, m.to.1);
-            captured_sq_idx = Some(square_to_zobrist_index(capture_sq));
-            captured_piece_info = self.squares[capture_row][m.to.1]; // Should be Some(opp_color, Pawn)
-            self.squares[capture_row][m.to.1] = None; // Remove the en passant captured pawn
+            let capture_idx = square_to_zobrist_index(capture_sq);
+            captured_piece_info = self.get_square(capture_row, m.to.1);
+            self.set_square(capture_row, m.to.1, None);
 
-            // Update hash: remove captured EP pawn
             if let Some((cap_col, cap_piece)) = captured_piece_info {
                 current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(cap_piece)]
-                    [color_to_zobrist_index(cap_col)][captured_sq_idx.unwrap()];
+                    [color_to_zobrist_index(cap_col)][capture_idx];
             }
         } else if !m.is_castling {
-            // Regular capture or move to empty square
-            captured_piece_info = self.squares[m.to.0][m.to.1];
-            if captured_piece_info.is_some() {
-                captured_sq_idx = Some(square_to_zobrist_index(m.to));
-                // Update hash: remove captured piece from target square
-                if let Some((cap_col, cap_piece)) = captured_piece_info {
-                    current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(cap_piece)]
-                        [color_to_zobrist_index(cap_col)][captured_sq_idx.unwrap()];
-                }
+            captured_piece_info = self.get_square(m.to.0, m.to.1);
+            if let Some((cap_col, cap_piece)) = captured_piece_info {
+                let capture_idx = square_to_zobrist_index(m.to);
+                current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(cap_piece)]
+                    [color_to_zobrist_index(cap_col)][capture_idx];
             }
         }
-        // No capture hash update needed for castling here
 
-        // Get the piece being moved
-        let moving_piece_info = self.squares[m.from.0][m.from.1].expect("make_move 'from' empty");
+        let moving_piece_info = self
+            .get_square(m.from.0, m.from.1)
+            .expect("make_move 'from' empty");
         let (moving_color, moving_piece) = moving_piece_info;
         let from_sq_idx = square_to_zobrist_index(m.from);
         let to_sq_idx = square_to_zobrist_index(m.to);
 
-        // Update hash: Remove moving piece from 'from' square
         current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(moving_piece)]
             [color_to_zobrist_index(moving_color)][from_sq_idx];
 
-        // Update board squares
-        self.squares[m.from.0][m.from.1] = None;
+        self.set_square(m.from.0, m.from.1, None);
 
         if m.is_castling {
-            // Handle King and Rook moves for castling
-            self.squares[m.to.0][m.to.1] = Some((color, Piece::King)); // Place King
-                                                                       // Update hash: Place king on 'to' square
+            self.set_square(m.to.0, m.to.1, Some((color, Piece::King)));
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::King)]
                 [color_to_zobrist_index(color)][to_sq_idx];
 
-            let (rook_from_f, rook_to_f) = if m.to.1 == 6 { (7, 5) } else { (0, 3) }; // KS or QS
+            let (rook_from_f, rook_to_f) = if m.to.1 == 6 { (7, 5) } else { (0, 3) };
             let rook_from_sq = Square(m.to.0, rook_from_f);
             let rook_to_sq = Square(m.to.0, rook_to_f);
-            let rook_info =
-                self.squares[rook_from_sq.0][rook_from_sq.1].expect("Castling without rook");
-            self.squares[rook_from_sq.0][rook_from_sq.1] = None;
-            self.squares[rook_to_sq.0][rook_to_sq.1] = Some(rook_info);
+            let rook_info = self
+                .get_square(rook_from_sq.0, rook_from_sq.1)
+                .expect("Castling without rook");
+            self.set_square(rook_from_sq.0, rook_from_sq.1, None);
+            self.set_square(rook_to_sq.0, rook_to_sq.1, Some(rook_info));
 
-            // Update hash: Remove rook from original square
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)]
                 [color_to_zobrist_index(color)][square_to_zobrist_index(rook_from_sq)];
-            // Update hash: Place rook on its destination square
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)]
                 [color_to_zobrist_index(color)][square_to_zobrist_index(rook_to_sq)];
         } else {
-            // Regular move, promotion, or en passant landing
             let piece_to_place = if let Some(promoted_piece) = m.promotion {
                 (color, promoted_piece)
             } else {
                 moving_piece_info
             };
-            self.squares[m.to.0][m.to.1] = Some(piece_to_place);
-            // Update hash: Place the (potentially promoted) piece on 'to' square
+            self.set_square(m.to.0, m.to.1, Some(piece_to_place));
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(piece_to_place.1)]
                 [color_to_zobrist_index(piece_to_place.0)][to_sq_idx];
         }
 
-        // Update en_passant_target & hash
-        self.en_passant_target = None; // Clear by default
+        self.en_passant_target = None;
         if moving_piece == Piece::Pawn && (m.from.0 as isize - m.to.0 as isize).abs() == 2 {
             let ep_row = (m.from.0 + m.to.0) / 2;
             let ep_sq = Square(ep_row, m.from.1);
             self.en_passant_target = Some(ep_sq);
-            // Update hash: add new en passant target file
             current_hash ^= ZOBRIST.en_passant_keys[ep_sq.1];
         }
 
-        // --- Update castling rights & hash ---
-        let mut new_castling_rights = self.castling_rights.clone();
-        let mut castle_hash_diff: u64 = 0; // XOR changes here
+        let mut new_castling_rights = self.castling_rights;
+        let mut castle_hash_diff: u64 = 0;
 
-        // Check rights lost due to piece movement
         if moving_piece == Piece::King {
-            if self.castling_rights.contains(&(color, 'K')) {
+            if new_castling_rights & castling_bit(color, 'K') != 0 {
                 castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][0];
-                new_castling_rights.remove(&(color, 'K'));
+                new_castling_rights &= !castling_bit(color, 'K');
             }
-            if self.castling_rights.contains(&(color, 'Q')) {
+            if new_castling_rights & castling_bit(color, 'Q') != 0 {
                 castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][1];
-                new_castling_rights.remove(&(color, 'Q'));
+                new_castling_rights &= !castling_bit(color, 'Q');
             }
         } else if moving_piece == Piece::Rook {
             let start_rank = if color == Color::White { 0 } else { 7 };
-            if m.from == Square(start_rank, 0) && self.castling_rights.contains(&(color, 'Q')) {
-                // A-side rook moved
-                castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][1];
-                new_castling_rights.remove(&(color, 'Q'));
-            } else if m.from == Square(start_rank, 7)
-                && self.castling_rights.contains(&(color, 'K'))
+            if m.from == Square(start_rank, 0)
+                && new_castling_rights & castling_bit(color, 'Q') != 0
             {
-                // H-side rook moved
+                castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][1];
+                new_castling_rights &= !castling_bit(color, 'Q');
+            } else if m.from == Square(start_rank, 7)
+                && new_castling_rights & castling_bit(color, 'K') != 0
+            {
                 castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][0];
-                new_castling_rights.remove(&(color, 'K'));
+                new_castling_rights &= !castling_bit(color, 'K');
             }
         }
 
-        // Check rights lost due to capture OF a rook on its starting square
         if let Some((captured_color, captured_piece)) = captured_piece_info {
             if captured_piece == Piece::Rook {
                 let start_rank = if captured_color == Color::White { 0 } else { 7 };
                 if m.to == Square(start_rank, 0)
-                    && self.castling_rights.contains(&(captured_color, 'Q'))
+                    && new_castling_rights & castling_bit(captured_color, 'Q') != 0
                 {
-                    // A-side rook captured
                     castle_hash_diff ^=
                         ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][1];
-                    new_castling_rights.remove(&(captured_color, 'Q'));
+                    new_castling_rights &= !castling_bit(captured_color, 'Q');
                 } else if m.to == Square(start_rank, 7)
-                    && self.castling_rights.contains(&(captured_color, 'K'))
+                    && new_castling_rights & castling_bit(captured_color, 'K') != 0
                 {
-                    // H-side rook captured
                     castle_hash_diff ^=
                         ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][0];
-                    new_castling_rights.remove(&(captured_color, 'K'));
+                    new_castling_rights &= !castling_bit(captured_color, 'K');
                 }
             }
         }
         self.castling_rights = new_castling_rights;
-        current_hash ^= castle_hash_diff; // Apply castling hash changes
+        current_hash ^= castle_hash_diff;
 
-        // Switch turn
         self.white_to_move = !self.white_to_move;
-
-        // Update the board's hash
         self.hash = current_hash;
 
-        // Return unmake info
         UnmakeInfo {
             captured_piece_info,
             previous_en_passant_target,
             previous_castling_rights,
-            previous_hash, // Pass the old hash back
+            previous_hash,
         }
     }
 
@@ -399,32 +480,34 @@ impl Board {
         } else if m.is_castling {
             (color, Piece::King) // Assume king if castling
         } else {
-            self.squares[m.to.0][m.to.1].expect("Unmake move: 'to' square empty?")
+            self.get_square(m.to.0, m.to.1)
+                .expect("Unmake move: 'to' square empty?")
         };
 
         if m.is_castling {
-            self.squares[m.from.0][m.from.1] = Some(piece_that_moved); // Put King back
-            self.squares[m.to.0][m.to.1] = None;
+            self.set_square(m.from.0, m.from.1, Some(piece_that_moved));
+            self.set_square(m.to.0, m.to.1, None);
 
             let (rook_orig_f, rook_moved_f) = if m.to.1 == 6 { (7, 5) } else { (0, 3) }; // KS or QS
-            let rook_info =
-                self.squares[m.to.0][rook_moved_f].expect("Unmake castling: rook missing");
-            self.squares[m.to.0][rook_moved_f] = None;
-            self.squares[m.to.0][rook_orig_f] = Some(rook_info); // Put Rook back
+            let rook_info = self
+                .get_square(m.to.0, rook_moved_f)
+                .expect("Unmake castling: rook missing");
+            self.set_square(m.to.0, rook_moved_f, None);
+            self.set_square(m.to.0, rook_orig_f, Some(rook_info));
         } else {
-            self.squares[m.from.0][m.from.1] = Some(piece_that_moved); // Move piece back
+            self.set_square(m.from.0, m.from.1, Some(piece_that_moved));
 
             if m.is_en_passant {
-                self.squares[m.to.0][m.to.1] = None; // Clear landing square
+                self.set_square(m.to.0, m.to.1, None);
                 let capture_row = if color == Color::White {
                     m.to.0 - 1
                 } else {
                     m.to.0 + 1
                 };
-                self.squares[capture_row][m.to.1] = info.captured_piece_info; // Restore EP captured pawn
+                self.set_square(capture_row, m.to.1, info.captured_piece_info);
             } else {
                 // Regular move: Put back captured piece (or None)
-                self.squares[m.to.0][m.to.1] = info.captured_piece_info;
+                self.set_square(m.to.0, m.to.1, info.captured_piece_info);
             }
         }
     }
@@ -447,7 +530,7 @@ impl Board {
 
         for rank in 0..8 {
             for file in 0..8 {
-                if let Some((c, piece)) = self.squares[rank][file] {
+                if let Some((c, piece)) = self.get_square(rank, file) {
                     if c == color {
                         let from = Square(rank, file);
                         moves.extend(self.generate_piece_moves(from, piece));
@@ -496,7 +579,7 @@ impl Board {
             // Color doesn't matter here, just the piece type
             Some(Piece::Pawn)
         } else if !is_castling {
-            self.squares[to.0][to.1].map(|(_, p)| p)
+            self.get_square(to.0, to.1).map(|(_, p)| p)
         } else {
             None
         };
@@ -530,7 +613,7 @@ impl Board {
         let forward_r = r + dir;
         if forward_r >= 0 && forward_r < 8 {
             let forward_sq = Square(forward_r as usize, f as usize);
-            if self.squares[forward_sq.0][forward_sq.1].is_none() {
+            if self.get_square(forward_sq.0, forward_sq.1).is_none() {
                 if forward_sq.0 == promotion_rank {
                     for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
                         moves.push(self.create_move(from, forward_sq, Some(promo), false, false));
@@ -541,7 +624,10 @@ impl Board {
                     if r == start_rank as isize {
                         let double_forward_r = r + 2 * dir;
                         let double_forward_sq = Square(double_forward_r as usize, f as usize);
-                        if self.squares[double_forward_sq.0][double_forward_sq.1].is_none() {
+                        if self
+                            .get_square(double_forward_sq.0, double_forward_sq.1)
+                            .is_none()
+                        {
                             moves.push(self.create_move(
                                 from,
                                 double_forward_sq,
@@ -562,7 +648,7 @@ impl Board {
                 if capture_f >= 0 && capture_f < 8 {
                     let target_sq = Square(forward_r as usize, capture_f as usize);
                     // Regular capture
-                    if let Some((target_color, _)) = self.squares[target_sq.0][target_sq.1] {
+                    if let Some((target_color, _)) = self.get_square(target_sq.0, target_sq.1) {
                         if target_color != color {
                             if target_sq.0 == promotion_rank {
                                 for promo in
@@ -611,7 +697,7 @@ impl Board {
             let (nr, nf) = (rank + dr, file + df);
             if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
                 let to_sq = Square(nr as usize, nf as usize);
-                if let Some((c, _)) = self.squares[to_sq.0][to_sq.1] {
+                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
                     if c != color {
                         moves.push(self.create_move(from, to_sq, None, false, false));
                     }
@@ -633,7 +719,7 @@ impl Board {
             let mut f = file + df;
             while r >= 0 && r < 8 && f >= 0 && f < 8 {
                 let to_sq = Square(r as usize, f as usize);
-                if let Some((c, _)) = self.squares[to_sq.0][to_sq.1] {
+                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
                     if c != color {
                         // Capture
                         moves.push(self.create_move(from, to_sq, None, false, false));
@@ -671,7 +757,7 @@ impl Board {
             let (nr, nf) = (rank as isize + dr, file as isize + df);
             if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
                 let to_sq = Square(nr as usize, nf as usize);
-                if let Some((c, _)) = self.squares[to_sq.0][to_sq.1] {
+                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
                     if c != color {
                         moves.push(self.create_move(from, to_sq, None, false, false));
                     }
@@ -685,23 +771,23 @@ impl Board {
         // Check if king is on its home rank and original square first
         if from == Square(back_rank, 4) {
             // Kingside
-            if self.castling_rights.contains(&(color, 'K'))
-                && self.squares[back_rank][5].is_none()
-                && self.squares[back_rank][6].is_none()
+            if self.has_castling_right(color, 'K')
+                && self.get_square(back_rank, 5).is_none()
+                && self.get_square(back_rank, 6).is_none()
                 // Rook must be present
-                && self.squares[back_rank][7] == Some((color, Piece::Rook))
+                && self.get_square(back_rank, 7) == Some((color, Piece::Rook))
             // Squares cannot be attacked (checked later in generate_moves)
             {
                 let to_sq = Square(back_rank, 6);
                 moves.push(self.create_move(from, to_sq, None, true, false));
             }
             // Queenside
-            if self.castling_rights.contains(&(color, 'Q'))
-                 && self.squares[back_rank][1].is_none()
-                 && self.squares[back_rank][2].is_none()
-                 && self.squares[back_rank][3].is_none()
+            if self.has_castling_right(color, 'Q')
+                 && self.get_square(back_rank, 1).is_none()
+                 && self.get_square(back_rank, 2).is_none()
+                 && self.get_square(back_rank, 3).is_none()
                  // Rook must be present
-                 && self.squares[back_rank][0] == Some((color, Piece::Rook))
+                 && self.get_square(back_rank, 0) == Some((color, Piece::Rook))
             // Squares cannot be attacked (checked later in generate_moves)
             {
                 let to_sq = Square(back_rank, 2);
@@ -718,7 +804,7 @@ impl Board {
     fn find_king(&self, color: Color) -> Option<Square> {
         for r in 0..8 {
             for f in 0..8 {
-                if self.squares[r][f] == Some((color, Piece::King)) {
+                if self.get_square(r, f) == Some((color, Piece::King)) {
                     return Some(Square(r, f));
                 }
             }
@@ -743,7 +829,7 @@ impl Board {
             for df in [-1, 1] {
                 let pawn_start_f = target_f + df;
                 if pawn_start_f >= 0 && pawn_start_f < 8 {
-                    if self.squares[pawn_start_r as usize][pawn_start_f as usize]
+                    if self.get_square(pawn_start_r as usize, pawn_start_f as usize)
                         == Some((attacker_color, Piece::Pawn))
                     {
                         return true;
@@ -767,7 +853,8 @@ impl Board {
             let r = target_r + dr;
             let f = target_f + df;
             if r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if self.squares[r as usize][f as usize] == Some((attacker_color, Piece::Knight)) {
+                if self.get_square(r as usize, f as usize) == Some((attacker_color, Piece::Knight))
+                {
                     return true;
                 }
             }
@@ -788,7 +875,7 @@ impl Board {
             let r = target_r + dr;
             let f = target_f + df;
             if r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if self.squares[r as usize][f as usize] == Some((attacker_color, Piece::King)) {
+                if self.get_square(r as usize, f as usize) == Some((attacker_color, Piece::King)) {
                     return true;
                 }
             }
@@ -812,7 +899,7 @@ impl Board {
             let mut f = target_f + df;
 
             while r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if let Some((piece_color, piece)) = self.squares[r as usize][f as usize] {
+                if let Some((piece_color, piece)) = self.get_square(r as usize, f as usize) {
                     if piece_color == attacker_color {
                         // Is it the correct type of slider?
                         let can_attack = match piece {
@@ -1021,7 +1108,7 @@ impl Board {
         // First pass: Count pieces and positions
         for rank in 0..8 {
             for file in 0..8 {
-                if let Some((color, piece)) = self.squares[rank][file] {
+                if let Some((color, piece)) = self.get_square(rank, file) {
                     let piece_idx = piece_to_index(piece);
 
                     if color == Color::White {
@@ -1070,7 +1157,7 @@ impl Board {
 
         for rank in 0..8 {
             for file in 0..8 {
-                if let Some((color, piece)) = self.squares[rank][file] {
+                if let Some((color, piece)) = self.get_square(rank, file) {
                     let piece_idx = piece_to_index(piece);
 
                     // Get 1D index for piece square tables
@@ -1111,7 +1198,7 @@ impl Board {
         // 2. Rook on open files
         for file in 0..8 {
             for rank in 0..8 {
-                if let Some((color, piece)) = self.squares[rank][file] {
+                if let Some((color, piece)) = self.get_square(rank, file) {
                     if piece == Piece::Rook {
                         let file_pawns = white_pawns_by_file[file] + black_pawns_by_file[file];
 
@@ -1187,14 +1274,14 @@ impl Board {
 
             // Passed pawns
             for rank in 0..8 {
-                if let Some((Color::White, Piece::Pawn)) = self.squares[rank][file] {
+                if let Some((Color::White, Piece::Pawn)) = self.get_square(rank, file) {
                     let mut is_passed = true;
 
                     // Check if there are any black pawns ahead on same or adjacent files
                     for check_rank in 0..rank {
                         for check_file in file.saturating_sub(1)..=(file + 1).min(7) {
                             if let Some((Color::Black, Piece::Pawn)) =
-                                self.squares[check_rank][check_file]
+                                self.get_square(check_rank, check_file)
                             {
                                 is_passed = false;
                                 break;
@@ -1210,14 +1297,14 @@ impl Board {
                         let bonus = 10 + (7 - rank as i32) * 7;
                         score += bonus;
                     }
-                } else if let Some((Color::Black, Piece::Pawn)) = self.squares[rank][file] {
+                } else if let Some((Color::Black, Piece::Pawn)) = self.get_square(rank, file) {
                     let mut is_passed = true;
 
                     // Check if there are any white pawns ahead on same or adjacent files
                     for check_rank in (rank + 1)..8 {
                         for check_file in file.saturating_sub(1)..=(file + 1).min(7) {
                             if let Some((Color::White, Piece::Pawn)) =
-                                self.squares[check_rank][check_file]
+                                self.get_square(check_rank, check_file)
                             {
                                 is_passed = false;
                                 break;
@@ -1407,7 +1494,7 @@ impl Board {
         let mut pseudo_tactical_moves = Vec::new();
         for r in 0..8 {
             for f in 0..8 {
-                if let Some((c, piece)) = self.squares[r][f] {
+                if let Some((c, piece)) = self.get_square(r, f) {
                     if c == current_color {
                         let from = Square(r, f);
                         // Generate moves for this piece, but only keep captures/promotions
@@ -1467,7 +1554,8 @@ impl Board {
         // Check Promotions (forward move resulting in promotion)
         if forward_r >= 0 && forward_r < 8 {
             let forward_sq = Square(forward_r as usize, f as usize);
-            if forward_sq.0 == promotion_rank && self.squares[forward_sq.0][forward_sq.1].is_none()
+            if forward_sq.0 == promotion_rank
+                && self.get_square(forward_sq.0, forward_sq.1).is_none()
             {
                 for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
                     moves.push(self.create_move(from, forward_sq, Some(promo), false, false));
@@ -1483,7 +1571,7 @@ impl Board {
                     let target_sq = Square(forward_r as usize, capture_f as usize);
 
                     // Regular capture
-                    if let Some((target_color, _)) = self.squares[target_sq.0][target_sq.1] {
+                    if let Some((target_color, _)) = self.get_square(target_sq.0, target_sq.1) {
                         if target_color != color {
                             if target_sq.0 == promotion_rank {
                                 // Capture with promotion
@@ -1557,7 +1645,7 @@ impl Board {
         for rank in (0..8).rev() {
             print!("{} |", rank + 1);
             for file in 0..8 {
-                let piece_char = match self.squares[rank][file] {
+                let piece_char = match self.get_square(rank, file) {
                     Some((Color::White, Piece::Pawn)) => 'P',
                     Some((Color::White, Piece::Knight)) => 'N',
                     Some((Color::White, Piece::Bishop)) => 'B',
@@ -1584,7 +1672,23 @@ impl Board {
         if let Some(ep_target) = self.en_passant_target {
             println!("EP Target: {}", format_square(ep_target));
         }
-        println!("Castling: {:?}", self.castling_rights); // Consider formatting this better
+        let mut castling_str = String::new();
+        if self.has_castling_right(Color::White, 'K') {
+            castling_str.push('K');
+        }
+        if self.has_castling_right(Color::White, 'Q') {
+            castling_str.push('Q');
+        }
+        if self.has_castling_right(Color::Black, 'K') {
+            castling_str.push('k');
+        }
+        if self.has_castling_right(Color::Black, 'Q') {
+            castling_str.push('q');
+        }
+        if castling_str.is_empty() {
+            castling_str.push('-');
+        }
+        println!("Castling: {}", castling_str);
         println!("------------------------------------");
     }
 } // end impl Board
