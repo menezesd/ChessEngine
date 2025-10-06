@@ -1,10 +1,14 @@
 use std::time::{Duration, Instant};
 
+use crate::bitboards::{
+    bishop_attacks, index_to_square, king_attacks, knight_attacks, pawn_attacks, queen_attacks,
+    rook_attacks,
+};
 use crate::constants::MATE_SCORE;
 use crate::transposition_table::{BoundType, TranspositionTable};
 use crate::types::{
-    bitboard_for_square, file_to_index, format_square, rank_to_index, Bitboard, Color, Move, Piece,
-    Square,
+    bitboard_for_square, file_to_index, format_square, rank_to_index, square_index, Bitboard,
+    Color, Move, Piece, Square,
 };
 use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
@@ -42,6 +46,13 @@ fn color_from_index(index: usize) -> Color {
         0 => Color::White,
         1 => Color::Black,
         _ => unreachable!("invalid color index"),
+    }
+}
+
+fn color_to_index(color: Color) -> usize {
+    match color {
+        Color::White => 0,
+        Color::Black => 1,
     }
 }
 
@@ -105,13 +116,14 @@ impl Board {
 
     pub fn piece_at(&self, square: Square) -> Option<(Color, Piece)> {
         let mask = bitboard_for_square(square);
-        for color_idx in 0..2 {
-            if self.occupancy[color_idx] & mask != 0 {
-                for piece_idx in 0..6 {
-                    if self.bitboards[color_idx][piece_idx] & mask != 0 {
-                        return Some((color_from_index(color_idx), piece_from_index(piece_idx)));
-                    }
-                }
+        if self.all_occupancy & mask == 0 {
+            return None;
+        }
+
+        let color_idx = if self.occupancy[0] & mask != 0 { 0 } else { 1 };
+        for piece_idx in 0..6 {
+            if self.bitboards[color_idx][piece_idx] & mask != 0 {
+                return Some((color_from_index(color_idx), piece_from_index(piece_idx)));
             }
         }
         None
@@ -119,16 +131,17 @@ impl Board {
 
     fn remove_piece_at(&mut self, square: Square) -> Option<(Color, Piece)> {
         let mask = bitboard_for_square(square);
-        for color_idx in 0..2 {
-            if self.occupancy[color_idx] & mask != 0 {
-                for piece_idx in 0..6 {
-                    if self.bitboards[color_idx][piece_idx] & mask != 0 {
-                        self.bitboards[color_idx][piece_idx] &= !mask;
-                        self.occupancy[color_idx] &= !mask;
-                        self.update_all_occupancy();
-                        return Some((color_from_index(color_idx), piece_from_index(piece_idx)));
-                    }
-                }
+        if self.all_occupancy & mask == 0 {
+            return None;
+        }
+
+        let color_idx = if self.occupancy[0] & mask != 0 { 0 } else { 1 };
+        for piece_idx in 0..6 {
+            if self.bitboards[color_idx][piece_idx] & mask != 0 {
+                self.bitboards[color_idx][piece_idx] &= !mask;
+                self.occupancy[color_idx] &= !mask;
+                self.update_all_occupancy();
+                return Some((color_from_index(color_idx), piece_from_index(piece_idx)));
             }
         }
         None
@@ -522,22 +535,19 @@ impl Board {
         // This requires looking at the target square *before* creating the move.
 
         let mut moves = Vec::new();
-        let color = if self.white_to_move {
-            Color::White
-        } else {
-            Color::Black
-        };
+        let color = self.current_color();
+        let color_idx = color_to_index(color);
 
-        for rank in 0..8 {
-            for file in 0..8 {
-                if let Some((c, piece)) = self.get_square(rank, file) {
-                    if c == color {
-                        let from = Square(rank, file);
-                        moves.extend(self.generate_piece_moves(from, piece));
-                    }
-                }
+        for piece_idx in 0..6 {
+            let mut pieces = self.bitboards[color_idx][piece_idx];
+            while pieces != 0 {
+                let idx = pieces.trailing_zeros() as usize;
+                let from = index_to_square(idx);
+                moves.extend(self.generate_piece_moves(from, piece_from_index(piece_idx)));
+                pieces &= pieces - 1;
             }
         }
+
         moves
     }
 
@@ -564,6 +574,19 @@ impl Board {
             ),
             Piece::King => self.generate_king_moves(from),
         }
+    }
+
+    fn generate_moves_from_bitboard(&self, from: Square, attacks: Bitboard) -> Vec<Move> {
+        let mut moves = Vec::new();
+        let color_idx = color_to_index(self.current_color());
+        let mut targets = attacks & !self.occupancy[color_idx];
+        while targets != 0 {
+            let idx = targets.trailing_zeros() as usize;
+            let to = index_to_square(idx);
+            moves.push(self.create_move(from, to, None, false, false));
+            targets &= targets - 1;
+        }
+        moves
     }
 
     // Helper to create a move, checking for captures
@@ -679,119 +702,58 @@ impl Board {
     }
 
     fn generate_knight_moves(&self, from: Square) -> Vec<Move> {
-        let mut moves = Vec::new();
-        let deltas = [
-            (2, 1),
-            (1, 2),
-            (-1, 2),
-            (-2, 1),
-            (-2, -1),
-            (-1, -2),
-            (1, -2),
-            (2, -1),
-        ];
-        let (rank, file) = (from.0 as isize, from.1 as isize);
-        let color = self.current_color();
-
-        for (dr, df) in deltas {
-            let (nr, nf) = (rank + dr, file + df);
-            if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
-                let to_sq = Square(nr as usize, nf as usize);
-                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
-                    if c != color {
-                        moves.push(self.create_move(from, to_sq, None, false, false));
-                    }
-                } else {
-                    moves.push(self.create_move(from, to_sq, None, false, false));
-                }
-            }
-        }
-        moves
+        let attacks = knight_attacks(square_index(from));
+        self.generate_moves_from_bitboard(from, attacks)
     }
 
     fn generate_sliding_moves(&self, from: Square, directions: &[(isize, isize)]) -> Vec<Move> {
-        let mut moves = Vec::new();
-        let (rank, file) = (from.0 as isize, from.1 as isize);
-        let color = self.current_color();
-
-        for &(dr, df) in directions {
-            let mut r = rank + dr;
-            let mut f = file + df;
-            while r >= 0 && r < 8 && f >= 0 && f < 8 {
-                let to_sq = Square(r as usize, f as usize);
-                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
-                    if c != color {
-                        // Capture
-                        moves.push(self.create_move(from, to_sq, None, false, false));
-                    }
-                    break; // Stop searching in this direction (blocked)
-                } else {
-                    // Empty square
-                    moves.push(self.create_move(from, to_sq, None, false, false));
-                }
-                r += dr;
-                f += df;
+        let from_idx = square_index(from);
+        let occupancy = self.all_occupancy;
+        let attacks = if directions.len() == 4 {
+            if directions.iter().all(|&(dr, df)| dr.abs() == df.abs()) {
+                bishop_attacks(from_idx, occupancy)
+            } else {
+                rook_attacks(from_idx, occupancy)
             }
-        }
-        moves
+        } else {
+            queen_attacks(from_idx, occupancy)
+        };
+        self.generate_moves_from_bitboard(from, attacks)
     }
 
     fn generate_king_moves(&self, from: Square) -> Vec<Move> {
         let mut moves = Vec::new();
-        let deltas = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1),
-        ];
-        let (rank, file) = (from.0, from.1);
+        let from_idx = square_index(from);
         let color = self.current_color();
-        let back_rank = if color == Color::White { 0 } else { 7 };
+        let color_idx = color_to_index(color);
 
-        // Normal King moves
-        for (dr, df) in deltas {
-            let (nr, nf) = (rank as isize + dr, file as isize + df);
-            if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
-                let to_sq = Square(nr as usize, nf as usize);
-                if let Some((c, _)) = self.get_square(to_sq.0, to_sq.1) {
-                    if c != color {
-                        moves.push(self.create_move(from, to_sq, None, false, false));
-                    }
-                } else {
-                    moves.push(self.create_move(from, to_sq, None, false, false));
-                }
-            }
+        let mut targets = king_attacks(from_idx) & !self.occupancy[color_idx];
+        while targets != 0 {
+            let idx = targets.trailing_zeros() as usize;
+            let to = index_to_square(idx);
+            moves.push(self.create_move(from, to, None, false, false));
+            targets &= targets - 1;
         }
 
-        // Castling (only check conditions, legality check is separate)
-        // Check if king is on its home rank and original square first
+        let back_rank = if color == Color::White { 0 } else { 7 };
         if from == Square(back_rank, 4) {
-            // Kingside
+            let kingside_empty = bitboard_for_square(Square(back_rank, 5))
+                | bitboard_for_square(Square(back_rank, 6));
             if self.has_castling_right(color, 'K')
-                && self.get_square(back_rank, 5).is_none()
-                && self.get_square(back_rank, 6).is_none()
-                // Rook must be present
+                && (self.all_occupancy & kingside_empty) == 0
                 && self.get_square(back_rank, 7) == Some((color, Piece::Rook))
-            // Squares cannot be attacked (checked later in generate_moves)
             {
-                let to_sq = Square(back_rank, 6);
-                moves.push(self.create_move(from, to_sq, None, true, false));
+                moves.push(self.create_move(from, Square(back_rank, 6), None, true, false));
             }
-            // Queenside
+
+            let queenside_empty = bitboard_for_square(Square(back_rank, 1))
+                | bitboard_for_square(Square(back_rank, 2))
+                | bitboard_for_square(Square(back_rank, 3));
             if self.has_castling_right(color, 'Q')
-                 && self.get_square(back_rank, 1).is_none()
-                 && self.get_square(back_rank, 2).is_none()
-                 && self.get_square(back_rank, 3).is_none()
-                 // Rook must be present
-                 && self.get_square(back_rank, 0) == Some((color, Piece::Rook))
-            // Squares cannot be attacked (checked later in generate_moves)
+                && (self.all_occupancy & queenside_empty) == 0
+                && self.get_square(back_rank, 0) == Some((color, Piece::Rook))
             {
-                let to_sq = Square(back_rank, 2);
-                moves.push(self.create_move(from, to_sq, None, true, false));
+                moves.push(self.create_move(from, Square(back_rank, 2), None, true, false));
             }
         }
 
@@ -802,125 +764,55 @@ impl Board {
 
     // Finds the king of the specified color
     fn find_king(&self, color: Color) -> Option<Square> {
-        for r in 0..8 {
-            for f in 0..8 {
-                if self.get_square(r, f) == Some((color, Piece::King)) {
-                    return Some(Square(r, f));
-                }
-            }
+        let color_idx = color_to_index(color);
+        let king_bb = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        if king_bb == 0 {
+            None
+        } else {
+            let idx = king_bb.trailing_zeros() as usize;
+            Some(index_to_square(idx))
         }
-        None
     }
 
     // Checks if a square is attacked by the opponent WITHOUT cloning
     // Takes &self because it only reads the state
     fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
-        let target_r = square.0 as isize;
-        let target_f = square.1 as isize;
+        let sq_idx = square_index(square);
+        let color_idx = color_to_index(attacker_color);
 
-        // 1. Check for Pawn attacks
-        let pawn_dir: isize = if attacker_color == Color::White {
-            1
-        } else {
-            -1
-        };
-        let pawn_start_r = target_r - pawn_dir; // Where an attacking pawn would be
-        if pawn_start_r >= 0 && pawn_start_r < 8 {
-            for df in [-1, 1] {
-                let pawn_start_f = target_f + df;
-                if pawn_start_f >= 0 && pawn_start_f < 8 {
-                    if self.get_square(pawn_start_r as usize, pawn_start_f as usize)
-                        == Some((attacker_color, Piece::Pawn))
-                    {
-                        return true;
-                    }
-                }
-            }
+        let pawn_attackers = pawn_attacks(attacker_color, sq_idx)
+            & self.bitboards[color_idx][piece_to_zobrist_index(Piece::Pawn)];
+        if pawn_attackers != 0 {
+            return true;
         }
 
-        // 2. Check for Knight attacks
-        let knight_deltas = [
-            (2, 1),
-            (1, 2),
-            (-1, 2),
-            (-2, 1),
-            (-2, -1),
-            (-1, -2),
-            (1, -2),
-            (2, -1),
-        ];
-        for (dr, df) in knight_deltas {
-            let r = target_r + dr;
-            let f = target_f + df;
-            if r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if self.get_square(r as usize, f as usize) == Some((attacker_color, Piece::Knight))
-                {
-                    return true;
-                }
-            }
+        let knight_attackers = knight_attacks(sq_idx)
+            & self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
+        if knight_attackers != 0 {
+            return true;
         }
 
-        // 3. Check for King attacks (for castling checks mainly, kings can't attack kings directly otherwise)
-        let king_deltas = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1),
-        ];
-        for (dr, df) in king_deltas {
-            let r = target_r + dr;
-            let f = target_f + df;
-            if r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if self.get_square(r as usize, f as usize) == Some((attacker_color, Piece::King)) {
-                    return true;
-                }
-            }
+        let king_attackers =
+            king_attacks(sq_idx) & self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        if king_attackers != 0 {
+            return true;
         }
 
-        // 4. Check for Sliding piece attacks (Rook, Bishop, Queen)
-        let sliding_directions = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1), // Rook/Queen directions
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1), // Bishop/Queen directions
-        ];
-
-        for (i, &(dr, df)) in sliding_directions.iter().enumerate() {
-            let is_diagonal = i >= 4;
-            let mut r = target_r + dr;
-            let mut f = target_f + df;
-
-            while r >= 0 && r < 8 && f >= 0 && f < 8 {
-                if let Some((piece_color, piece)) = self.get_square(r as usize, f as usize) {
-                    if piece_color == attacker_color {
-                        // Is it the correct type of slider?
-                        let can_attack = match piece {
-                            Piece::Queen => true,
-                            Piece::Rook => !is_diagonal,
-                            Piece::Bishop => is_diagonal,
-                            _ => false, // Pawn, Knight, King handled already or can't attack this way
-                        };
-                        if can_attack {
-                            return true;
-                        }
-                    }
-                    // Any piece (own or other) blocks further sliding checks in this direction
-                    break;
-                }
-                r += dr;
-                f += df;
-            }
+        let occupancy = self.all_occupancy;
+        let bishop_like = bishop_attacks(sq_idx, occupancy)
+            & (self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)]
+                | self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)]);
+        if bishop_like != 0 {
+            return true;
         }
 
-        // No attackers found
+        let rook_like = rook_attacks(sq_idx, occupancy)
+            & (self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)]
+                | self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)]);
+        if rook_like != 0 {
+            return true;
+        }
+
         false
     }
 
