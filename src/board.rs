@@ -3,12 +3,49 @@ use std::time::{Duration, Instant};
 use crate::constants::MATE_SCORE;
 use crate::transposition_table::{BoundType, TranspositionTable};
 use crate::types::{
-    bitboard_for_square, file_to_index, format_square, rank_to_index, Bitboard, Color, Move, Piece,
-    Square,
+    bitboard_for_square, file_to_index, format_square, rank_to_index, square_index, Bitboard,
+    Color, Move, Piece, Square,
 };
 use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
 };
+use once_cell::sync::Lazy;
+
+static KNIGHT_ATTACKS: Lazy<[Bitboard; 64]> = Lazy::new(|| {
+    let mut table = [0u64; 64];
+    for index in 0..64 {
+        let bit = 1u64 << index;
+        let mut attacks = 0u64;
+        attacks |= (bit << 17) & Board::NOT_FILE_A;
+        attacks |= (bit << 15) & Board::NOT_FILE_H;
+        attacks |= (bit << 10) & Board::NOT_FILE_AB;
+        attacks |= (bit << 6) & Board::NOT_FILE_GH;
+        attacks |= (bit >> 17) & Board::NOT_FILE_H;
+        attacks |= (bit >> 15) & Board::NOT_FILE_A;
+        attacks |= (bit >> 10) & Board::NOT_FILE_GH;
+        attacks |= (bit >> 6) & Board::NOT_FILE_AB;
+        table[index] = attacks;
+    }
+    table
+});
+
+static KING_ATTACKS: Lazy<[Bitboard; 64]> = Lazy::new(|| {
+    let mut table = [0u64; 64];
+    for index in 0..64 {
+        let bit = 1u64 << index;
+        let mut attacks = 0u64;
+        attacks |= bit << 8;
+        attacks |= bit >> 8;
+        attacks |= (bit << 1) & Board::NOT_FILE_H;
+        attacks |= (bit >> 1) & Board::NOT_FILE_A;
+        attacks |= (bit << 9) & Board::NOT_FILE_H;
+        attacks |= (bit << 7) & Board::NOT_FILE_A;
+        attacks |= (bit >> 9) & Board::NOT_FILE_A;
+        attacks |= (bit >> 7) & Board::NOT_FILE_H;
+        table[index] = attacks;
+    }
+    table
+});
 
 const CASTLE_WHITE_KINGSIDE: u8 = 0b0001;
 const CASTLE_WHITE_QUEENSIDE: u8 = 0b0010;
@@ -101,31 +138,11 @@ impl Board {
     }
 
     fn knight_attacks(square: Square) -> Bitboard {
-        let bit = bitboard_for_square(square);
-        let mut attacks = 0u64;
-        attacks |= (bit << 17) & Self::NOT_FILE_A;
-        attacks |= (bit << 15) & Self::NOT_FILE_H;
-        attacks |= (bit << 10) & Self::NOT_FILE_AB;
-        attacks |= (bit << 6) & Self::NOT_FILE_GH;
-        attacks |= (bit >> 17) & Self::NOT_FILE_H;
-        attacks |= (bit >> 15) & Self::NOT_FILE_A;
-        attacks |= (bit >> 10) & Self::NOT_FILE_GH;
-        attacks |= (bit >> 6) & Self::NOT_FILE_AB;
-        attacks
+        KNIGHT_ATTACKS[square_index(square)]
     }
 
     fn king_attacks(square: Square) -> Bitboard {
-        let bit = bitboard_for_square(square);
-        let mut attacks = 0u64;
-        attacks |= bit << 8;
-        attacks |= bit >> 8;
-        attacks |= (bit << 1) & Self::NOT_FILE_H;
-        attacks |= (bit >> 1) & Self::NOT_FILE_A;
-        attacks |= (bit << 9) & Self::NOT_FILE_H;
-        attacks |= (bit << 7) & Self::NOT_FILE_A;
-        attacks |= (bit >> 9) & Self::NOT_FILE_A;
-        attacks |= (bit >> 7) & Self::NOT_FILE_H;
-        attacks
+        KING_ATTACKS[square_index(square)]
     }
 
     fn rook_attacks(square: Square, occupancy: Bitboard) -> Bitboard {
@@ -197,6 +214,147 @@ impl Board {
             }
         }
         None
+    }
+
+    fn add_leaper_moves<F>(
+        &self,
+        color: Color,
+        mut pieces: Bitboard,
+        attack_fn: F,
+        include_quiet: bool,
+        moves: &mut Vec<Move>,
+    ) where
+        F: Fn(Square) -> Bitboard,
+    {
+        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
+        while pieces != 0 {
+            let from_index = pieces.trailing_zeros() as usize;
+            pieces &= pieces - 1;
+            let from = Self::square_from_index(from_index);
+            let attacks = attack_fn(from);
+
+            if include_quiet {
+                let mut quiet_targets = attacks & !self.all_occupancy;
+                while quiet_targets != 0 {
+                    let to_index = quiet_targets.trailing_zeros() as usize;
+                    quiet_targets &= quiet_targets - 1;
+                    let to = Self::square_from_index(to_index);
+                    self.add_move(moves, color, from, to, None, false, false);
+                }
+            }
+
+            let mut capture_targets = attacks & self.occupancy[opponent_idx];
+            while capture_targets != 0 {
+                let to_index = capture_targets.trailing_zeros() as usize;
+                capture_targets &= capture_targets - 1;
+                let to = Self::square_from_index(to_index);
+                self.add_move(moves, color, from, to, None, false, false);
+            }
+        }
+    }
+
+    fn add_sliding_moves<F>(
+        &self,
+        color: Color,
+        mut pieces: Bitboard,
+        attack_fn: F,
+        include_quiet: bool,
+        moves: &mut Vec<Move>,
+    ) where
+        F: Fn(Square, Bitboard) -> Bitboard,
+    {
+        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
+        while pieces != 0 {
+            let from_index = pieces.trailing_zeros() as usize;
+            pieces &= pieces - 1;
+            let from = Self::square_from_index(from_index);
+            let attacks = attack_fn(from, self.all_occupancy);
+
+            if include_quiet {
+                let mut quiet_targets = attacks & !self.all_occupancy;
+                while quiet_targets != 0 {
+                    let to_index = quiet_targets.trailing_zeros() as usize;
+                    quiet_targets &= quiet_targets - 1;
+                    let to = Self::square_from_index(to_index);
+                    self.add_move(moves, color, from, to, None, false, false);
+                }
+            }
+
+            let mut capture_targets = attacks & self.occupancy[opponent_idx];
+            while capture_targets != 0 {
+                let to_index = capture_targets.trailing_zeros() as usize;
+                capture_targets &= capture_targets - 1;
+                let to = Self::square_from_index(to_index);
+                self.add_move(moves, color, from, to, None, false, false);
+            }
+        }
+    }
+
+    fn add_pawn_tactical_moves(&self, color: Color, moves: &mut Vec<Move>) {
+        let color_idx = color_to_zobrist_index(color);
+        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
+        let dir: isize = if color == Color::White { 1 } else { -1 };
+        let promotion_rank = if color == Color::White { 7 } else { 0 };
+        let mut pawns = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Pawn)];
+
+        while pawns != 0 {
+            let from_index = pawns.trailing_zeros() as usize;
+            pawns &= pawns - 1;
+            let from = Self::square_from_index(from_index);
+
+            let forward_rank = from.0 as isize + dir;
+            if forward_rank >= 0 && forward_rank < 8 {
+                let forward_sq = Square(forward_rank as usize, from.1);
+                if forward_sq.0 == promotion_rank {
+                    let forward_mask = bitboard_for_square(forward_sq);
+                    if self.all_occupancy & forward_mask == 0 {
+                        for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
+                            self.add_move(
+                                moves,
+                                color,
+                                from,
+                                forward_sq,
+                                Some(promo),
+                                false,
+                                false,
+                            );
+                        }
+                    }
+                }
+            }
+
+            let capture_rank = from.0 as isize + dir;
+            if capture_rank >= 0 && capture_rank < 8 {
+                for df in [-1, 1] {
+                    let capture_file = from.1 as isize + df;
+                    if capture_file < 0 || capture_file >= 8 {
+                        continue;
+                    }
+                    let target_sq = Square(capture_rank as usize, capture_file as usize);
+                    let target_mask = bitboard_for_square(target_sq);
+
+                    if self.occupancy[opponent_idx] & target_mask != 0 {
+                        if target_sq.0 == promotion_rank {
+                            for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
+                                self.add_move(
+                                    moves,
+                                    color,
+                                    from,
+                                    target_sq,
+                                    Some(promo),
+                                    false,
+                                    false,
+                                );
+                            }
+                        } else {
+                            self.add_move(moves, color, from, target_sq, None, false, false);
+                        }
+                    } else if Some(target_sq) == self.en_passant_target {
+                        self.add_move(moves, color, from, target_sq, None, false, true);
+                    }
+                }
+            }
+        }
     }
 
     fn remove_piece_at(&mut self, square: Square) -> Option<(Color, Piece)> {
@@ -724,163 +882,75 @@ impl Board {
 
     fn generate_knight_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
         let color_idx = color_to_zobrist_index(color);
-        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
-        let mut knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
-        while knights != 0 {
-            let from_index = knights.trailing_zeros() as usize;
-            knights &= knights - 1;
-            let from = Self::square_from_index(from_index);
-            let attacks = Self::knight_attacks(from);
-            let mut quiet_targets = attacks & !self.all_occupancy;
-            while quiet_targets != 0 {
-                let to_index = quiet_targets.trailing_zeros() as usize;
-                quiet_targets &= quiet_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
-            let mut capture_targets = attacks & self.occupancy[opponent_idx];
-            while capture_targets != 0 {
-                let to_index = capture_targets.trailing_zeros() as usize;
-                capture_targets &= capture_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
-        }
+        let knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
+        self.add_leaper_moves(color, knights, Self::knight_attacks, true, moves);
     }
 
     fn generate_bishop_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
         let color_idx = color_to_zobrist_index(color);
-        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
-        let mut bishops = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)];
-        while bishops != 0 {
-            let from_index = bishops.trailing_zeros() as usize;
-            bishops &= bishops - 1;
-            let from = Self::square_from_index(from_index);
-            let attacks = Self::bishop_attacks(from, self.all_occupancy);
-            let mut quiet_targets = attacks & !self.all_occupancy;
-            while quiet_targets != 0 {
-                let to_index = quiet_targets.trailing_zeros() as usize;
-                quiet_targets &= quiet_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
-            let mut capture_targets = attacks & self.occupancy[opponent_idx];
-            while capture_targets != 0 {
-                let to_index = capture_targets.trailing_zeros() as usize;
-                capture_targets &= capture_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
-        }
+        let bishops = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)];
+        self.add_sliding_moves(color, bishops, Self::bishop_attacks, true, moves);
     }
 
     fn generate_rook_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
         let color_idx = color_to_zobrist_index(color);
-        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
-        let mut rooks = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)];
-        while rooks != 0 {
-            let from_index = rooks.trailing_zeros() as usize;
-            rooks &= rooks - 1;
-            let from = Self::square_from_index(from_index);
-            let attacks = Self::rook_attacks(from, self.all_occupancy);
-            let mut quiet_targets = attacks & !self.all_occupancy;
-            while quiet_targets != 0 {
-                let to_index = quiet_targets.trailing_zeros() as usize;
-                quiet_targets &= quiet_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
-            let mut capture_targets = attacks & self.occupancy[opponent_idx];
-            while capture_targets != 0 {
-                let to_index = capture_targets.trailing_zeros() as usize;
-                capture_targets &= capture_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
-        }
+        let rooks = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)];
+        self.add_sliding_moves(color, rooks, Self::rook_attacks, true, moves);
     }
 
     fn generate_queen_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
         let color_idx = color_to_zobrist_index(color);
-        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
-        let mut queens = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
-        while queens != 0 {
-            let from_index = queens.trailing_zeros() as usize;
-            queens &= queens - 1;
-            let from = Self::square_from_index(from_index);
-            let attacks = Self::rook_attacks(from, self.all_occupancy)
-                | Self::bishop_attacks(from, self.all_occupancy);
-            let mut quiet_targets = attacks & !self.all_occupancy;
-            while quiet_targets != 0 {
-                let to_index = quiet_targets.trailing_zeros() as usize;
-                quiet_targets &= quiet_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
-            let mut capture_targets = attacks & self.occupancy[opponent_idx];
-            while capture_targets != 0 {
-                let to_index = capture_targets.trailing_zeros() as usize;
-                capture_targets &= capture_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
-        }
+        let queens = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
+        self.add_sliding_moves(
+            color,
+            queens,
+            |sq, occ| Self::rook_attacks(sq, occ) | Self::bishop_attacks(sq, occ),
+            true,
+            moves,
+        );
     }
 
     fn generate_king_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
         let color_idx = color_to_zobrist_index(color);
-        let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
-        let mut kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
-        while kings != 0 {
-            let from_index = kings.trailing_zeros() as usize;
-            kings &= kings - 1;
-            let from = Self::square_from_index(from_index);
-            let attacks = Self::king_attacks(from);
-            let mut quiet_targets = attacks & !self.all_occupancy;
-            while quiet_targets != 0 {
-                let to_index = quiet_targets.trailing_zeros() as usize;
-                quiet_targets &= quiet_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
+        let kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        self.add_leaper_moves(color, kings, Self::king_attacks, true, moves);
+
+        if kings == 0 {
+            return;
+        }
+
+        let from_index = kings.trailing_zeros() as usize;
+        let from = Self::square_from_index(from_index);
+        let back_rank = if color == Color::White { 0 } else { 7 };
+
+        if from == Square(back_rank, 4) {
+            let king_side_path = [Square(back_rank, 5), Square(back_rank, 6)];
+            let queen_side_path = [
+                Square(back_rank, 1),
+                Square(back_rank, 2),
+                Square(back_rank, 3),
+            ];
+
+            if self.has_castling_right(color, 'K')
+                && king_side_path
+                    .iter()
+                    .all(|sq| self.all_occupancy & bitboard_for_square(*sq) == 0)
+                && (self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)]
+                    & bitboard_for_square(Square(back_rank, 7)))
+                    != 0
+            {
+                self.add_move(moves, color, from, Square(back_rank, 6), None, true, false);
             }
-            let mut capture_targets = attacks & self.occupancy[opponent_idx];
-            while capture_targets != 0 {
-                let to_index = capture_targets.trailing_zeros() as usize;
-                capture_targets &= capture_targets - 1;
-                let to = Self::square_from_index(to_index);
-                self.add_move(moves, color, from, to, None, false, false);
-            }
 
-            let back_rank = if color == Color::White { 0 } else { 7 };
-            if from == Square(back_rank, 4) {
-                let king_side_path = [Square(back_rank, 5), Square(back_rank, 6)];
-                let queen_side_path = [
-                    Square(back_rank, 1),
-                    Square(back_rank, 2),
-                    Square(back_rank, 3),
-                ];
-
-                if self.has_castling_right(color, 'K')
-                    && king_side_path
-                        .iter()
-                        .all(|sq| self.all_occupancy & bitboard_for_square(*sq) == 0)
-                    && (self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)]
-                        & bitboard_for_square(Square(back_rank, 7)))
-                        != 0
-                {
-                    self.add_move(moves, color, from, Square(back_rank, 6), None, true, false);
-                }
-
-                if self.has_castling_right(color, 'Q')
-                    && queen_side_path
-                        .iter()
-                        .all(|sq| self.all_occupancy & bitboard_for_square(*sq) == 0)
-                    && (self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)]
-                        & bitboard_for_square(Square(back_rank, 0)))
-                        != 0
-                {
-                    self.add_move(moves, color, from, Square(back_rank, 2), None, true, false);
-                }
+            if self.has_castling_right(color, 'Q')
+                && queen_side_path
+                    .iter()
+                    .all(|sq| self.all_occupancy & bitboard_for_square(*sq) == 0)
+                && (self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)]
+                    & bitboard_for_square(Square(back_rank, 0)))
+                    != 0
+            {
+                self.add_move(moves, color, from, Square(back_rank, 2), None, true, false);
             }
         }
     }
@@ -1509,29 +1579,67 @@ impl Board {
     // This function needs &mut self because legality checking involves make/unmake
     pub fn generate_tactical_moves(&mut self) -> Vec<Move> {
         let current_color = self.current_color();
+        let color_idx = color_to_zobrist_index(current_color);
+        let mut pseudo_tactical_moves = Vec::new();
 
-        // 1. Generate Pseudo-Tactical Moves (faster than generating all pseudo moves)
-        let pseudo_tactical_moves: Vec<Move> = self
-            .generate_pseudo_moves()
-            .into_iter()
-            .filter(|m| m.is_en_passant || m.captured_piece.is_some() || m.promotion.is_some())
-            .collect();
+        self.add_pawn_tactical_moves(current_color, &mut pseudo_tactical_moves);
 
-        // 2. Check Legality (Filter out moves that leave the king in check)
+        let knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
+        self.add_leaper_moves(
+            current_color,
+            knights,
+            Self::knight_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let bishops = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)];
+        self.add_sliding_moves(
+            current_color,
+            bishops,
+            Self::bishop_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let rooks = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)];
+        self.add_sliding_moves(
+            current_color,
+            rooks,
+            Self::rook_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let queens = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
+        self.add_sliding_moves(
+            current_color,
+            queens,
+            |sq, occ| Self::rook_attacks(sq, occ) | Self::bishop_attacks(sq, occ),
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
+        let kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
+        self.add_leaper_moves(
+            current_color,
+            kings,
+            Self::king_attacks,
+            false,
+            &mut pseudo_tactical_moves,
+        );
+
         let mut legal_tactical_moves = Vec::new();
         for m in pseudo_tactical_moves {
-            // Skip castling as it's not typically considered a tactical move for quiescence
             if m.is_castling {
                 continue;
             }
 
-            // Check general legality: Does the move leave the king in check?
-            let info = self.make_move(&m); // Make the move temporarily
+            let info = self.make_move(&m);
             if !self.is_in_check(current_color) {
-                // Check if the player who moved is now safe
-                legal_tactical_moves.push(m.clone()); // If safe, it's a legal tactical move
+                legal_tactical_moves.push(m);
             }
-            self.unmake_move(&m, info); // Unmake the move to restore state
+            self.unmake_move(&m, info);
         }
 
         legal_tactical_moves
