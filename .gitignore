@@ -1,2 +1,3 @@
 # Ignore build output
 /target/
+src/bin_backup/

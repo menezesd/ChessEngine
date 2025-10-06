@@ -1,7 +1,6 @@
-use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::time::Duration;
-use crate::types::{Color, Move, Square};
+use crate::types::{Color, Move, Square, Piece};
 
 /// Format a move into UCI string
 pub fn format_uci_move(mv: &Move) -> String {
