@@ -443,53 +443,112 @@ fn negamax(
     tt: &mut TranspositionTable,
     depth: u32,
     mut alpha: i32,
-    beta: i32,
+    mut beta: i32,
 ) -> i32 {
+    let original_alpha = alpha;
+    let current_hash = board.hash;
+
+    // --- Transposition Table Probe ---
+    let mut hash_move: Option<Move> = None;
+    if let Some(entry) = tt.probe(current_hash) {
+        if entry.depth >= depth {
+            match entry.bound_type {
+                BoundType::Exact => return entry.score,
+                BoundType::LowerBound => alpha = alpha.max(entry.score),
+                BoundType::UpperBound => beta = beta.min(entry.score),
+            }
+            if alpha >= beta {
+                return entry.score;
+            }
+        }
+        hash_move = entry.best_move.clone();
+    }
+
+    // --- Base Case: Depth 0 ---
     if depth == 0 {
         return quiescence(board, alpha, beta);
     }
 
-    let mut best_score = -MATE_SCORE;
-
+    // --- Generate and Order Moves ---
     let mut moves = board.generate_pseudo_moves();
 
-    // Sort moves: captures first (MVV-LVA), then other moves
+    // Sort moves: hash move first, then captures (MVV-LVA), then other moves
+    if let Some(hm) = &hash_move {
+        if let Some(pos) = moves.iter().position(|m| m == hm) {
+            moves.swap(0, pos);
+        }
+    }
+
     moves.sort_by(|a, b| {
         let a_is_capture = a.captured_piece.is_some();
         let b_is_capture = b.captured_piece.is_some();
 
         if a_is_capture && !b_is_capture {
-            return std::cmp::Ordering::Less; // a comes first
+            return std::cmp::Ordering::Less;
         } else if !a_is_capture && b_is_capture {
-            return std::cmp::Ordering::Greater; // b comes first
+            return std::cmp::Ordering::Greater;
         } else if a_is_capture && b_is_capture {
-            // Both are captures, sort by MVV-LVA
             let a_attacker = board.piece_at(a.from.0 * 8 + a.from.1).unwrap().1;
             let b_attacker = board.piece_at(b.from.0 * 8 + b.from.1).unwrap().1;
             let a_score = mvv_lva_score(a_attacker, a.captured_piece.unwrap());
             let b_score = mvv_lva_score(b_attacker, b.captured_piece.unwrap());
-            return b_score.cmp(&a_score); // Higher MVV-LVA first
+            return b_score.cmp(&a_score);
         }
         std::cmp::Ordering::Equal
     });
 
-    for m in moves {
-        let info = board.make_move(&m);
-        let score = -negamax(board, tt, depth - 1, -beta, -alpha);
-        board.unmake_move(&m, info);
+    // --- Check for Checkmate / Stalemate ---
+    if moves.is_empty() {
+        let current_color = if board.white_to_move { Color::White } else { Color::Black };
+        return if board.is_in_check(current_color) {
+            -(MATE_SCORE - (100 - depth as i32))
+        } else {
+            0
+        };
+    }
+
+    // --- PVS Search ---
+    let mut best_score = -MATE_SCORE * 2;
+    let mut best_move_found: Option<Move> = None;
+
+    for (i, m) in moves.iter().enumerate() {
+        let info = board.make_move(m);
+        let score = if i == 0 {
+            // First move (PV move): full window search
+            -negamax(board, tt, depth - 1, -beta, -alpha)
+        } else {
+            // Non-PV moves: null window search
+            let mut score = -negamax(board, tt, depth - 1, -alpha - 1, -alpha);
+            if score > alpha && score < beta {
+                // Research with full window if null window failed
+                score = -negamax(board, tt, depth - 1, -beta, -alpha);
+            }
+            score
+        };
+        board.unmake_move(m, info);
 
         if score > best_score {
             best_score = score;
+            best_move_found = Some(m.clone());
         }
 
-        if score > alpha {
-            alpha = score;
-        }
+        alpha = alpha.max(best_score);
 
         if alpha >= beta {
             break;
         }
     }
+
+    // --- Transposition Table Store ---
+    let bound_type = if best_score <= original_alpha {
+        BoundType::UpperBound
+    } else if best_score >= beta {
+        BoundType::LowerBound
+    } else {
+        BoundType::Exact
+    };
+
+    tt.store(current_hash, depth, best_score, bound_type, best_move_found);
 
     best_score
 }
