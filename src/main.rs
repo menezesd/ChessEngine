@@ -1,4 +1,3 @@
-mod bitboards;
 mod board;
 mod constants;
 mod transposition_table;
