@@ -1,3 +1,5 @@
+pub type Bitboard = u64;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Piece {
     Pawn,
@@ -37,4 +39,12 @@ pub fn rank_to_index(rank: char) -> usize {
 
 pub fn format_square(sq: Square) -> String {
     format!("{}{}", (sq.1 as u8 + b'a') as char, sq.0 + 1)
+}
+
+pub fn square_index(sq: Square) -> usize {
+    sq.0 * 8 + sq.1
+}
+
+pub fn bitboard_for_square(sq: Square) -> Bitboard {
+    1u64 << square_index(sq)
 }
