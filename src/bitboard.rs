@@ -10,6 +10,15 @@ pub const BLACK_QUEENSIDE: u8 = 8;
 pub static KNIGHT_ATTACKS: [u64; 64] = generate_knight_attacks();
 pub static KING_ATTACKS: [u64; 64] = generate_king_attacks();
 
+// File mask for a given file (0-7)
+pub fn file_mask(file: usize) -> u64 {
+    let mut mask = 0u64;
+    for rank in 0..8 {
+        mask |= 1u64 << (rank * 8 + file);
+    }
+    mask
+}
+
 const fn generate_knight_attacks() -> [u64; 64] {
     let mut attacks = [0u64; 64];
     let mut sq = 0;
