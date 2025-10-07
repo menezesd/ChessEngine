@@ -1,20 +1,18 @@
-
-
 use std::time::{Duration, Instant};
 
 use crate::constants::MATE_SCORE;
+use crate::magic;
+use crate::search_control;
 use crate::transposition_table::{BoundType, TranspositionTable};
 use crate::types::{
     bitboard_for_square, file_to_index, format_square, rank_to_index, square_index, Bitboard,
     Color, Move, Piece, Square,
 };
+use crate::uci_info;
 use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
 };
 use once_cell::sync::Lazy;
-use crate::magic;
-use crate::search_control;
-use crate::uci_info;
 
 static KNIGHT_ATTACKS: Lazy<[Bitboard; 64]> = Lazy::new(|| {
     let mut table = [0u64; 64];
@@ -149,23 +147,24 @@ impl Board {
     const NOT_FILE_AB: Bitboard = !Self::FILE_A & !Self::FILE_B;
     const NOT_FILE_GH: Bitboard = !Self::FILE_G & !Self::FILE_H;
 
-    fn square_from_index(index: usize) -> Square {
+    pub fn square_from_index(index: usize) -> Square {
         Square(index / 8, index % 8)
     }
 
-    fn knight_attacks(square: Square) -> Bitboard {
+    pub fn file_mask(file: usize) -> Bitboard {
+        Self::FILE_A << file
+    }
+
+    pub fn knight_attacks(square: Square) -> Bitboard {
         KNIGHT_ATTACKS[square_index(square)]
     }
-
-    fn king_attacks(square: Square) -> Bitboard {
+    pub fn king_attacks(square: Square) -> Bitboard {
         KING_ATTACKS[square_index(square)]
     }
-
-    fn rook_attacks(square: Square, occupancy: Bitboard) -> Bitboard {
+    pub fn rook_attacks(square: Square, occupancy: Bitboard) -> Bitboard {
         magic::rook_attacks(square, occupancy)
     }
-
-    fn bishop_attacks(square: Square, occupancy: Bitboard) -> Bitboard {
+    pub fn bishop_attacks(square: Square, occupancy: Bitboard) -> Bitboard {
         magic::bishop_attacks(square, occupancy)
     }
     fn empty() -> Self {
@@ -716,9 +715,10 @@ impl Board {
         self.castling_rights = info.previous_castling_rights;
         self.hash = info.previous_hash; // Restore hash directly!
 
-    // Restore halfmove clock and position history
-    self.halfmove_clock = info.previous_halfmove_clock;
-    self.position_history.truncate(info.previous_position_history_len);
+        // Restore halfmove clock and position history
+        self.halfmove_clock = info.previous_halfmove_clock;
+        self.position_history
+            .truncate(info.previous_position_history_len);
 
         // Restore pieces on board (no hash updates needed here as hash is fully restored)
         let color = self.current_color();
@@ -1107,7 +1107,11 @@ impl Board {
         }
         // Threefold repetition: count occurrences of current hash in history
         let current_hash = self.hash;
-        let occurrences = self.position_history.iter().filter(|&&h| h == current_hash).count();
+        let occurrences = self
+            .position_history
+            .iter()
+            .filter(|&&h| h == current_hash)
+            .count();
         occurrences >= 3
     }
 
@@ -1219,8 +1223,10 @@ impl Board {
         let mut black_pawns_by_file = [0u32; 8];
 
         // Bishop counts
-        let white_bishops = self.bitboards[color_to_zobrist_index(Color::White)][piece_to_zobrist_index(Piece::Bishop)];
-        let black_bishops = self.bitboards[color_to_zobrist_index(Color::Black)][piece_to_zobrist_index(Piece::Bishop)];
+        let white_bishops = self.bitboards[color_to_zobrist_index(Color::White)]
+            [piece_to_zobrist_index(Piece::Bishop)];
+        let black_bishops = self.bitboards[color_to_zobrist_index(Color::Black)]
+            [piece_to_zobrist_index(Piece::Bishop)];
         let white_bishop_count = white_bishops.count_ones();
         let black_bishop_count = black_bishops.count_ones();
 
@@ -1307,8 +1313,10 @@ impl Board {
             let fpawns = (white_pawns_by_file[file] + black_pawns_by_file[file]) as i32;
 
             // Rooks on file: iterate rook bitboards
-            let white_rooks = self.bitboards[color_to_zobrist_index(Color::White)][piece_to_zobrist_index(Piece::Rook)];
-            let black_rooks = self.bitboards[color_to_zobrist_index(Color::Black)][piece_to_zobrist_index(Piece::Rook)];
+            let white_rooks = self.bitboards[color_to_zobrist_index(Color::White)]
+                [piece_to_zobrist_index(Piece::Rook)];
+            let black_rooks = self.bitboards[color_to_zobrist_index(Color::Black)]
+                [piece_to_zobrist_index(Piece::Rook)];
             let file_mask = Board::FILE_A << file; // FILE_n mask
 
             if white_rooks & file_mask != 0 {
@@ -1331,8 +1339,16 @@ impl Board {
             let bpf = black_pawns_by_file[file] as i32;
 
             if wpf > 0 {
-                let left = if file > 0 { white_pawns_by_file[file - 1] } else { 0 };
-                let right = if file < 7 { white_pawns_by_file[file + 1] } else { 0 };
+                let left = if file > 0 {
+                    white_pawns_by_file[file - 1]
+                } else {
+                    0
+                };
+                let right = if file < 7 {
+                    white_pawns_by_file[file + 1]
+                } else {
+                    0
+                };
                 if left == 0 && right == 0 {
                     score -= 12;
                 }
@@ -1341,8 +1357,16 @@ impl Board {
                 }
             }
             if bpf > 0 {
-                let left = if file > 0 { black_pawns_by_file[file - 1] } else { 0 };
-                let right = if file < 7 { black_pawns_by_file[file + 1] } else { 0 };
+                let left = if file > 0 {
+                    black_pawns_by_file[file - 1]
+                } else {
+                    0
+                };
+                let right = if file < 7 {
+                    black_pawns_by_file[file + 1]
+                } else {
+                    0
+                };
                 if left == 0 && right == 0 {
                     score += 12;
                 }
@@ -1355,7 +1379,9 @@ impl Board {
             // For white: pawn ranks increase; for black: decrease
             // We'll scan each pawn on this file to decide passedness
             // White passed pawns
-            let mut wpawns_on_file = self.bitboards[color_to_zobrist_index(Color::White)][piece_to_zobrist_index(Piece::Pawn)] & file_mask;
+            let mut wpawns_on_file = self.bitboards[color_to_zobrist_index(Color::White)]
+                [piece_to_zobrist_index(Piece::Pawn)]
+                & file_mask;
             while wpawns_on_file != 0 {
                 let sq = wpawns_on_file.trailing_zeros() as usize;
                 wpawns_on_file &= wpawns_on_file - 1;
@@ -1364,13 +1390,38 @@ impl Board {
                 // check black pawns ahead on same or adjacent files
                 for _r in 0..rank {
                     // unused small-range mask (kept for clarity)
-                    let _adj_mask = (Board::FILE_A << file) | (if file > 0 { Board::FILE_A << (file - 1) } else { 0 }) | (if file < 7 { Board::FILE_A << (file + 1) } else { 0 });
+                    let _adj_mask = (Board::FILE_A << file)
+                        | (if file > 0 {
+                            Board::FILE_A << (file - 1)
+                        } else {
+                            0
+                        })
+                        | (if file < 7 {
+                            Board::FILE_A << (file + 1)
+                        } else {
+                            0
+                        });
                     // simpler check: iterate black pawns and compare ranks
-                    let bb = self.bitboards[color_to_zobrist_index(Color::Black)][piece_to_zobrist_index(Piece::Pawn)];
+                    let bb = self.bitboards[color_to_zobrist_index(Color::Black)]
+                        [piece_to_zobrist_index(Piece::Pawn)];
                     // mask to same/adj files
-                    let file_adj_mask = (Board::FILE_A << file) | (if file > 0 { Board::FILE_A << (file - 1) } else { 0 }) | (if file < 7 { Board::FILE_A << (file + 1) } else { 0 });
+                    let file_adj_mask = (Board::FILE_A << file)
+                        | (if file > 0 {
+                            Board::FILE_A << (file - 1)
+                        } else {
+                            0
+                        })
+                        | (if file < 7 {
+                            Board::FILE_A << (file + 1)
+                        } else {
+                            0
+                        });
                     // all squares with index < rank*8
-                    let ahead_mask = if rank * 8 >= 64 { u64::MAX } else { (1u64 << (rank * 8)) - 1 };
+                    let ahead_mask = if rank * 8 >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (rank * 8)) - 1
+                    };
                     if bb & file_adj_mask & ahead_mask != 0 {
                         is_passed = false;
                     }
@@ -1382,21 +1433,34 @@ impl Board {
             }
 
             // Black passed pawns
-            let mut bpawns_on_file = self.bitboards[color_to_zobrist_index(Color::Black)][piece_to_zobrist_index(Piece::Pawn)] & file_mask;
+            let mut bpawns_on_file = self.bitboards[color_to_zobrist_index(Color::Black)]
+                [piece_to_zobrist_index(Piece::Pawn)]
+                & file_mask;
             while bpawns_on_file != 0 {
                 let sq = bpawns_on_file.trailing_zeros() as usize;
                 bpawns_on_file &= bpawns_on_file - 1;
                 let rank = sq / 8;
                 let mut is_passed = true;
                 // check white pawns ahead on same or adjacent files
-                for r in (rank+1)..8 {
-                    let file_adj_mask = (Board::FILE_A << file) | (if file > 0 { Board::FILE_A << (file - 1) } else { 0 }) | (if file < 7 { Board::FILE_A << (file + 1) } else { 0 });
+                for r in (rank + 1)..8 {
+                    let file_adj_mask = (Board::FILE_A << file)
+                        | (if file > 0 {
+                            Board::FILE_A << (file - 1)
+                        } else {
+                            0
+                        })
+                        | (if file < 7 {
+                            Board::FILE_A << (file + 1)
+                        } else {
+                            0
+                        });
                     let ahead_mask = if (r + 1) * 8 >= 64 {
                         0u64
                     } else {
                         !((1u64 << ((r + 1) * 8)) - 1)
                     };
-                    let bb = self.bitboards[color_to_zobrist_index(Color::White)][piece_to_zobrist_index(Piece::Pawn)];
+                    let bb = self.bitboards[color_to_zobrist_index(Color::White)]
+                        [piece_to_zobrist_index(Piece::Pawn)];
                     if bb & file_adj_mask & ahead_mask != 0 {
                         is_passed = false;
                     }
@@ -1468,9 +1532,9 @@ impl Board {
         }
 
         // --- Generate Moves ---
-    moves_buf.clear();
-    self.generate_moves_into(moves_buf);
-    moves_buf.sort_by_key(|m| -mvv_lva_score(m, self));
+        moves_buf.clear();
+        self.generate_moves_into(moves_buf);
+        moves_buf.sort_by_key(|m| -mvv_lva_score(m, self));
 
         // --- Check for Checkmate / Stalemate ---
         if moves_buf.is_empty() {
@@ -1492,18 +1556,18 @@ impl Board {
         }
         // TODO: Implement more sophisticated move ordering (captures, killers, history)
 
-    // --- Iterate Through Moves ---
-    let mut best_score = -MATE_SCORE * 2; // Initialize with very low score
+        // --- Iterate Through Moves ---
+        let mut best_score = -MATE_SCORE * 2; // Initialize with very low score
         let mut best_move_found: Option<Move> = None;
 
-    // Child buffer reused for recursive calls to avoid borrowing the current moves_buf
-    let mut child_buf: Vec<Move> = Vec::new();
-    for (i, m) in moves_buf.iter().enumerate() {
+        // Child buffer reused for recursive calls to avoid borrowing the current moves_buf
+        let mut child_buf: Vec<Move> = Vec::new();
+        for (i, m) in moves_buf.iter().enumerate() {
             if search_control::should_stop() {
                 break;
             }
             let info = self.make_move(m);
-                let score = if i == 0 {
+            let score = if i == 0 {
                 -self.negamax(tt, depth - 1, -beta, -alpha, &mut child_buf)
             } else {
                 let mut score = -self.negamax(tt, depth - 1, -alpha - 1, -alpha, &mut child_buf);
@@ -1538,7 +1602,7 @@ impl Board {
             BoundType::Exact // Score is within the alpha-beta window
         };
 
-    tt.store(current_hash, depth, best_score, bound_type, best_move_found); // Store result
+        tt.store(current_hash, depth, best_score, bound_type, best_move_found); // Store result
 
         best_score
     }
@@ -1574,34 +1638,34 @@ impl Board {
         }
         alpha = alpha.max(stand_pat_score); // Update lower bound
 
-            // --- Generate Only Tactical Moves ---
+        // --- Generate Only Tactical Moves ---
         moves_buf.clear();
         self.generate_tactical_moves_into(moves_buf);
         moves_buf.sort_by_key(|m| -mvv_lva_score(m, self));
 
-            // TODO: Add move ordering for tactical moves (e.g., MVV-LVA)
+        // TODO: Add move ordering for tactical moves (e.g., MVV-LVA)
 
-            // --- Iterate Through Tactical Moves ---
-            let mut best_score = stand_pat_score; // Start with the standing pat score
+        // --- Iterate Through Tactical Moves ---
+        let mut best_score = stand_pat_score; // Start with the standing pat score
 
         // Clone the generated list so we can safely mutate the shared buffer during recursion
         let tactical_moves = moves_buf.clone();
         for m in tactical_moves {
-                if search_control::should_stop() {
-                    break;
-                }
-                let info = self.make_move(&m);
-                // Recursive call passes TT, alpha, beta and the shared moves buffer
-                let score = -self.quiesce(tt, -beta, -alpha, moves_buf);
-                self.unmake_move(&m, info);
-
-                best_score = best_score.max(score);
-                alpha = alpha.max(best_score);
-
-                if alpha >= beta {
-                    break; // Beta cutoff
-                }
+            if search_control::should_stop() {
+                break;
             }
+            let info = self.make_move(&m);
+            // Recursive call passes TT, alpha, beta and the shared moves buffer
+            let score = -self.quiesce(tt, -beta, -alpha, moves_buf);
+            self.unmake_move(&m, info);
+
+            best_score = best_score.max(score);
+            alpha = alpha.max(best_score);
+
+            if alpha >= beta {
+                break; // Beta cutoff
+            }
+        }
 
         // Note: We typically don't store quiescence results directly in the main TT
         // in the same way as fixed-depth search, as the 'depth' concept is different.
@@ -1948,7 +2012,10 @@ pub fn find_best_move_with_sink(
                 pv.push(mv);
             }
         }
-        let pv_strs: Vec<String> = pv.iter().map(|m| format!("{}{}", format_square(m.from), format_square(m.to))).collect();
+        let pv_strs: Vec<String> = pv
+            .iter()
+            .map(|m| format!("{}{}", format_square(m.from), format_square(m.to)))
+            .collect();
         pv_strs.join(" ")
     }
 
@@ -2028,7 +2095,11 @@ pub fn find_best_move_with_sink(
                 // If the caller indicated we are pondering, include the best move as 'ponder'
                 if _is_ponder {
                     if let Some(bm) = best_move {
-                        info.ponder = Some(format!("{}{}", format_square(bm.from), format_square(bm.to)));
+                        info.ponder = Some(format!(
+                            "{}{}",
+                            format_square(bm.from),
+                            format_square(bm.to)
+                        ));
                     }
                 }
                 let _ = sender.send(info);
@@ -2084,7 +2155,7 @@ pub fn find_best_move_with_time_with_sink(
 
         let mut alpha = -MATE_SCORE * 2;
         let beta = MATE_SCORE * 2;
-    let mut best_score = -MATE_SCORE * 2;
+        let mut best_score = -MATE_SCORE * 2;
         let mut legal_moves = Vec::new();
         board.generate_moves_into(&mut legal_moves);
 
@@ -2128,70 +2199,81 @@ pub fn find_best_move_with_time_with_sink(
         }
 
         // Only update result if completed full depth in time
-            if start_time.elapsed() + SAFETY_MARGIN < max_time {
-                best_move = new_best_move;
-                // publish best move for this depth
-                if let Some(ref s) = sink {
-                    let mut lock = s.lock().unwrap();
-                    *lock = best_move;
-                }
+        if start_time.elapsed() + SAFETY_MARGIN < max_time {
+            best_move = new_best_move;
+            // publish best move for this depth
+            if let Some(ref s) = sink {
+                let mut lock = s.lock().unwrap();
+                *lock = best_move;
+            }
 
-                // Send structured Info via channel if available
-                if let Some(ref sender) = info_sender {
-                    // Build PV by cloning board and following TT best moves
-                    fn build_pv_using_board(orig: &Board, tt: &TranspositionTable, max_ply: usize) -> String {
-                        let mut b = orig.clone();
-                        let mut pv = Vec::new();
-                        for _ in 0..max_ply {
-                            if let Some(entry) = tt.probe(b.hash) {
-                                if let Some(mv) = entry.best_move {
-                                    pv.push(mv);
-                                    let _info = b.make_move(&mv);
-                                } else {
-                                    break;
-                                }
+            // Send structured Info via channel if available
+            if let Some(ref sender) = info_sender {
+                // Build PV by cloning board and following TT best moves
+                fn build_pv_using_board(
+                    orig: &Board,
+                    tt: &TranspositionTable,
+                    max_ply: usize,
+                ) -> String {
+                    let mut b = orig.clone();
+                    let mut pv = Vec::new();
+                    for _ in 0..max_ply {
+                        if let Some(entry) = tt.probe(b.hash) {
+                            if let Some(mv) = entry.best_move {
+                                pv.push(mv);
+                                let _info = b.make_move(&mv);
                             } else {
                                 break;
                             }
-                        }
-                        let pv_strs: Vec<String> = pv.iter().map(|m| format!("{}{}", format_square(m.from), format_square(m.to))).collect();
-                        pv_strs.join(" ")
-                    }
-
-                    let nodes_total = crate::search_control::get_node_count();
-                    let elapsed_ms = start_time.elapsed().as_millis();
-                    let nps = if elapsed_ms > 0 {
-                        Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
-                    } else {
-                        None
-                    };
-                    let pv = build_pv_using_board(board, tt, 20);
-                    let mut info = uci_info::Info {
-                        depth: Some(depth),
-                        nodes: Some(nodes_total),
-                        nps,
-                        time_ms: Some(elapsed_ms),
-                        score_cp: None,
-                        score_mate: None,
-                        pv: Some(pv),
-                        seldepth: None,
-                        ponder: None,
-                    };
-                    if best_score.abs() > (MATE_SCORE / 2) {
-                        let mate_in = (MATE_SCORE - best_score.abs() + 1) / 2;
-                        info.score_mate = Some(mate_in);
-                    } else {
-                        info.score_cp = Some(best_score);
-                    }
-                    if _is_ponder {
-                        if let Some(bm) = best_move {
-                            info.ponder = Some(format!("{}{}", format_square(bm.from), format_square(bm.to)));
+                        } else {
+                            break;
                         }
                     }
-                    let _ = sender.send(info);
+                    let pv_strs: Vec<String> = pv
+                        .iter()
+                        .map(|m| format!("{}{}", format_square(m.from), format_square(m.to)))
+                        .collect();
+                    pv_strs.join(" ")
                 }
 
-                last_depth_time = depth_start.elapsed();
+                let nodes_total = crate::search_control::get_node_count();
+                let elapsed_ms = start_time.elapsed().as_millis();
+                let nps = if elapsed_ms > 0 {
+                    Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
+                } else {
+                    None
+                };
+                let pv = build_pv_using_board(board, tt, 20);
+                let mut info = uci_info::Info {
+                    depth: Some(depth),
+                    nodes: Some(nodes_total),
+                    nps,
+                    time_ms: Some(elapsed_ms),
+                    score_cp: None,
+                    score_mate: None,
+                    pv: Some(pv),
+                    seldepth: None,
+                    ponder: None,
+                };
+                if best_score.abs() > (MATE_SCORE / 2) {
+                    let mate_in = (MATE_SCORE - best_score.abs() + 1) / 2;
+                    info.score_mate = Some(mate_in);
+                } else {
+                    info.score_cp = Some(best_score);
+                }
+                if _is_ponder {
+                    if let Some(bm) = best_move {
+                        info.ponder = Some(format!(
+                            "{}{}",
+                            format_square(bm.from),
+                            format_square(bm.to)
+                        ));
+                    }
+                }
+                let _ = sender.send(info);
+            }
+
+            last_depth_time = depth_start.elapsed();
             depth += 1;
         } else {
             break;
@@ -2316,222 +2398,334 @@ mod perft_tests {
     }
 }
 
-    #[test]
-    fn test_draw_detection_50_move() {
-        // Start from a simple position with only kings and a rook to allow long non-capture moves
-        let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
-        // Set halfmove clock near the limit
-        board.halfmove_clock = 99; // 99 half-moves means next non-capture/pawn move will make it 100
-        board.position_history.clear();
-        board.position_history.push(board.hash);
+#[test]
+fn test_draw_detection_50_move() {
+    // Start from a simple position with only kings and a rook to allow long non-capture moves
+    let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
+    // Set halfmove clock near the limit
+    board.halfmove_clock = 99; // 99 half-moves means next non-capture/pawn move will make it 100
+    board.position_history.clear();
+    board.position_history.push(board.hash);
 
-        // Make a harmless king move and unmake it repeatedly to bump halfmove
-        let mv = Move { from: Square(0,0), to: Square(0,1), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
-        let info = board.make_move(&mv);
-        // After making move, halfmove should be 100 (draw)
-        assert!(board.is_draw(), "Expected 50-move draw to be detected after move");
-        board.unmake_move(&mv, info);
+    // Make a harmless king move and unmake it repeatedly to bump halfmove
+    let mv = Move {
+        from: Square(0, 0),
+        to: Square(0, 1),
+        promotion: None,
+        is_castling: false,
+        is_en_passant: false,
+        captured_piece: None,
+    };
+    let info = board.make_move(&mv);
+    // After making move, halfmove should be 100 (draw)
+    assert!(
+        board.is_draw(),
+        "Expected 50-move draw to be detected after move"
+    );
+    board.unmake_move(&mv, info);
+}
+
+#[test]
+fn test_draw_detection_threefold() {
+    // Use a small repeating position: a legal repetition via rook checks is cumbersome to craft,
+    // but we can simulate by manipulating history: ensure position hash occurs 3 times
+    let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
+    board.position_history.clear();
+    // Push the same hash three times to simulate threefold repetition
+    board.position_history.push(board.hash);
+    board.position_history.push(board.hash);
+    board.position_history.push(board.hash);
+    assert!(
+        board.is_draw(),
+        "Expected threefold repetition to be detected"
+    );
+}
+
+#[test]
+fn test_make_unmake_preserves_evaluate_and_hash() {
+    let mut board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let baseline_eval = board.evaluate();
+    let baseline_hash = board.hash;
+
+    let mut moves = Vec::new();
+    board.generate_moves_into(&mut moves);
+    // Test a handful of moves (or all if small)
+    for m in moves.iter().take(8) {
+        let info = board.make_move(m);
+        // Evaluate while moved
+        let _mid_eval = board.evaluate();
+        board.unmake_move(m, info);
+        // After unmake, hash and eval should match baseline
+        assert_eq!(board.hash, baseline_hash, "Hash mismatch after make/unmake");
+        assert_eq!(
+            board.evaluate(),
+            baseline_eval,
+            "Eval mismatch after make/unmake"
+        );
+    }
+}
+
+#[test]
+fn test_threefold_repetition_via_moves() {
+    let mut board = Board::new(); // standard initial setup
+
+    // Moves: N g1-f3, N g8-f6, N f3-g1, N f6-g8 (one full cycle)
+    let m1 = Move {
+        from: Square(0, 6),
+        to: Square(2, 5),
+        promotion: None,
+        is_castling: false,
+        is_en_passant: false,
+        captured_piece: None,
+    };
+    let m2 = Move {
+        from: Square(7, 6),
+        to: Square(5, 5),
+        promotion: None,
+        is_castling: false,
+        is_en_passant: false,
+        captured_piece: None,
+    };
+    let m3 = Move {
+        from: Square(2, 5),
+        to: Square(0, 6),
+        promotion: None,
+        is_castling: false,
+        is_en_passant: false,
+        captured_piece: None,
+    };
+    let m4 = Move {
+        from: Square(5, 5),
+        to: Square(7, 6),
+        promotion: None,
+        is_castling: false,
+        is_en_passant: false,
+        captured_piece: None,
+    };
+
+    // Perform two cycles; after two cycles the starting position should have occurred 3 times
+    for _ in 0..2 {
+        let _ = board.make_move(&m1);
+        let _ = board.make_move(&m2);
+        let _ = board.make_move(&m3);
+        let _ = board.make_move(&m4);
     }
 
-    #[test]
-    fn test_draw_detection_threefold() {
-        // Use a small repeating position: a legal repetition via rook checks is cumbersome to craft,
-        // but we can simulate by manipulating history: ensure position hash occurs 3 times
-        let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
-        board.position_history.clear();
-        // Push the same hash three times to simulate threefold repetition
-        board.position_history.push(board.hash);
-        board.position_history.push(board.hash);
-        board.position_history.push(board.hash);
-        assert!(board.is_draw(), "Expected threefold repetition to be detected");
+    assert!(
+        board.is_draw(),
+        "Expected threefold repetition after repeating knight cycle"
+    );
+}
+
+#[test]
+fn test_negamax_respects_draw() {
+    let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
+    // Force 50-move draw
+    board.halfmove_clock = 100;
+    // Simple TT for the call
+    let mut tt = TranspositionTable::default();
+    let mut buf = Vec::new();
+    let score = board.negamax(&mut tt, 1, -10000, 10000, &mut buf);
+    assert_eq!(
+        score, 0,
+        "Expected negamax to return draw score 0 for drawn position"
+    );
+}
+
+#[test]
+fn test_make_unmake_castling_preserves_state() {
+    let mut board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+    let baseline_hash = board.hash;
+    let baseline_eval = board.evaluate();
+
+    let mut moves = Vec::new();
+    board.generate_moves_into(&mut moves);
+    let castle_move = moves
+        .iter()
+        .find(|m| m.is_castling)
+        .expect("No castling move found");
+    let info = board.make_move(castle_move);
+    board.unmake_move(castle_move, info);
+
+    assert_eq!(
+        board.hash, baseline_hash,
+        "Hash changed after castling make/unmake"
+    );
+    assert_eq!(
+        board.evaluate(),
+        baseline_eval,
+        "Eval changed after castling make/unmake"
+    );
+}
+
+#[test]
+fn test_en_passant_capture_and_restore() {
+    let fen = "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3";
+    let mut board = Board::from_fen(fen);
+    let mut moves = Vec::new();
+    board.generate_moves_into(&mut moves);
+    // Find en-passant move
+    let ep_move = moves
+        .iter()
+        .find(|m| m.is_en_passant)
+        .expect("No en-passant move found");
+    // Save pre-move piece presence
+    let capture_row = if board.current_color() == Color::White {
+        ep_move.to.0 - 1
+    } else {
+        ep_move.to.0 + 1
+    };
+    let before_cap = board.get_square(capture_row, ep_move.to.1);
+
+    let info = board.make_move(ep_move);
+    // Captured pawn should be removed
+    assert!(
+        board.get_square(capture_row, ep_move.to.1).is_none(),
+        "En-passant captured pawn still on board"
+    );
+    board.unmake_move(ep_move, info);
+    // Restored
+    assert_eq!(board.get_square(capture_row, ep_move.to.1), before_cap);
+}
+
+#[test]
+fn test_promotion_moves_make_unmake() {
+    let mut board = Board::from_fen("8/P7/8/8/8/8/8/k6K w - - 0 1");
+    let mut moves = Vec::new();
+    board.generate_moves_into(&mut moves);
+    let promo_move = moves
+        .iter()
+        .find(|m| m.promotion.is_some())
+        .expect("No promotion move found");
+    let baseline_hash = board.hash;
+    let baseline_eval = board.evaluate();
+    let info = board.make_move(promo_move);
+    board.unmake_move(promo_move, info);
+    assert_eq!(board.hash, baseline_hash);
+    assert_eq!(board.evaluate(), baseline_eval);
+}
+
+#[test]
+fn test_transposition_table_store_probe() {
+    let mut tt = TranspositionTable::new(1);
+    let hash = 0xdeadbeefu64;
+    tt.store(hash, 1, 100, BoundType::Exact, None);
+    let entry = tt.probe(hash).expect("Entry missing");
+    assert_eq!(entry.depth, 1);
+    // Store shallower vs deeper
+    tt.store(hash, 0, 50, BoundType::Exact, None);
+    let entry2 = tt.probe(hash).expect("Entry missing after shallower store");
+    // Depth should remain 1 because new depth 0 should not replace
+    assert_eq!(entry2.depth, 1);
+    // Now store deeper
+    tt.store(hash, 5, 200, BoundType::Exact, None);
+    let entry3 = tt.probe(hash).expect("Entry missing after deeper store");
+    assert_eq!(entry3.depth, 5);
+}
+
+#[test]
+fn test_randomized_stress_make_unmake() {
+    // Simple deterministic RNG (LCG) to avoid adding dependencies
+    struct SimpleRng {
+        state: u64,
+    }
+    impl SimpleRng {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+        fn next_u64(&mut self) -> u64 {
+            // 64-bit LCG parameters
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn usize_bounded(&mut self, bound: usize) -> usize {
+            if bound == 0 {
+                return 0;
+            }
+            (self.next_u64() as usize) % bound
+        }
     }
 
-    #[test]
-    fn test_make_unmake_preserves_evaluate_and_hash() {
-        let mut board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        let baseline_eval = board.evaluate();
+    let mut rng = SimpleRng::new(0x1234_5678_9abc_def0u64);
+
+    let mut board = Board::new();
+
+    // Number of random sequences to run and max depth per sequence
+    const SEQS: usize = 200;
+    const MAX_DEPTH: usize = 6;
+
+    for seq in 0..SEQS {
+        // Capture baseline invariants
         let baseline_hash = board.hash;
-
-        let mut moves = Vec::new();
-        board.generate_moves_into(&mut moves);
-        // Test a handful of moves (or all if small)
-        for m in moves.iter().take(8) {
-            let info = board.make_move(m);
-            // Evaluate while moved
-            let _mid_eval = board.evaluate();
-            board.unmake_move(m, info);
-            // After unmake, hash and eval should match baseline
-            assert_eq!(board.hash, baseline_hash, "Hash mismatch after make/unmake");
-            assert_eq!(board.evaluate(), baseline_eval, "Eval mismatch after make/unmake");
-        }
-    }
-
-    #[test]
-    fn test_threefold_repetition_via_moves() {
-        let mut board = Board::new(); // standard initial setup
-
-        // Moves: N g1-f3, N g8-f6, N f3-g1, N f6-g8 (one full cycle)
-        let m1 = Move { from: Square(0, 6), to: Square(2, 5), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
-        let m2 = Move { from: Square(7, 6), to: Square(5, 5), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
-        let m3 = Move { from: Square(2, 5), to: Square(0, 6), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
-        let m4 = Move { from: Square(5, 5), to: Square(7, 6), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
-
-        // Perform two cycles; after two cycles the starting position should have occurred 3 times
-        for _ in 0..2 {
-            let _ = board.make_move(&m1);
-            let _ = board.make_move(&m2);
-            let _ = board.make_move(&m3);
-            let _ = board.make_move(&m4);
-        }
-
-        assert!(board.is_draw(), "Expected threefold repetition after repeating knight cycle");
-    }
-
-    #[test]
-    fn test_negamax_respects_draw() {
-        let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
-        // Force 50-move draw
-        board.halfmove_clock = 100;
-        // Simple TT for the call
-        let mut tt = TranspositionTable::default();
-        let mut buf = Vec::new();
-        let score = board.negamax(&mut tt, 1, -10000, 10000, &mut buf);
-        assert_eq!(score, 0, "Expected negamax to return draw score 0 for drawn position");
-    }
-
-    #[test]
-    fn test_make_unmake_castling_preserves_state() {
-        let mut board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
-        let baseline_hash = board.hash;
         let baseline_eval = board.evaluate();
+        let baseline_halfmove = board.halfmove_clock;
+        let baseline_pos_hist_len = board.position_history.len();
+        let baseline_castle = board.castling_rights;
+        let baseline_ep = board.en_passant_target;
+        let baseline_to_move = board.white_to_move;
 
-        let mut moves = Vec::new();
-        board.generate_moves_into(&mut moves);
-        let castle_move = moves.iter().find(|m| m.is_castling).expect("No castling move found");
-        let info = board.make_move(castle_move);
-        board.unmake_move(castle_move, info);
+        // Choose a random depth
+        let depth = rng.usize_bounded(MAX_DEPTH) + 1;
+        let mut seq_moves: Vec<(Move, UnmakeInfo)> = Vec::new();
 
-        assert_eq!(board.hash, baseline_hash, "Hash changed after castling make/unmake");
-        assert_eq!(board.evaluate(), baseline_eval, "Eval changed after castling make/unmake");
-    }
-
-    #[test]
-    fn test_en_passant_capture_and_restore() {
-        let fen = "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3";
-        let mut board = Board::from_fen(fen);
-        let mut moves = Vec::new();
-        board.generate_moves_into(&mut moves);
-        // Find en-passant move
-        let ep_move = moves.iter().find(|m| m.is_en_passant).expect("No en-passant move found");
-        // Save pre-move piece presence
-        let capture_row = if board.current_color() == Color::White { ep_move.to.0 - 1 } else { ep_move.to.0 + 1 };
-        let before_cap = board.get_square(capture_row, ep_move.to.1);
-
-        let info = board.make_move(ep_move);
-        // Captured pawn should be removed
-        assert!(board.get_square(capture_row, ep_move.to.1).is_none(), "En-passant captured pawn still on board");
-        board.unmake_move(ep_move, info);
-        // Restored
-        assert_eq!(board.get_square(capture_row, ep_move.to.1), before_cap);
-    }
-
-    #[test]
-    fn test_promotion_moves_make_unmake() {
-        let mut board = Board::from_fen("8/P7/8/8/8/8/8/k6K w - - 0 1");
-        let mut moves = Vec::new();
-        board.generate_moves_into(&mut moves);
-        let promo_move = moves.iter().find(|m| m.promotion.is_some()).expect("No promotion move found");
-        let baseline_hash = board.hash;
-        let baseline_eval = board.evaluate();
-        let info = board.make_move(promo_move);
-        board.unmake_move(promo_move, info);
-        assert_eq!(board.hash, baseline_hash);
-        assert_eq!(board.evaluate(), baseline_eval);
-    }
-
-    #[test]
-    fn test_transposition_table_store_probe() {
-        let mut tt = TranspositionTable::new(1);
-        let hash = 0xdeadbeefu64;
-        tt.store(hash, 1, 100, BoundType::Exact, None);
-        let entry = tt.probe(hash).expect("Entry missing");
-        assert_eq!(entry.depth, 1);
-        // Store shallower vs deeper
-        tt.store(hash, 0, 50, BoundType::Exact, None);
-        let entry2 = tt.probe(hash).expect("Entry missing after shallower store");
-        // Depth should remain 1 because new depth 0 should not replace
-        assert_eq!(entry2.depth, 1);
-        // Now store deeper
-        tt.store(hash, 5, 200, BoundType::Exact, None);
-        let entry3 = tt.probe(hash).expect("Entry missing after deeper store");
-        assert_eq!(entry3.depth, 5);
-    }
-
-    #[test]
-    fn test_randomized_stress_make_unmake() {
-        // Simple deterministic RNG (LCG) to avoid adding dependencies
-        struct SimpleRng { state: u64 }
-        impl SimpleRng {
-            fn new(seed: u64) -> Self { Self { state: seed } }
-            fn next_u64(&mut self) -> u64 {
-                // 64-bit LCG parameters
-                self.state = self.state.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
-                self.state
+        // Make up to `depth` random legal moves; if position is terminal/none, break early
+        for _d in 0..depth {
+            let mut moves = Vec::new();
+            board.generate_moves_into(&mut moves);
+            if moves.is_empty() {
+                break;
             }
-            fn usize_bounded(&mut self, bound: usize) -> usize {
-                if bound == 0 { return 0; }
-                (self.next_u64() as usize) % bound
-            }
+            let idx = rng.usize_bounded(moves.len());
+            let m = moves[idx];
+            let info = board.make_move(&m);
+            seq_moves.push((m, info));
         }
 
-        let mut rng = SimpleRng::new(0x1234_5678_9abc_def0u64);
-
-        let mut board = Board::new();
-
-        // Number of random sequences to run and max depth per sequence
-        const SEQS: usize = 200;
-        const MAX_DEPTH: usize = 6;
-
-        for seq in 0..SEQS {
-            // Capture baseline invariants
-            let baseline_hash = board.hash;
-            let baseline_eval = board.evaluate();
-            let baseline_halfmove = board.halfmove_clock;
-            let baseline_pos_hist_len = board.position_history.len();
-            let baseline_castle = board.castling_rights;
-            let baseline_ep = board.en_passant_target;
-            let baseline_to_move = board.white_to_move;
-
-            // Choose a random depth
-            let depth = rng.usize_bounded(MAX_DEPTH) + 1;
-            let mut seq_moves: Vec<(Move, UnmakeInfo)> = Vec::new();
-
-            // Make up to `depth` random legal moves; if position is terminal/none, break early
-            for _d in 0..depth {
-                let mut moves = Vec::new();
-                board.generate_moves_into(&mut moves);
-                if moves.is_empty() {
-                    break;
-                }
-                let idx = rng.usize_bounded(moves.len());
-                let m = moves[idx];
-                let info = board.make_move(&m);
-                seq_moves.push((m, info));
-            }
-
-            // Now unmake in reverse order
-            while let Some((m, info)) = seq_moves.pop() {
-                board.unmake_move(&m, info);
-            }
-
-            // After unmaking, invariants should match baseline
-            assert_eq!(board.hash, baseline_hash, "[seq {}] hash mismatch after make/unmake", seq);
-            assert_eq!(board.evaluate(), baseline_eval, "[seq {}] eval mismatch after make/unmake", seq);
-            assert_eq!(board.halfmove_clock, baseline_halfmove, "[seq {}] halfmove mismatch", seq);
-            assert_eq!(board.position_history.len(), baseline_pos_hist_len, "[seq {}] position history length mismatch", seq);
-            assert_eq!(board.castling_rights, baseline_castle, "[seq {}] castling rights mismatch", seq);
-            assert_eq!(board.en_passant_target, baseline_ep, "[seq {}] en-passant mismatch", seq);
-            assert_eq!(board.white_to_move, baseline_to_move, "[seq {}] side to move mismatch", seq);
+        // Now unmake in reverse order
+        while let Some((m, info)) = seq_moves.pop() {
+            board.unmake_move(&m, info);
         }
-    }
 
+        // After unmaking, invariants should match baseline
+        assert_eq!(
+            board.hash, baseline_hash,
+            "[seq {}] hash mismatch after make/unmake",
+            seq
+        );
+        assert_eq!(
+            board.evaluate(),
+            baseline_eval,
+            "[seq {}] eval mismatch after make/unmake",
+            seq
+        );
+        assert_eq!(
+            board.halfmove_clock, baseline_halfmove,
+            "[seq {}] halfmove mismatch",
+            seq
+        );
+        assert_eq!(
+            board.position_history.len(),
+            baseline_pos_hist_len,
+            "[seq {}] position history length mismatch",
+            seq
+        );
+        assert_eq!(
+            board.castling_rights, baseline_castle,
+            "[seq {}] castling rights mismatch",
+            seq
+        );
+        assert_eq!(
+            board.en_passant_target, baseline_ep,
+            "[seq {}] en-passant mismatch",
+            seq
+        );
+        assert_eq!(
+            board.white_to_move, baseline_to_move,
+            "[seq {}] side to move mismatch",
+            seq
+        );
+    }
+}

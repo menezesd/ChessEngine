@@ -1,5 +1,5 @@
-use once_cell::sync::Lazy;
 use crate::types::Square;
+use once_cell::sync::Lazy;
 
 pub type Bitboard = u64;
 

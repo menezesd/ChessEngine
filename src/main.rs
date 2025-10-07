@@ -1,12 +1,12 @@
 mod board;
 mod constants;
+mod magic;
+mod search_control;
 mod transposition_table;
 mod types;
 mod uci;
-mod zobrist;
-mod magic;
 mod uci_info;
-mod search_control;
+mod zobrist;
 
 fn main() {
     uci::run_uci_loop();

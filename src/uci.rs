@@ -1,13 +1,10 @@
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
-use std::thread::{JoinHandle, spawn};
+use std::thread::{spawn, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::board::{
-    find_best_move,
-    find_best_move_with_sink,
-    find_best_move_with_time_with_sink,
-    parse_uci_move,
+    find_best_move, find_best_move_with_sink, find_best_move_with_time_with_sink, parse_uci_move,
     Board,
 };
 use crate::search_control;
@@ -136,7 +133,9 @@ pub fn run_uci_loop() {
                         }
                         "perft" => {
                             // perft request: run perft to the given depth and print nodes/time
-                            if let Some(depth) = parts.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                            if let Some(depth) =
+                                parts.get(i + 1).and_then(|s| s.parse::<usize>().ok())
+                            {
                                 let mut b = board.clone();
                                 let start = Instant::now();
                                 let nodes = b.perft(depth);
@@ -154,11 +153,17 @@ pub fn run_uci_loop() {
                             i += 2;
                         }
                         "winc" => {
-                            winc_ms = parts.get(i + 1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                            winc_ms = parts
+                                .get(i + 1)
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .unwrap_or(0);
                             i += 2;
                         }
                         "binc" => {
-                            binc_ms = parts.get(i + 1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                            binc_ms = parts
+                                .get(i + 1)
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .unwrap_or(0);
                             i += 2;
                         }
                         "movetime" => {
@@ -217,12 +222,16 @@ pub fn run_uci_loop() {
                     };
                     if let Some(tms) = time_ms {
                         let moves_to_go = movestogo_opt.unwrap_or(30) as u64; // default horizon
-                        // simple allocation: divide remaining time by moves_to_go, minus safety
+                                                                              // simple allocation: divide remaining time by moves_to_go, minus safety
                         let mut alloc = tms / moves_to_go;
-                        if alloc > 50 { alloc = alloc.saturating_sub(50); }
+                        if alloc > 50 {
+                            alloc = alloc.saturating_sub(50);
+                        }
                         // add a fraction of increment
                         alloc = alloc.saturating_add(inc / 4);
-                        if alloc == 0 { alloc = 1; }
+                        if alloc == 0 {
+                            alloc = 1;
+                        }
                         computed_movetime = Some(Duration::from_millis(alloc));
                     }
                 }
@@ -240,14 +249,36 @@ pub fn run_uci_loop() {
                 let handle = std::thread::spawn(move || {
                     // Worker thread: perform search according to mode and publish intermediate best moves
                     let result: Option<crate::types::Move> = if let Some(d) = use_depth {
-                        find_best_move_with_sink(&mut board_clone.clone(), &mut tt_clone, d, Some(bm_thread.clone()), Some(tx.clone()), is_ponder)
+                        find_best_move_with_sink(
+                            &mut board_clone.clone(),
+                            &mut tt_clone,
+                            d,
+                            Some(bm_thread.clone()),
+                            Some(tx.clone()),
+                            is_ponder,
+                        )
                     } else if let Some(t) = use_movetime {
                         let start = Instant::now();
-                        find_best_move_with_time_with_sink(&mut board_clone.clone(), &mut tt_clone, t, start, Some(bm_thread.clone()), Some(tx.clone()), is_ponder)
+                        find_best_move_with_time_with_sink(
+                            &mut board_clone.clone(),
+                            &mut tt_clone,
+                            t,
+                            start,
+                            Some(bm_thread.clone()),
+                            Some(tx.clone()),
+                            is_ponder,
+                        )
                     } else {
                         // nodes / infinite / ponder: iterative deepening until stop flag
                         // We'll call the sink-aware iterative-deepening with a high max depth and let search_control stop us
-                        find_best_move_with_sink(&mut board_clone.clone(), &mut tt_clone, 64, Some(bm_thread.clone()), Some(tx.clone()), is_ponder)
+                        find_best_move_with_sink(
+                            &mut board_clone.clone(),
+                            &mut tt_clone,
+                            64,
+                            Some(bm_thread.clone()),
+                            Some(tx.clone()),
+                            is_ponder,
+                        )
                     };
 
                     // When the worker naturally finishes, print the bestmove line
@@ -259,7 +290,7 @@ pub fn run_uci_loop() {
                 });
 
                 search_thread = Some(handle);
-            },
+            }
             "stop" => {
                 // Signal stop and join worker, then print bestmove
                 search_control::set_stop(true);
