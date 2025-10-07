@@ -48,3 +48,6 @@ pub fn square_index(sq: Square) -> usize {
 pub fn bitboard_for_square(sq: Square) -> Bitboard {
     1u64 << square_index(sq)
 }
+
+// Use SmallVec for small move-lists to avoid frequent heap allocations in search.
+pub type MoveList = smallvec::SmallVec<[crate::types::Move; 64]>;

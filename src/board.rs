@@ -107,6 +107,15 @@ pub struct UnmakeInfo {
     pub previous_history_len: usize,
 }
 
+/// Minimal snapshot for a null-move so the position can be restored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NullUnmake {
+    pub previous_en_passant_target: Option<Square>,
+    pub previous_hash: u64,
+    pub previous_halfmove_clock: u32,
+    pub previous_history_len: usize,
+}
+
 // piece values moved to `ordering.rs` to centralize move ordering heuristics.
 
 /// MVV-LVA (Most Valuable Victim - Least Valuable Attacker) score helper.
@@ -224,7 +233,7 @@ impl Board {
         pieces: Bitboard,
         attack_fn: F,
         include_quiet: bool,
-        moves: &mut Vec<Move>,
+        moves: &mut crate::types::MoveList,
     ) where
         F: Fn(Square) -> Bitboard,
     {
@@ -255,7 +264,7 @@ impl Board {
         pieces: Bitboard,
         attack_fn: F,
         include_quiet: bool,
-        moves: &mut Vec<Move>,
+        moves: &mut crate::types::MoveList,
     ) where
         F: Fn(Square, Bitboard) -> Bitboard,
     {
@@ -280,7 +289,7 @@ impl Board {
         }
     }
 
-    fn add_pawn_tactical_moves(&self, color: Color, moves: &mut Vec<Move>) {
+    fn add_pawn_tactical_moves(&self, color: Color, moves: &mut crate::types::MoveList) {
         let color_idx = color_to_zobrist_index(color);
         let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
         let dir: isize = if color == Color::White { 1 } else { -1 };
@@ -784,10 +793,44 @@ impl Board {
         }
     }
 
+    /// Make a "null move" (pass the turn) for null-move pruning.
+    /// Returns a NullUnmake snapshot to restore position.
+    pub fn make_null_move(&mut self) -> NullUnmake {
+        let previous_en_passant_target = self.en_passant_target;
+        let previous_hash = self.hash;
+        let previous_halfmove_clock = self.halfmove_clock;
+        let previous_history_len = self.position_history.len();
+
+        // Update side to move and zobrist hash accordingly
+        self.white_to_move = !self.white_to_move;
+        self.hash ^= ZOBRIST.black_to_move_key;
+
+        // Null move increments halfmove clock
+        self.halfmove_clock = self.halfmove_clock.saturating_add(1);
+        self.en_passant_target = None;
+        self.position_history.push(self.hash);
+
+        NullUnmake {
+            previous_en_passant_target,
+            previous_hash,
+            previous_halfmove_clock,
+            previous_history_len,
+        }
+    }
+
+    /// Restore state after a null move using the provided snapshot.
+    pub fn unmake_null_move(&mut self, info: NullUnmake) {
+        self.white_to_move = !self.white_to_move;
+        self.en_passant_target = info.previous_en_passant_target;
+        self.hash = info.previous_hash;
+        self.halfmove_clock = info.previous_halfmove_clock;
+        self.position_history.truncate(info.previous_history_len);
+    }
+
     // --- Move Generation (largely unchanged logic, but uses new Move struct) ---
     // Provide "into" variants that accept a reusable buffer to avoid allocations.
 
-    fn generate_pseudo_moves_into(&self, moves: &mut Vec<Move>) {
+    fn generate_pseudo_moves_into(&self, moves: &mut crate::types::MoveList) {
         moves.clear();
         let color = self.current_color();
         self.generate_pawn_moves_for(color, moves);
@@ -803,7 +846,7 @@ impl Board {
     #[allow(clippy::too_many_arguments)]
     fn add_move(
         &self,
-        moves: &mut Vec<Move>,
+        moves: &mut crate::types::MoveList,
         color: Color,
         from: Square,
         to: Square,
@@ -830,7 +873,7 @@ impl Board {
         });
     }
 
-    fn generate_pawn_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+    fn generate_pawn_moves_for(&self, color: Color, moves: &mut crate::types::MoveList) {
         let color_idx = color_to_zobrist_index(color);
         let opponent_color = self.opponent_color(color);
         let opponent_idx = color_to_zobrist_index(opponent_color);
@@ -913,25 +956,25 @@ impl Board {
         }
     }
 
-    fn generate_knight_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+    fn generate_knight_moves_for(&self, color: Color, moves: &mut crate::types::MoveList) {
         let color_idx = color_to_zobrist_index(color);
         let knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
         self.add_leaper_moves(color, knights, Self::knight_attacks, true, moves);
     }
 
-    fn generate_bishop_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+    fn generate_bishop_moves_for(&self, color: Color, moves: &mut crate::types::MoveList) {
         let color_idx = color_to_zobrist_index(color);
         let bishops = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)];
         self.add_sliding_moves(color, bishops, Self::bishop_attacks, true, moves);
     }
 
-    fn generate_rook_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+    fn generate_rook_moves_for(&self, color: Color, moves: &mut crate::types::MoveList) {
         let color_idx = color_to_zobrist_index(color);
         let rooks = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)];
         self.add_sliding_moves(color, rooks, Self::rook_attacks, true, moves);
     }
 
-    fn generate_queen_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+    fn generate_queen_moves_for(&self, color: Color, moves: &mut crate::types::MoveList) {
         let color_idx = color_to_zobrist_index(color);
         let queens = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
         self.add_sliding_moves(
@@ -943,7 +986,7 @@ impl Board {
         );
     }
 
-    fn generate_king_moves_for(&self, color: Color, moves: &mut Vec<Move>) {
+    fn generate_king_moves_for(&self, color: Color, moves: &mut crate::types::MoveList) {
         let color_idx = color_to_zobrist_index(color);
         let kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
         self.add_leaper_moves(color, kings, Self::king_attacks, true, moves);
@@ -1058,16 +1101,16 @@ impl Board {
 
     // Generates only fully legal moves, takes &mut self
     // Generates only fully legal moves, takes &mut self
-    pub fn generate_moves_into(&mut self, out: &mut Vec<Move>) {
+    pub fn generate_moves_into(&mut self, out: &mut crate::types::MoveList) {
         // Use a temporary buffer for pseudo moves (caller may reuse `out` across calls)
-        let mut pseudo = Vec::new();
+        let mut pseudo: crate::types::MoveList = crate::types::MoveList::new();
         self.generate_pseudo_moves_into(&mut pseudo);
 
         out.clear();
         let current_color = self.current_color();
         let opponent_color = self.opponent_color(current_color);
 
-        for m in pseudo {
+    for m in pseudo.into_iter() {
             // Special check for castling legality (squares king passes over cannot be attacked)
             if m.is_castling {
                 let king_start_sq = m.from;
@@ -1439,7 +1482,7 @@ impl Board {
         depth: u32,
         alpha: i32,
         beta: i32,
-        moves_buf: &mut Vec<Move>,
+        moves_buf: &mut crate::types::MoveList,
     ) -> i32 {
         // Create a temporary ordering context for callers that don't provide one
         let mut ctx = crate::ordering::OrderingContext::new(256);
@@ -1460,6 +1503,7 @@ impl Board {
         depth: u32,
         root_moves: &mut [Move],
         mut should_abort: F,
+        window: Option<(i32, i32)>,
     ) -> (Option<Move>, i32, bool)
     where
         F: FnMut() -> bool,
@@ -1474,17 +1518,24 @@ impl Board {
         // Allow TT to promote a suggested move to the front for ordering
     crate::search::apply_tt_move_hint(&mut root_moves[..], tt, self.hash);
 
-        let mut mv_buf = Vec::new();
+    let mut mv_buf: crate::types::MoveList = crate::types::MoveList::new();
         // Create a persistent OrderingContext for the root search so killers/history persist
         let mut ordering_ctx = crate::ordering::OrderingContext::new(256);
-    for m in root_moves.iter() {
+    for (idx, m) in root_moves.iter().enumerate() {
             if should_abort() {
                 return (None, 0, false); // aborted mid-root
             }
             let info = self.make_move(m);
-            // If an aspiration window is provided, use it for the first move, otherwise standard window
-            // Always use the full alpha/beta window at root (no aspiration)
-            let score = -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx);
+            // Use the aspiration window for the first root move if provided
+            let score = if idx == 0 {
+                if let Some((w_alpha, w_beta)) = window {
+                    -crate::search::negamax(self, tt, depth - 1, w_alpha, w_beta, &mut mv_buf, &mut ordering_ctx)
+                } else {
+                    -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx)
+                }
+            } else {
+                -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx)
+            };
             self.unmake_move(m, info);
 
             if score > best_score {
@@ -1500,11 +1551,11 @@ impl Board {
 
     // Allocation-returning tactical move generator removed; use `generate_tactical_moves_into`.
 
-    pub fn generate_tactical_moves_into(&mut self, out: &mut Vec<Move>) {
+    pub fn generate_tactical_moves_into(&mut self, out: &mut crate::types::MoveList) {
         out.clear();
         let current_color = self.current_color();
         let color_idx = color_to_zobrist_index(current_color);
-        let mut pseudo_tactical_moves = Vec::new();
+        let mut pseudo_tactical_moves: crate::types::MoveList = crate::types::MoveList::new();
 
         self.add_pawn_tactical_moves(current_color, &mut pseudo_tactical_moves);
 
@@ -1572,8 +1623,8 @@ impl Board {
             return 1;
         }
 
-        let mut mvbuf = Vec::new();
-        self.generate_moves_into(&mut mvbuf);
+    let mut mvbuf: crate::types::MoveList = crate::types::MoveList::new();
+    self.generate_moves_into(&mut mvbuf);
         if depth == 1 {
             return mvbuf.len() as u64;
         }
@@ -1717,7 +1768,7 @@ pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     // if we just want to *find* the move without changing state yet.
     // A temporary clone *might* be acceptable here, or we pass the pre-generated list.
     // Let's generate moves here.
-    let mut legal_moves = Vec::new();
+    let mut legal_moves: crate::types::MoveList = crate::types::MoveList::new();
     board.generate_moves_into(&mut legal_moves);
 
     for legal_move in legal_moves {
@@ -1765,7 +1816,7 @@ pub fn find_best_move_with_context(
     let mut best_move: Option<Move> = None;
     let mut _best_score = -MATE_SCORE * 2;
 
-    let mut legal_moves = Vec::new();
+    let mut legal_moves: crate::types::MoveList = crate::types::MoveList::new();
     board.generate_moves_into(&mut legal_moves);
     if legal_moves.is_empty() {
         return None;
@@ -1811,7 +1862,7 @@ pub fn find_best_move_with_context(
         }
 
         // Temporary moves buffer to pass into recursive negamax/quiesce calls
-        let mut mv_buf = Vec::new();
+    let mut mv_buf: crate::types::MoveList = crate::types::MoveList::new();
         for m in &root_moves {
             let info = board.make_move(m);
             let score = -board.negamax(tt, depth - 1, -beta, -alpha, &mut mv_buf);
@@ -1927,8 +1978,8 @@ pub fn find_best_move_with_time_context(
         let mut alpha = -MATE_SCORE * 2;
         let beta = MATE_SCORE * 2;
         let mut best_score = -MATE_SCORE * 2;
-        let mut legal_moves = Vec::new();
-        board.generate_moves_into(&mut legal_moves);
+    let mut legal_moves: crate::types::MoveList = crate::types::MoveList::new();
+    board.generate_moves_into(&mut legal_moves);
 
         if legal_moves.is_empty() {
             return None;
@@ -1951,7 +2002,7 @@ pub fn find_best_move_with_time_context(
         let mut new_best_move = None;
 
         // Temporary moves buffer reused for recursive calls
-        let mut mv_buf = Vec::new();
+    let mut mv_buf: crate::types::MoveList = crate::types::MoveList::new();
         for m in &legal_moves {
             if start_time.elapsed() + SAFETY_MARGIN >= max_time {
                 break;

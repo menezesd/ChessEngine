@@ -1,5 +1,5 @@
 use crate::transposition_table::TranspositionTable;
-use crate::types::{format_square, Move};
+use crate::types::{format_square, Move, MoveList};
 use crate::board::Board;
 use crate::ordering::{OrderingContext, order_moves};
 // Null-move pruning removed.
@@ -18,7 +18,7 @@ pub fn negamax(
     depth: u32,
     mut alpha: i32,
     mut beta: i32,
-    moves_buf: &mut Vec<Move>,
+    moves_buf: &mut MoveList,
     ctx: &mut OrderingContext,
 ) -> i32 {
     let original_alpha = alpha;
@@ -40,6 +40,16 @@ pub fn negamax(
         hash_move = entry.best_move;
     }
 
+    // Internal Iterative Deepening (IID): if we have no TT move and depth is large,
+    // do a shallow search (depth-2) to populate the TT with a good move for ordering.
+    if hash_move.is_none() && depth >= 3 {
+        // perform a reduced-depth search to get a usable TT hint
+        let _ = negamax(board, tt, depth - 2, alpha, beta, moves_buf, ctx);
+        if let Some(entry) = tt.probe(current_hash) {
+            hash_move = entry.best_move;
+        }
+    }
+
     if crate::search_control::should_stop() {
         return 0;
     }
@@ -54,8 +64,26 @@ pub fn negamax(
         return quiesce(board, alpha, beta, moves_buf, ctx);
     }
 
-    // Null-move pruning disabled: removed to avoid tactical false cutoffs.
-    // Previously, a reduced-depth null-move test was here. It was removed intentionally.
+    // Null-move pruning (Publius-style) with verification search on cutoff.
+    // Only apply when depth is sufficiently large and not in check.
+    if depth >= 3 && !board.is_in_check(board.current_color()) {
+        // reduction R = 2 (default); allow simple depth-adaptive tweak in future
+        let r = 2u32;
+        let null_info = board.make_null_move();
+        let null_score = -negamax(board, tt, depth - 1 - r, -beta, -beta + 1, moves_buf, ctx);
+        board.unmake_null_move(null_info);
+        if null_score >= beta {
+            // Verification search: do a cautious full (or full-window) search at reduced depth
+            // to avoid zugzwang false positives. If verification confirms >= beta, store and return.
+            // Use depth-1 for verification (safe since depth >= 3 here).
+            let verify_score = -negamax(board, tt, depth - 1, -beta, -alpha, moves_buf, ctx);
+            if verify_score >= beta {
+                tt.store(current_hash, depth, verify_score, BoundType::LowerBound, None);
+                return verify_score;
+            }
+            // Otherwise, fall through and search normally (no premature cutoff).
+        }
+    }
 
     moves_buf.clear();
     board.generate_moves_into(moves_buf);
@@ -80,23 +108,77 @@ pub fn negamax(
     let mut best_score: i32 = -crate::constants::MATE_SCORE * 2;
     let mut best_move_found: Option<Move> = None;
 
-    let mut child_buf: Vec<Move> = Vec::new();
+    // Take the reusable child buffer out of the ordering context so we can
+    // borrow it independently without causing multiple mutable borrows of ctx.
+    let mut child_buf = std::mem::take(&mut ctx.child_buf);
+    child_buf.clear();
+    child_buf.reserve(moves_buf.len().max(16));
     for (i, m) in moves_buf.iter().enumerate() {
         if crate::search_control::should_stop() {
             break;
         }
         // Capture attacker piece type before making the move (board state will change)
         let attacker_piece = board.piece_at(m.from).map(|(_c, p)| p);
-        let info = board.make_move(m);
-        let score = if i == 0 {
-            -negamax(board, tt, depth - 1, -beta, -alpha, &mut child_buf, ctx)
-        } else {
-            let mut score = -negamax(board, tt, depth - 1, -alpha - 1, -alpha, &mut child_buf, ctx);
-            if score > alpha && score < beta {
-                score = -negamax(board, tt, depth - 1, -beta, -alpha, &mut child_buf, ctx);
+        // Futility pruning: at very shallow depths (near leaf), skip quiet moves
+        // that are unlikely to raise alpha. This is a conservative heuristic.
+        let is_quiet = m.captured_piece.is_none() && m.promotion.is_none();
+        if is_quiet && depth <= 2 {
+            // small margin per ply (centipawns)
+            let margin = if depth == 1 { 150 } else { 80 };
+            let stand_pat = board.evaluate();
+            if stand_pat + margin <= alpha {
+                // treat as a non-improving move: continue to next move
+                continue;
             }
-            score
-        };
+        }
+
+    // Prepare to make the move and search. We'll apply Late Move Reductions (LMR)
+    // for non-captures/non-promotions that appear late in the move ordering.
+    let info = board.make_move(m);
+
+        let mut score: i32;
+        if i == 0 {
+            // principal variation move - full depth
+            score = -negamax(board, tt, depth - 1, -beta, -alpha, &mut child_buf, ctx);
+        } else {
+            let mut did_lmr = false;
+            let mut reduced_score = -crate::constants::MATE_SCORE * 2;
+
+            // Determine if LMR is applicable: non-capture, no promotion, and depth >= 3
+            if m.captured_piece.is_none() && m.promotion.is_none() && depth >= 3 {
+                // apply reductions only for sufficiently late moves
+                if i >= 4 {
+                    // basic reduction formula: 1 + (i / 6), capped to depth-2
+                    let mut red = 1u32 + (i as u32 / 6);
+                    if red > depth.saturating_sub(2) {
+                        red = depth.saturating_sub(2);
+                    }
+                    if red > 0 {
+                        did_lmr = true;
+                        let reduced_depth = depth - 1 - red;
+                        reduced_score = -negamax(board, tt, reduced_depth, -alpha - 1, -alpha, &mut child_buf, ctx);
+                    }
+                }
+            }
+
+            if did_lmr {
+                score = reduced_score;
+                // If reduced search suggests the move might be interesting, do full null-window then full-window re-search
+                if score > alpha && score < beta {
+                    score = -negamax(board, tt, depth - 1, -alpha - 1, -alpha, &mut child_buf, ctx);
+                    if score > alpha && score < beta {
+                        score = -negamax(board, tt, depth - 1, -beta, -alpha, &mut child_buf, ctx);
+                    }
+                }
+            } else {
+                // No reduction: PVS-style search
+                score = -negamax(board, tt, depth - 1, -alpha - 1, -alpha, &mut child_buf, ctx);
+                if score > alpha && score < beta {
+                    score = -negamax(board, tt, depth - 1, -beta, -alpha, &mut child_buf, ctx);
+                }
+            }
+        }
+
         board.unmake_move(m, info);
 
         // If this move improved best_score, record history for non-capture moves
@@ -132,6 +214,9 @@ pub fn negamax(
         BoundType::Exact
     };
 
+    // Return the child buffer to the ordering context before storing TT and returning
+    ctx.child_buf = child_buf;
+
     tt.store(current_hash, depth, best_score, bound_type, best_move_found);
 
     best_score
@@ -143,7 +228,7 @@ pub fn quiesce(
     board: &mut Board,
     mut alpha: i32,
     beta: i32,
-    moves_buf: &mut Vec<Move>,
+    moves_buf: &mut MoveList,
     ctx: &mut OrderingContext,
 ) -> i32 {
     let stand_pat_score = board.evaluate();
@@ -204,7 +289,7 @@ pub fn iterative_deepening_with_sink(
 ) -> Option<Move> {
     let mut best_move: Option<Move> = None;
 
-    let mut legal_moves = Vec::new();
+    let mut legal_moves: MoveList = MoveList::new();
     board.generate_moves_into(&mut legal_moves);
     if legal_moves.is_empty() {
         return None;
@@ -215,14 +300,59 @@ pub fn iterative_deepening_with_sink(
     let mut root_moves = legal_moves;
 
     let search_start = Instant::now();
+    let mut prev_score: Option<i32> = None;
     for depth in 1..=max_depth {
-        // Simple full-window root search (no aspiration)
-        let (mv_opt, score, completed) = board.run_root_search(
-            tt,
-            depth,
-            &mut root_moves[..],
-            crate::search_control::should_stop,
-        );
+        // Bump TT generation so entries written at this depth are preferred
+        tt.new_generation();
+        // Progressive aspiration: if we have a previous score and depth is big enough,
+        // try small windows around prev_score and widen (10,20,40,... up to 500 cp)
+        let mut mv_opt: Option<Move> = None;
+        let mut score: i32 = 0;
+        let mut completed = false;
+
+        if let Some(ps) = prev_score {
+            if depth > 2 && ps.abs() < (crate::constants::MATE_SCORE / 2) {
+                let mut margin = 10i32;
+                while margin <= 500 {
+                    if crate::search_control::should_stop() {
+                        break;
+                    }
+                    let a = ps.saturating_sub(margin);
+                    let b = ps.saturating_add(margin);
+                    let (mv_try, sc_try, completed_try) = board.run_root_search(
+                        tt,
+                        depth,
+                        &mut root_moves[..],
+                        crate::search_control::should_stop,
+                        Some((a, b)),
+                    );
+                    if completed_try && sc_try > a && sc_try < b {
+                        mv_opt = mv_try;
+                        score = sc_try;
+                        completed = true;
+                        break;
+                    }
+                    if !completed_try && crate::search_control::should_stop() {
+                        break;
+                    }
+                    margin = margin.saturating_mul(2);
+                }
+            }
+        }
+
+        // Fallback to full-window search if aspiration did not produce a completed result
+        if !completed && !crate::search_control::should_stop() {
+            let (mv_full, sc_full, completed_full) = board.run_root_search(
+                tt,
+                depth,
+                &mut root_moves[..],
+                crate::search_control::should_stop,
+                None,
+            );
+            mv_opt = mv_full;
+            score = sc_full;
+            completed = completed_full;
+        }
 
         if completed {
             if let Some(mv) = mv_opt {
@@ -276,6 +406,8 @@ pub fn iterative_deepening_with_sink(
                 if let Some(pos) = root_moves.iter().position(|m| *m == mv) {
                     root_moves.swap(0, pos);
                 }
+            // record previous score for next depth's aspiration window
+            prev_score = Some(score);
             }
         }
     }
@@ -300,7 +432,10 @@ pub fn time_limited_search_with_sink(
     const SAFETY_MARGIN: Duration = Duration::from_millis(5);
     const TIME_GROWTH_FACTOR: f32 = 2.0;
 
+    let mut prev_score: Option<i32> = None;
     while start_time.elapsed() + SAFETY_MARGIN < max_time {
+        // Bump generation each iterative step so TT replacement prefers newer entries
+        tt.new_generation();
         let elapsed = start_time.elapsed();
         let time_remaining = max_time.checked_sub(elapsed).unwrap_or_default();
 
@@ -311,7 +446,7 @@ pub fn time_limited_search_with_sink(
 
         let depth_start = Instant::now();
 
-        let mut legal_moves = Vec::new();
+        let mut legal_moves: MoveList = MoveList::new();
         board.generate_moves_into(&mut legal_moves);
         if legal_moves.is_empty() {
             return None;
@@ -323,17 +458,58 @@ pub fn time_limited_search_with_sink(
         legal_moves.sort_by_key(|m| -crate::board::mvv_lva_score(m, board));
         apply_tt_move_hint(&mut legal_moves[..], tt, board.hash);
 
-        // Always perform a full-window search for this depth (no aspiration)
-        let (new_best_move, new_best_score, completed) = board.run_root_search(
-            tt,
-            depth,
-            &mut legal_moves[..],
-            || start_time.elapsed() + SAFETY_MARGIN >= max_time,
-        );
+        // Progressive aspiration similar to iterative driver
+        let mut this_best_move: Option<Move> = None;
+        let mut this_best_score: i32 = 0;
+        let mut completed = false;
+        if let Some(ps) = prev_score {
+            if depth > 2 && ps.abs() < (crate::constants::MATE_SCORE / 2) {
+                let mut margin = 10i32;
+                while margin <= 500 {
+                    if start_time.elapsed() + SAFETY_MARGIN >= max_time {
+                        break;
+                    }
+                    let a = ps.saturating_sub(margin);
+                    let b = ps.saturating_add(margin);
+                    let (mv_try, sc_try, completed_try) = board.run_root_search(
+                        tt,
+                        depth,
+                        &mut legal_moves[..],
+                        || start_time.elapsed() + SAFETY_MARGIN >= max_time,
+                        Some((a, b)),
+                    );
+                    if completed_try && sc_try > a && sc_try < b {
+                        this_best_move = mv_try;
+                        this_best_score = sc_try;
+                        completed = true;
+                        break;
+                    }
+                    if !completed_try && start_time.elapsed() + SAFETY_MARGIN >= max_time {
+                        break;
+                    }
+                    margin = margin.saturating_mul(2);
+                }
+            }
+        }
+
+        if !completed {
+            let (mv_full, sc_full, completed_full) = board.run_root_search(
+                tt,
+                depth,
+                &mut legal_moves[..],
+                || start_time.elapsed() + SAFETY_MARGIN >= max_time,
+                None,
+            );
+            if completed_full {
+                this_best_move = mv_full;
+                this_best_score = sc_full;
+                completed = true;
+            }
+        }
 
         if start_time.elapsed() + SAFETY_MARGIN < max_time {
             if completed {
-                best_move = new_best_move;
+                best_move = this_best_move;
                 if let Some(ref s) = sink {
                     let mut lock = match s.lock() {
                         Ok(g) => g,
@@ -365,11 +541,11 @@ pub fn time_limited_search_with_sink(
                         seldepth: None,
                         ponder: None,
                     };
-                    if new_best_score.abs() > (crate::constants::MATE_SCORE / 2) {
-                        let mate_in = (crate::constants::MATE_SCORE - new_best_score.abs() + 1) / 2;
+                    if this_best_score.abs() > (crate::constants::MATE_SCORE / 2) {
+                        let mate_in = (crate::constants::MATE_SCORE - this_best_score.abs() + 1) / 2;
                         info.score_mate = Some(mate_in);
                     } else {
-                        info.score_cp = Some(new_best_score);
+                        info.score_cp = Some(this_best_score);
                     }
                     if is_ponder {
                         if let Some(bm) = best_move {
@@ -385,6 +561,8 @@ pub fn time_limited_search_with_sink(
                         legal_moves.swap(0, pos);
                     }
                 }
+                // record prev_score for next depth's aspiration window
+                prev_score = Some(this_best_score);
             }
 
             last_depth_time = depth_start.elapsed();

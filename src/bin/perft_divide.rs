@@ -9,7 +9,7 @@ fn main() {
     println!("Perft divide for Kiwipete depth {}", depth);
     let start = Instant::now();
     let mut total = 0u64;
-    let mut root_moves = Vec::new();
+    let mut root_moves: chess_engine::types::MoveList = chess_engine::types::MoveList::new();
     board.generate_moves_into(&mut root_moves);
     root_moves.sort_by_key(|m| (m.from.0, m.from.1, m.to.0, m.to.1));
     for m in &root_moves {

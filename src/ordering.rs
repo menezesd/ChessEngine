@@ -60,6 +60,8 @@ pub struct OrderingContext {
     /// history indexed by piece/from/to -> score
     pub history: Vec<i32>,
     pub max_depth: usize,
+    /// Reusable small child move buffer to avoid frequent allocations in hot search loops.
+    pub child_buf: crate::types::MoveList,
 }
 
 impl OrderingContext {
@@ -68,6 +70,7 @@ impl OrderingContext {
             killers: vec![[None, None]; max_depth + 1],
             history: vec![0i32; HISTORY_SIZE],
             max_depth,
+            child_buf: crate::types::MoveList::new(),
         }
     }
 

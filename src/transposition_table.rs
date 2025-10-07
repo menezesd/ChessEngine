@@ -16,11 +16,14 @@ pub struct TTEntry {
     pub score: i32,
     pub bound_type: BoundType,
     pub best_move: Option<Move>,
+    /// generation counter (wraps) used to prefer newer entries when replacing
+    pub generation: u8,
 }
 
 pub struct TranspositionTable {
     table: Vec<Option<TTEntry>>,
     mask: usize,
+    pub generation: u8,
 }
 
 impl TranspositionTable {
@@ -40,6 +43,7 @@ impl TranspositionTable {
         TranspositionTable {
             table: vec![None; num_entries],
             mask: num_entries - 1,
+            generation: 0u8,
         }
     }
 
@@ -70,8 +74,13 @@ impl TranspositionTable {
         best_move: Option<Move>,
     ) {
         let index = self.index(hash);
+        // Prefer replacing older entries or entries with smaller depth. Use generation tag
+        // to avoid thrashing older useful entries.
         let should_replace = match &self.table[index] {
-            Some(existing_entry) => depth >= existing_entry.depth,
+            Some(existing_entry) => {
+                // Replace if incoming entry is deeper or the existing entry is from an older generation
+                depth >= existing_entry.depth || existing_entry.generation != self.generation
+            }
             None => true,
         };
 
@@ -82,8 +91,15 @@ impl TranspositionTable {
                 score,
                 bound_type,
                 best_move,
+                generation: self.generation,
             });
         }
+    }
+
+    /// Bump the global generation counter between iterative deepening iterations
+    /// so newer entries are preferred over older ones on replacement.
+    pub fn new_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
