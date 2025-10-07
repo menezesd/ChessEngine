@@ -2,11 +2,17 @@ use crate::transposition_table::TranspositionTable;
 use crate::types::{format_square, Move};
 use crate::board::Board;
 use crate::ordering::{OrderingContext, order_moves};
+use crate::zobrist::ZOBRIST;
+// Local copy of material values (MG) for P, N, B, R, Q, K so we can compute a
+// simple weighted-material sum without depending on public eval symbols.
+const MATERIAL_MG: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 use crate::uci_info;
 use crate::transposition_table::BoundType;
+use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
+use crate::see::see_capture;
 
 pub fn negamax(
     board: &mut Board,
@@ -48,6 +54,39 @@ pub fn negamax(
 
     if depth == 0 {
         return quiesce(board, alpha, beta, moves_buf, ctx);
+    }
+
+    // Null-move pruning: if not in check and depth is sufficient, try a reduced-depth null move.
+    // Conditions: depth >= 3 and not in check and not a draw. We set reduction R=2.
+    if depth >= 3 {
+        let current_color = board.current_color();
+        // Don't use null-move in low-material/endgame positions where zugzwang risk is high.
+        if !board.is_in_check(current_color) && should_use_null_move(board) {
+            // Make a null move: flip side and clear en-passant target (save/restore state)
+            let saved_ep = board.en_passant_target;
+            let saved_hash = board.hash;
+            board.en_passant_target = None;
+            board.white_to_move = !board.white_to_move;
+            board.hash ^= ZOBRIST.black_to_move_key;
+
+            // Reduced depth
+            let r = 2u32;
+            let score = -negamax(board, tt, depth - 1 - r, -beta, -beta + 1, moves_buf, ctx);
+
+            // Undo null move
+            board.white_to_move = !board.white_to_move;
+            board.en_passant_target = saved_ep;
+            board.hash = saved_hash;
+
+            if score >= beta {
+                // Verification search: full-window search at depth-1 to avoid zugzwang false cutoffs
+                let ver_score = -negamax(board, tt, depth - 1, -beta, -alpha, moves_buf, ctx);
+                if ver_score >= beta {
+                    return ver_score;
+                }
+                // Otherwise continue searching normally
+            }
+        }
     }
 
     moves_buf.clear();
@@ -130,6 +169,55 @@ pub fn negamax(
     best_score
 }
 
+/// Simple heuristic that decides whether null-move pruning is safe in the
+/// current position. We conservatively disable null-move in reduced-material
+/// positions where only kings and pawns (or very little non-pawn material)
+/// remain to avoid zugzwang-related false cutoffs.
+fn should_use_null_move(board: &Board) -> bool {
+    // First, check if a material threshold override is configured. We use a
+    // global atomic i32 where negative value means "no threshold configured".
+    if let Some(threshold) = get_nullmove_material_threshold() {
+        // Compute weighted non-pawn material using MATERIAL_MG for pieces 1..4
+        let mut mat: i32 = 0;
+        for piece_idx in 1..5usize {
+            let cnt = (board.bitboards[0][piece_idx].count_ones()
+                + board.bitboards[1][piece_idx].count_ones()) as i32;
+            mat += cnt * MATERIAL_MG[piece_idx];
+        }
+        // If total non-pawn material is below or equal to threshold, disable null-move
+        return mat > threshold;
+    }
+
+    // Fallback conservative rule: count non-pawn pieces (N,B,R,Q) for both sides.
+    let mut non_pawn_count = 0u32;
+    for piece_idx in 1..5 {
+        let ww = board.bitboards[0][piece_idx];
+        let bb = board.bitboards[1][piece_idx];
+        non_pawn_count += ww.count_ones();
+        non_pawn_count += bb.count_ones();
+    }
+
+    // If there is very little non-pawn material (e.g., <= 1 piece besides kings),
+    // disable null-move to avoid zugzwang issues.
+    non_pawn_count > 1
+}
+
+static NULLMOVE_MATERIAL_THRESHOLD: AtomicI32 = AtomicI32::new(-1);
+
+/// Set a weighted-material threshold (in centipawns) below which null-move
+/// pruning will be disabled. Use `None` to clear the threshold and fall back
+/// to the conservative piece-count heuristic.
+pub fn set_nullmove_material_threshold(opt: Option<i32>) {
+    let v = opt.unwrap_or(-1);
+    NULLMOVE_MATERIAL_THRESHOLD.store(v, AtomicOrdering::SeqCst);
+}
+
+/// Get the configured material threshold, or `None` if not set.
+pub fn get_nullmove_material_threshold() -> Option<i32> {
+    let v = NULLMOVE_MATERIAL_THRESHOLD.load(AtomicOrdering::SeqCst);
+    if v < 0 { None } else { Some(v) }
+}
+
 /// Quiescence search extracted from Board::quiesce
 pub fn quiesce(
     board: &mut Board,
@@ -153,6 +241,12 @@ pub fn quiesce(
 
     moves_buf.clear();
     board.generate_tactical_moves_into(moves_buf);
+    // Use SEE to prune obviously losing captures and order by SEE value
+    moves_buf.retain(|m| {
+        let s = see_capture(board, m);
+        s >= 0
+    });
+    moves_buf.sort_by_key(|m| -see_capture(board, m));
     order_moves(ctx, board, &mut moves_buf[..], 0, None);
 
     let mut best_score = stand_pat_score;
@@ -200,10 +294,41 @@ pub fn iterative_deepening_with_sink(
     let mut root_moves = legal_moves;
 
     let search_start = Instant::now();
+    let mut prev_score: Option<i32> = None;
+    const ASPIRATION_WINDOW: i32 = 50; // centipawns
     for depth in 1..=max_depth {
-        let (mv_opt, score, completed) = board.run_root_search(tt, depth, &mut root_moves, || {
-            crate::search_control::should_stop()
-        });
+        // Build aspiration window from previous score if available
+        let mut window = None;
+        if let Some(ps) = prev_score {
+            let a = ps.saturating_sub(ASPIRATION_WINDOW);
+            let b = ps.saturating_add(ASPIRATION_WINDOW);
+            window = Some((a, b));
+        }
+
+        // First try with aspiration window (if any)
+        let (mut mv_opt, mut score, mut completed) = board.run_root_search(
+            tt,
+            depth,
+            &mut root_moves,
+            || crate::search_control::should_stop(),
+            window,
+        );
+
+        // If aspiration failed (score outside window), re-search with full window
+        if let Some((a, b)) = window {
+            if completed && (score <= a || score >= b) {
+                let (mv_opt2, score2, completed2) = board.run_root_search(
+                    tt,
+                    depth,
+                    &mut root_moves,
+                    || crate::search_control::should_stop(),
+                    None,
+                );
+                mv_opt = mv_opt2;
+                score = score2;
+                completed = completed2;
+            }
+        }
 
         if completed {
             if let Some(mv) = mv_opt {
@@ -306,12 +431,24 @@ pub fn time_limited_search_with_sink(
     legal_moves.sort_by_key(|m| -crate::board::mvv_lva_score(m, board));
     apply_tt_move_hint(&mut legal_moves[..], tt, board.hash);
 
-    let (new_best_move, best_score, _completed) = board.run_root_search(
+    // Attempt aspiration window around previous depth's score
+    const ASPIRATION_WINDOW: i32 = 50;
+    let mut window = None;
+    if last_depth_time != Duration::from_millis(1) {
+        // We don't have score from previous depth here, but reuse last best_score if available
+        // For simplicity, attempt no window unless caller has prev_score; keep None.
+        window = None;
+    }
+
+    let (mut new_best_move, mut best_score, mut _completed) = board.run_root_search(
             tt,
             depth,
             &mut legal_moves,
             || start_time.elapsed() + SAFETY_MARGIN >= max_time,
+            window,
         );
+
+    // If aspiration window was used (none here) and failed, fallback (kept for parity with iterative version)
 
         if start_time.elapsed() + SAFETY_MARGIN < max_time {
             best_move = new_best_move;

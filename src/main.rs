@@ -7,6 +7,7 @@ mod types;
 mod uci;
 mod uci_info;
 mod zobrist;
+mod see;
 mod search;
 mod ordering;
 mod engine;

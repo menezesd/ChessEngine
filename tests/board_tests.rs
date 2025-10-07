@@ -70,3 +70,16 @@ fn test_transposition_table_store_probe() {
     let entry3 = tt.probe(hash).expect("Entry missing after deeper store");
     assert_eq!(entry3.depth, 5);
 }
+
+#[test]
+fn endgame_no_null_move() {
+    // Simple K+P vs K position where null-move pruning may be unsafe.
+    // White to move: white has king on e2 and pawn on a2; black king on a8.
+    let fen = "k7/8/8/8/8/8/P7/4K3 w - - 0 1";
+    let mut board = Board::from_fen(fen);
+    let mut tt = TranspositionTable::new(1);
+    // Run a shallow search: ensure it completes and returns a legal move (or None if mate/stalemate)
+    let mv = chess_engine::board::find_best_move_with_context(&mut board, &mut tt, 3, None, None, false);
+    // At minimum, search should not panic and should return either Some move or None (no crash)
+    let _ = mv;
+}

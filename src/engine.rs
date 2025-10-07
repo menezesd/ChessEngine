@@ -25,6 +25,10 @@ pub struct SearchOptions {
     pub info_sender: Option<Sender<uci_info::Info>>,
     /// Optional move ordering toggle (true = enable history/killers heuristics).
     pub move_ordering: Option<bool>,
+    /// Optional weighted-material threshold (in centipawns). If set, null-move
+    /// pruning will be disabled when non-pawn material (weighted by MATERIAL_MG)
+    /// is <= this threshold. `None` means use the conservative default.
+    pub nullmove_material_threshold: Option<i32>,
 }
 
 /// Small, serial search result returned from a search engine.
@@ -84,6 +88,8 @@ impl SearchEngine for SimpleEngine {
 
         // Configure move ordering heuristics globally based on option (default = enabled)
         crate::ordering::set_ordering_enabled(opts.move_ordering.unwrap_or(true));
+    // Configure null-move material threshold if provided
+    crate::search::set_nullmove_material_threshold(opts.nullmove_material_threshold);
 
         let best = if let Some(max_time) = opts.max_time {
             // time-limited search
@@ -110,7 +116,10 @@ impl SearchEngine for SimpleEngine {
             return Err(SearchError::MissingOptions);
         };
 
-        let elapsed_ms = start.elapsed().as_millis();
+    // Clear any threshold after search so it doesn't leak to other searches
+    crate::search::set_nullmove_material_threshold(None);
+
+    let elapsed_ms = start.elapsed().as_millis();
         let nodes = crate::search_control::get_node_count();
         let pv = crate::search::build_pv_from_tt(tt, board.hash);
 

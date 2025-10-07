@@ -9,6 +9,8 @@ pub mod types;
 pub mod uci;
 pub mod uci_info;
 pub mod zobrist;
+pub mod see;
 pub mod search;
 pub mod ordering;
 pub mod engine;
+// see module already declared above

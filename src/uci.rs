@@ -150,6 +150,7 @@ pub fn run_uci_loop() {
                                     sink: None,
                                     info_sender: None,
                                     move_ordering: None,
+                                    nullmove_material_threshold: None,
                                 };
                                 match engine.search(&mut board, &mut tt, opts) {
                                     Ok(res) => {
@@ -299,6 +300,7 @@ pub fn run_uci_loop() {
                             sink: Some(bm_thread.clone()),
                             info_sender: Some(tx.clone()),
                             move_ordering: None,
+                                        nullmove_material_threshold: None,
                         }
                     } else if let Some(t) = use_movetime {
                         SearchOptions {
@@ -309,6 +311,7 @@ pub fn run_uci_loop() {
                             sink: Some(bm_thread.clone()),
                             info_sender: Some(tx.clone()),
                             move_ordering: None,
+                                        nullmove_material_threshold: None,
                         }
                     } else {
                         // nodes / infinite / ponder: iterative deepening until stop flag
@@ -320,6 +323,7 @@ pub fn run_uci_loop() {
                             sink: Some(bm_thread.clone()),
                             info_sender: Some(tx.clone()),
                             move_ordering: None,
+                                        nullmove_material_threshold: None,
                         }
                     };
 

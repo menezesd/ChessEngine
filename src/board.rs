@@ -1498,6 +1498,7 @@ impl Board {
         depth: u32,
         root_moves: &mut Vec<Move>,
         mut should_abort: F,
+        window: Option<(i32, i32)>,
     ) -> (Option<Move>, i32, bool)
     where
         F: FnMut() -> bool,
@@ -1515,12 +1516,21 @@ impl Board {
         let mut mv_buf = Vec::new();
         // Create a persistent OrderingContext for the root search so killers/history persist
         let mut ordering_ctx = crate::ordering::OrderingContext::new(256);
-        for m in &*root_moves {
+        for (idx, m) in root_moves.iter().enumerate() {
             if should_abort() {
                 return (None, 0, false); // aborted mid-root
             }
             let info = self.make_move(m);
-            let score = -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx);
+            // If an aspiration window is provided, use it for the first move, otherwise standard window
+            let score = if idx == 0 {
+                if let Some((w_alpha, w_beta)) = window {
+                    -crate::search::negamax(self, tt, depth - 1, w_alpha, w_beta, &mut mv_buf, &mut ordering_ctx)
+                } else {
+                    -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx)
+                }
+            } else {
+                -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx)
+            };
             self.unmake_move(m, info);
 
             if score > best_score {
