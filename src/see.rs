@@ -129,11 +129,11 @@ pub fn see_capture(board: &Board, mv: &Move) -> i32 {
         let mut picked_piece_idx = 0usize;
 
         // Check piece types in ascending value order: Pawn, Knight, Bishop, Rook, Queen, King
-        for piece_idx in 0..6_usize {
+        for (piece_idx, &vals) in VALUES.iter().enumerate() {
             let bb = pieces[side][piece_idx] & atks;
             if bb != 0 {
                 if let Some(sq) = lsb_index(bb) {
-                    let val = VALUES[piece_idx];
+                    let val = vals;
                     if val < picked_val {
                         picked_val = val;
                         picked_sq = Some(sq);

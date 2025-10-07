@@ -16,7 +16,6 @@ fn engine_depth_search_returns_move() {
         sink: None,
         info_sender: None,
         move_ordering: None,
-        nullmove_material_threshold: None,
     };
     let res = engine.search(&mut board, &mut tt, opts).expect("search failed");
     // At depth 1 we should always have at least one legal move from the starting position
@@ -30,15 +29,13 @@ fn engine_time_limited_search_returns_move_within_time() {
     let engine = SimpleEngine::new();
     let opts = SearchOptions {
         max_depth: None,
-        max_time: Some(Duration::from_millis(50)),
+        max_time: Some(Duration::from_millis(200)),
         max_nodes: None,
         is_ponder: false,
         sink: None,
         info_sender: None,
         move_ordering: None,
-        nullmove_material_threshold: None,
     };
     let res = engine.search(&mut board, &mut tt, opts).expect("time-limited search failed");
-    // A short time-limited search may or may not produce a move, but should not error
-    assert!(res.time_ms <= 5000);
+    assert!(res.best_move.is_some());
 }

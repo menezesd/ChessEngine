@@ -119,6 +119,10 @@ pub fn run_uci_loop() {
             "position" => {
                 parse_position_command(&mut board, &parts);
             }
+            "display" | "d" => {
+                // Debug helper: print the current board to stdout for the GUI/user.
+                board.print();
+            }
             "go" => {
                 let mut i = 1;
                 // If a previous search is running, stop it before starting a new one
@@ -148,9 +152,10 @@ pub fn run_uci_loop() {
                                     max_nodes: None,
                                     is_ponder: false,
                                     sink: None,
-                                    info_sender: None,
+                                    // Provide the UCI info sender so the search can publish
+                                    // intermediate and final `info` messages (pv/nodes/time).
+                                    info_sender: Some(info_tx.clone()),
                                     move_ordering: None,
-                                    nullmove_material_threshold: None,
                                 };
                                 match engine.search(&mut board, &mut tt, opts) {
                                     Ok(res) => {
@@ -231,7 +236,7 @@ pub fn run_uci_loop() {
                 // Spawn a background worker depending on requested options
                 // Clone board and alloc fresh TT for background search
                 let board_clone = board.clone();
-                let mut tt_clone = TranspositionTable::new(1024);
+                let tt_clone = TranspositionTable::new(1024);
                 let bm = Arc::new(Mutex::new(None::<Move>));
                 let bm_thread = bm.clone();
                 search_best = Some(bm);
@@ -300,7 +305,6 @@ pub fn run_uci_loop() {
                             sink: Some(bm_thread.clone()),
                             info_sender: Some(tx.clone()),
                             move_ordering: None,
-                                        nullmove_material_threshold: None,
                         }
                     } else if let Some(t) = use_movetime {
                         SearchOptions {
@@ -311,7 +315,6 @@ pub fn run_uci_loop() {
                             sink: Some(bm_thread.clone()),
                             info_sender: Some(tx.clone()),
                             move_ordering: None,
-                                        nullmove_material_threshold: None,
                         }
                     } else {
                         // nodes / infinite / ponder: iterative deepening until stop flag
@@ -323,7 +326,6 @@ pub fn run_uci_loop() {
                             sink: Some(bm_thread.clone()),
                             info_sender: Some(tx.clone()),
                             move_ordering: None,
-                                        nullmove_material_threshold: None,
                         }
                     };
 

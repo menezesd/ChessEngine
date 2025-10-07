@@ -25,19 +25,12 @@ pub struct SearchOptions {
     pub info_sender: Option<Sender<uci_info::Info>>,
     /// Optional move ordering toggle (true = enable history/killers heuristics).
     pub move_ordering: Option<bool>,
-    /// Optional weighted-material threshold (in centipawns). If set, null-move
-    /// pruning will be disabled when non-pawn material (weighted by MATERIAL_MG)
-    /// is <= this threshold. `None` means use the conservative default.
-    pub nullmove_material_threshold: Option<i32>,
 }
 
 /// Small, serial search result returned from a search engine.
 #[derive(Debug)]
 pub struct SearchResult {
     pub best_move: Option<Move>,
-    pub pv: Option<String>,
-    pub nodes: u64,
-    pub time_ms: u128,
 }
 
 /// Error type for search operations.
@@ -74,6 +67,12 @@ pub struct SimpleEngine;
 impl SimpleEngine {
     pub fn new() -> Self {
         Self {}
+    }
+}
+
+impl Default for SimpleEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -116,15 +115,10 @@ impl SearchEngine for SimpleEngine {
 
     // Null-move pruning disabled; nothing to clear here.
 
-    let elapsed_ms = start.elapsed().as_millis();
-        let nodes = crate::search_control::get_node_count();
-        let pv = crate::search::build_pv_from_tt(tt, board.hash);
+    // We intentionally do not expose pv/nodes/time in the return struct; they
+    // are published via UCI Info messages when an `info_sender` is provided.
+    let _ = start.elapsed();
 
-        Ok(SearchResult {
-            best_move: best,
-            pv: if pv.is_empty() { None } else { Some(pv) },
-            nodes: nodes as u64,
-            time_ms: elapsed_ms,
-        })
+    Ok(SearchResult { best_move: best })
     }
 }

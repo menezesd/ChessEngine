@@ -161,10 +161,7 @@ impl Board {
         Self::FILE_A << file
     }
 
-    #[allow(dead_code)]
-    pub fn file_mask_allow(file: usize) -> Bitboard {
-        Self::FILE_A << file
-    }
+    // `file_mask_allow` was unused; removed to trim dead code. Use `Board::file_mask` instead.
 
     pub fn knight_attacks(square: Square) -> Bitboard {
         KNIGHT_ATTACKS[square_index(square)]
@@ -801,12 +798,7 @@ impl Board {
         self.generate_king_moves_for(color, moves);
     }
 
-    #[allow(dead_code)]
-    fn generate_pseudo_moves(&self) -> Vec<Move> {
-        let mut moves = Vec::new();
-        self.generate_pseudo_moves_into(&mut moves);
-        moves
-    }
+    // Removed unused `generate_pseudo_moves` (use `generate_pseudo_moves_into` to avoid allocation).
 
     #[allow(clippy::too_many_arguments)]
     fn add_move(
@@ -1100,31 +1092,12 @@ impl Board {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn generate_moves(&mut self) -> Vec<Move> {
-        let mut out = Vec::new();
-        self.generate_moves_into(&mut out);
-        out
-    }
+    // Removed unused allocation-creating wrapper `generate_moves`. Prefer `generate_moves_into`.
 
     // --- Game State Checks (need &mut self if they use generate_moves) ---
 
     // is_checkmate and is_stalemate now need &mut self
-    #[allow(dead_code)]
-    fn is_checkmate(&mut self) -> bool {
-        let color = self.current_color();
-        let mut buf = Vec::new();
-        self.generate_moves_into(&mut buf);
-        self.is_in_check(color) && buf.is_empty()
-    }
-
-    #[allow(dead_code)]
-    fn is_stalemate(&mut self) -> bool {
-        let color = self.current_color();
-        let mut buf = Vec::new();
-        self.generate_moves_into(&mut buf);
-        !self.is_in_check(color) && buf.is_empty()
-    }
+    // Removed unused `is_checkmate` and `is_stalemate` helpers. Use search drivers or tests instead.
 
     /// Returns true if the position is a draw by 50-move rule or threefold repetition
     pub fn is_draw(&self) -> bool {
@@ -1474,18 +1447,7 @@ impl Board {
     }
 
     // Quiescence search (also takes TT, but primarily for passing down)
-    #[allow(clippy::only_used_in_recursion)]
-    #[allow(dead_code)]
-    fn quiesce(
-        &mut self,
-        _tt: &mut TranspositionTable, // Pass TT along (though not used directly here yet)
-        alpha: i32,
-        beta: i32,
-        moves_buf: &mut Vec<Move>,
-    ) -> i32 {
-        let mut ctx = crate::ordering::OrderingContext::new(256);
-        crate::search::quiesce(self, alpha, beta, moves_buf, &mut ctx)
-    }
+    // Removed unused Board::quiesce wrapper; call crate::search::quiesce directly.
 
     // Run a single root depth search over `root_moves`. This encapsulates the loop
     // that iterates root moves, calls `negamax`, and returns the best move/score.
@@ -1496,9 +1458,8 @@ impl Board {
         &mut self,
         tt: &mut TranspositionTable,
         depth: u32,
-        root_moves: &mut Vec<Move>,
+        root_moves: &mut [Move],
         mut should_abort: F,
-        window: Option<(i32, i32)>,
     ) -> (Option<Move>, i32, bool)
     where
         F: FnMut() -> bool,
@@ -1516,21 +1477,14 @@ impl Board {
         let mut mv_buf = Vec::new();
         // Create a persistent OrderingContext for the root search so killers/history persist
         let mut ordering_ctx = crate::ordering::OrderingContext::new(256);
-        for (idx, m) in root_moves.iter().enumerate() {
+    for m in root_moves.iter() {
             if should_abort() {
                 return (None, 0, false); // aborted mid-root
             }
             let info = self.make_move(m);
             // If an aspiration window is provided, use it for the first move, otherwise standard window
-            let score = if idx == 0 {
-                if let Some((w_alpha, w_beta)) = window {
-                    -crate::search::negamax(self, tt, depth - 1, w_alpha, w_beta, &mut mv_buf, &mut ordering_ctx)
-                } else {
-                    -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx)
-                }
-            } else {
-                -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx)
-            };
+            // Always use the full alpha/beta window at root (no aspiration)
+            let score = -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx);
             self.unmake_move(m, info);
 
             if score > best_score {
@@ -1544,76 +1498,7 @@ impl Board {
         (best_move, best_score, true)
     }
 
-    // Add a function to generate only tactical moves (captures, promotions)
-    // This function needs &mut self because legality checking involves make/unmake
-    #[allow(dead_code)]
-    pub fn generate_tactical_moves(&mut self) -> Vec<Move> {
-        let current_color = self.current_color();
-        let color_idx = color_to_zobrist_index(current_color);
-        let mut pseudo_tactical_moves = Vec::new();
-
-        self.add_pawn_tactical_moves(current_color, &mut pseudo_tactical_moves);
-
-        let knights = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Knight)];
-        self.add_leaper_moves(
-            current_color,
-            knights,
-            Self::knight_attacks,
-            false,
-            &mut pseudo_tactical_moves,
-        );
-
-        let bishops = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Bishop)];
-        self.add_sliding_moves(
-            current_color,
-            bishops,
-            Self::bishop_attacks,
-            false,
-            &mut pseudo_tactical_moves,
-        );
-
-        let rooks = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Rook)];
-        self.add_sliding_moves(
-            current_color,
-            rooks,
-            Self::rook_attacks,
-            false,
-            &mut pseudo_tactical_moves,
-        );
-
-        let queens = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Queen)];
-        self.add_sliding_moves(
-            current_color,
-            queens,
-            |sq, occ| Self::rook_attacks(sq, occ) | Self::bishop_attacks(sq, occ),
-            false,
-            &mut pseudo_tactical_moves,
-        );
-
-        let kings = self.bitboards[color_idx][piece_to_zobrist_index(Piece::King)];
-        self.add_leaper_moves(
-            current_color,
-            kings,
-            Self::king_attacks,
-            false,
-            &mut pseudo_tactical_moves,
-        );
-
-        let mut legal_tactical_moves = Vec::new();
-        for m in pseudo_tactical_moves {
-            if m.is_castling {
-                continue;
-            }
-
-            let info = self.make_move(&m);
-            if !self.is_in_check(current_color) {
-                legal_tactical_moves.push(m);
-            }
-            self.unmake_move(&m, info);
-        }
-
-        legal_tactical_moves
-    }
+    // Allocation-returning tactical move generator removed; use `generate_tactical_moves_into`.
 
     pub fn generate_tactical_moves_into(&mut self, out: &mut Vec<Move>) {
         out.clear();
@@ -1682,7 +1567,6 @@ impl Board {
     }
 
     // --- Perft (for testing, now takes &mut self) ---
-    #[allow(dead_code)]
     pub fn perft(&mut self, depth: usize) -> u64 {
         if depth == 0 {
             return 1;
@@ -1724,9 +1608,8 @@ impl Board {
         }
     }
 
-    // Add a print function for debugging
-    #[allow(dead_code)]
-    fn print(&self) {
+    // Add a print function for debugging and make it public so callers/tests can use it.
+    pub fn print(&self) {
         println!("  +---+---+---+---+---+---+---+---+");
         for rank in (0..8).rev() {
             print!("{} |", rank + 1);
@@ -2009,29 +1892,9 @@ pub fn find_best_move_with_context(
     best_move
 }
 
-// Backwards-compatible wrapper name preserving previous API; prefer using
-// `find_best_move_with_context` in new code for clarity.
-#[allow(dead_code)]
-pub fn find_best_move_with_sink(
-    board: &mut Board,
-    tt: &mut TranspositionTable,
-    max_depth: u32,
-    sink: Option<std::sync::Arc<std::sync::Mutex<Option<Move>>>>,
-    info_sender: Option<std::sync::mpsc::Sender<uci_info::Info>>,
-    is_ponder: bool,
-) -> Option<Move> {
-    find_best_move_with_context(board, tt, max_depth, sink, info_sender, is_ponder)
-}
-
-#[allow(dead_code)]
-pub fn find_best_move_with_time(
-    board: &mut Board,
-    tt: &mut TranspositionTable,
-    max_time: Duration,
-    start_time: Instant,
-) -> Option<Move> {
-    find_best_move_with_time_with_sink(board, tt, max_time, start_time, None, None, false)
-}
+// Removed several backward-compatible wrapper functions that were unused
+// (find_best_move_with_sink, find_best_move_with_time, etc.). Prefer the
+// explicit `find_best_move_with_context` and `find_best_move_with_time_context` APIs.
 
 pub fn find_best_move_with_time_context(
     board: &mut Board,
@@ -2211,3 +2074,15 @@ pub fn find_best_move_with_time_with_sink(
 }
 
 // Tests moved to `tests/board_tests.rs` to separate production and test code
+
+#[cfg(test)]
+mod tests {
+    use super::Board;
+
+    #[test]
+    fn board_print_is_used_in_tests() {
+        // Call the public print helper so it's considered used by the library
+        let b = Board::new();
+        b.print();
+    }
+}
