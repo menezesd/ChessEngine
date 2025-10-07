@@ -94,6 +94,8 @@ pub struct UnmakeInfo {
     previous_en_passant_target: Option<Square>,
     previous_castling_rights: u8,
     previous_hash: u64, // Store previous hash for unmake
+    previous_halfmove_clock: u32,
+    previous_position_history_len: usize,
 }
 
 fn piece_value(piece: Piece) -> i32 {
@@ -127,6 +129,8 @@ pub struct Board {
     pub en_passant_target: Option<Square>,
     pub castling_rights: u8,
     pub hash: u64,
+    pub halfmove_clock: u32,
+    pub position_history: Vec<u64>,
 }
 
 impl Default for Board {
@@ -173,6 +177,8 @@ impl Board {
             en_passant_target: None,
             castling_rights: 0,
             hash: 0,
+            halfmove_clock: 0,
+            position_history: Vec::new(),
         }
     }
 
@@ -419,6 +425,9 @@ impl Board {
             board.place_piece_at(Square(6, i), (Color::Black, Piece::Pawn));
         }
         board.hash = board.calculate_initial_hash(); // Calculate hash after setting up board
+        board.halfmove_clock = 0;
+        board.position_history.clear();
+        board.position_history.push(board.hash);
         board
     }
 
@@ -488,6 +497,9 @@ impl Board {
 
         board.en_passant_target = en_passant_target;
         board.hash = board.calculate_initial_hash(); // Calculate hash after setting up board
+        board.halfmove_clock = 0;
+        board.position_history.clear();
+        board.position_history.push(board.hash);
         board
     }
 
@@ -538,6 +550,8 @@ impl Board {
     pub fn make_move(&mut self, m: &Move) -> UnmakeInfo {
         let mut current_hash = self.hash;
         let previous_hash = self.hash;
+        let previous_halfmove_clock = self.halfmove_clock;
+        let previous_position_history_len = self.position_history.len();
         let color = self.current_color();
 
         let previous_en_passant_target = self.en_passant_target;
@@ -674,11 +688,23 @@ impl Board {
         self.white_to_move = !self.white_to_move;
         self.hash = current_hash;
 
+        // Update halfmove clock
+        if moving_piece == Piece::Pawn || captured_piece_info.is_some() {
+            self.halfmove_clock = 0;
+        } else {
+            self.halfmove_clock = self.halfmove_clock.saturating_add(1);
+        }
+
+        // Update position history
+        self.position_history.push(self.hash);
+
         UnmakeInfo {
             captured_piece_info,
             previous_en_passant_target,
             previous_castling_rights,
             previous_hash,
+            previous_halfmove_clock,
+            previous_position_history_len,
         }
     }
 
@@ -689,6 +715,10 @@ impl Board {
         self.en_passant_target = info.previous_en_passant_target;
         self.castling_rights = info.previous_castling_rights;
         self.hash = info.previous_hash; // Restore hash directly!
+
+    // Restore halfmove clock and position history
+    self.halfmove_clock = info.previous_halfmove_clock;
+    self.position_history.truncate(info.previous_position_history_len);
 
         // Restore pieces on board (no hash updates needed here as hash is fully restored)
         let color = self.current_color();
@@ -1069,6 +1099,18 @@ impl Board {
         !self.is_in_check(color) && buf.is_empty()
     }
 
+    /// Returns true if the position is a draw by 50-move rule or threefold repetition
+    pub fn is_draw(&self) -> bool {
+        // 50-move rule: 100 half-moves without pawn move or capture
+        if self.halfmove_clock >= 100 {
+            return true;
+        }
+        // Threefold repetition: count occurrences of current hash in history
+        let current_hash = self.hash;
+        let occurrences = self.position_history.iter().filter(|&&h| h == current_hash).count();
+        occurrences >= 3
+    }
+
     fn evaluate(&self) -> i32 {
         let mut score = 0;
 
@@ -1410,6 +1452,12 @@ impl Board {
             return 0; // best-effort early exit
         }
 
+        // Draw detection: if this position is a draw by 50-move rule or threefold repetition,
+        // return a draw score of 0 to stop searching this branch.
+        if self.is_draw() {
+            return 0;
+        }
+
         // Count this node and check node limit
         search_control::node_visited();
 
@@ -1506,6 +1554,11 @@ impl Board {
     ) -> i32 {
         // --- Standing Pat Score ---
         let stand_pat_score = self.evaluate();
+
+        // If position is a forced draw by repetition/50-move, return draw score
+        if self.is_draw() {
+            return 0;
+        }
 
         // Cooperative stop check at quiescence entry
         if search_control::should_stop() {
@@ -2262,3 +2315,223 @@ mod perft_tests {
         }
     }
 }
+
+    #[test]
+    fn test_draw_detection_50_move() {
+        // Start from a simple position with only kings and a rook to allow long non-capture moves
+        let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
+        // Set halfmove clock near the limit
+        board.halfmove_clock = 99; // 99 half-moves means next non-capture/pawn move will make it 100
+        board.position_history.clear();
+        board.position_history.push(board.hash);
+
+        // Make a harmless king move and unmake it repeatedly to bump halfmove
+        let mv = Move { from: Square(0,0), to: Square(0,1), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
+        let info = board.make_move(&mv);
+        // After making move, halfmove should be 100 (draw)
+        assert!(board.is_draw(), "Expected 50-move draw to be detected after move");
+        board.unmake_move(&mv, info);
+    }
+
+    #[test]
+    fn test_draw_detection_threefold() {
+        // Use a small repeating position: a legal repetition via rook checks is cumbersome to craft,
+        // but we can simulate by manipulating history: ensure position hash occurs 3 times
+        let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
+        board.position_history.clear();
+        // Push the same hash three times to simulate threefold repetition
+        board.position_history.push(board.hash);
+        board.position_history.push(board.hash);
+        board.position_history.push(board.hash);
+        assert!(board.is_draw(), "Expected threefold repetition to be detected");
+    }
+
+    #[test]
+    fn test_make_unmake_preserves_evaluate_and_hash() {
+        let mut board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let baseline_eval = board.evaluate();
+        let baseline_hash = board.hash;
+
+        let mut moves = Vec::new();
+        board.generate_moves_into(&mut moves);
+        // Test a handful of moves (or all if small)
+        for m in moves.iter().take(8) {
+            let info = board.make_move(m);
+            // Evaluate while moved
+            let _mid_eval = board.evaluate();
+            board.unmake_move(m, info);
+            // After unmake, hash and eval should match baseline
+            assert_eq!(board.hash, baseline_hash, "Hash mismatch after make/unmake");
+            assert_eq!(board.evaluate(), baseline_eval, "Eval mismatch after make/unmake");
+        }
+    }
+
+    #[test]
+    fn test_threefold_repetition_via_moves() {
+        let mut board = Board::new(); // standard initial setup
+
+        // Moves: N g1-f3, N g8-f6, N f3-g1, N f6-g8 (one full cycle)
+        let m1 = Move { from: Square(0, 6), to: Square(2, 5), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
+        let m2 = Move { from: Square(7, 6), to: Square(5, 5), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
+        let m3 = Move { from: Square(2, 5), to: Square(0, 6), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
+        let m4 = Move { from: Square(5, 5), to: Square(7, 6), promotion: None, is_castling: false, is_en_passant: false, captured_piece: None };
+
+        // Perform two cycles; after two cycles the starting position should have occurred 3 times
+        for _ in 0..2 {
+            let _ = board.make_move(&m1);
+            let _ = board.make_move(&m2);
+            let _ = board.make_move(&m3);
+            let _ = board.make_move(&m4);
+        }
+
+        assert!(board.is_draw(), "Expected threefold repetition after repeating knight cycle");
+    }
+
+    #[test]
+    fn test_negamax_respects_draw() {
+        let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
+        // Force 50-move draw
+        board.halfmove_clock = 100;
+        // Simple TT for the call
+        let mut tt = TranspositionTable::default();
+        let mut buf = Vec::new();
+        let score = board.negamax(&mut tt, 1, -10000, 10000, &mut buf);
+        assert_eq!(score, 0, "Expected negamax to return draw score 0 for drawn position");
+    }
+
+    #[test]
+    fn test_make_unmake_castling_preserves_state() {
+        let mut board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        let baseline_hash = board.hash;
+        let baseline_eval = board.evaluate();
+
+        let mut moves = Vec::new();
+        board.generate_moves_into(&mut moves);
+        let castle_move = moves.iter().find(|m| m.is_castling).expect("No castling move found");
+        let info = board.make_move(castle_move);
+        board.unmake_move(castle_move, info);
+
+        assert_eq!(board.hash, baseline_hash, "Hash changed after castling make/unmake");
+        assert_eq!(board.evaluate(), baseline_eval, "Eval changed after castling make/unmake");
+    }
+
+    #[test]
+    fn test_en_passant_capture_and_restore() {
+        let fen = "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3";
+        let mut board = Board::from_fen(fen);
+        let mut moves = Vec::new();
+        board.generate_moves_into(&mut moves);
+        // Find en-passant move
+        let ep_move = moves.iter().find(|m| m.is_en_passant).expect("No en-passant move found");
+        // Save pre-move piece presence
+        let capture_row = if board.current_color() == Color::White { ep_move.to.0 - 1 } else { ep_move.to.0 + 1 };
+        let before_cap = board.get_square(capture_row, ep_move.to.1);
+
+        let info = board.make_move(ep_move);
+        // Captured pawn should be removed
+        assert!(board.get_square(capture_row, ep_move.to.1).is_none(), "En-passant captured pawn still on board");
+        board.unmake_move(ep_move, info);
+        // Restored
+        assert_eq!(board.get_square(capture_row, ep_move.to.1), before_cap);
+    }
+
+    #[test]
+    fn test_promotion_moves_make_unmake() {
+        let mut board = Board::from_fen("8/P7/8/8/8/8/8/k6K w - - 0 1");
+        let mut moves = Vec::new();
+        board.generate_moves_into(&mut moves);
+        let promo_move = moves.iter().find(|m| m.promotion.is_some()).expect("No promotion move found");
+        let baseline_hash = board.hash;
+        let baseline_eval = board.evaluate();
+        let info = board.make_move(promo_move);
+        board.unmake_move(promo_move, info);
+        assert_eq!(board.hash, baseline_hash);
+        assert_eq!(board.evaluate(), baseline_eval);
+    }
+
+    #[test]
+    fn test_transposition_table_store_probe() {
+        let mut tt = TranspositionTable::new(1);
+        let hash = 0xdeadbeefu64;
+        tt.store(hash, 1, 100, BoundType::Exact, None);
+        let entry = tt.probe(hash).expect("Entry missing");
+        assert_eq!(entry.depth, 1);
+        // Store shallower vs deeper
+        tt.store(hash, 0, 50, BoundType::Exact, None);
+        let entry2 = tt.probe(hash).expect("Entry missing after shallower store");
+        // Depth should remain 1 because new depth 0 should not replace
+        assert_eq!(entry2.depth, 1);
+        // Now store deeper
+        tt.store(hash, 5, 200, BoundType::Exact, None);
+        let entry3 = tt.probe(hash).expect("Entry missing after deeper store");
+        assert_eq!(entry3.depth, 5);
+    }
+
+    #[test]
+    fn test_randomized_stress_make_unmake() {
+        // Simple deterministic RNG (LCG) to avoid adding dependencies
+        struct SimpleRng { state: u64 }
+        impl SimpleRng {
+            fn new(seed: u64) -> Self { Self { state: seed } }
+            fn next_u64(&mut self) -> u64 {
+                // 64-bit LCG parameters
+                self.state = self.state.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+                self.state
+            }
+            fn usize_bounded(&mut self, bound: usize) -> usize {
+                if bound == 0 { return 0; }
+                (self.next_u64() as usize) % bound
+            }
+        }
+
+        let mut rng = SimpleRng::new(0x1234_5678_9abc_def0u64);
+
+        let mut board = Board::new();
+
+        // Number of random sequences to run and max depth per sequence
+        const SEQS: usize = 200;
+        const MAX_DEPTH: usize = 6;
+
+        for seq in 0..SEQS {
+            // Capture baseline invariants
+            let baseline_hash = board.hash;
+            let baseline_eval = board.evaluate();
+            let baseline_halfmove = board.halfmove_clock;
+            let baseline_pos_hist_len = board.position_history.len();
+            let baseline_castle = board.castling_rights;
+            let baseline_ep = board.en_passant_target;
+            let baseline_to_move = board.white_to_move;
+
+            // Choose a random depth
+            let depth = rng.usize_bounded(MAX_DEPTH) + 1;
+            let mut seq_moves: Vec<(Move, UnmakeInfo)> = Vec::new();
+
+            // Make up to `depth` random legal moves; if position is terminal/none, break early
+            for _d in 0..depth {
+                let mut moves = Vec::new();
+                board.generate_moves_into(&mut moves);
+                if moves.is_empty() {
+                    break;
+                }
+                let idx = rng.usize_bounded(moves.len());
+                let m = moves[idx];
+                let info = board.make_move(&m);
+                seq_moves.push((m, info));
+            }
+
+            // Now unmake in reverse order
+            while let Some((m, info)) = seq_moves.pop() {
+                board.unmake_move(&m, info);
+            }
+
+            // After unmaking, invariants should match baseline
+            assert_eq!(board.hash, baseline_hash, "[seq {}] hash mismatch after make/unmake", seq);
+            assert_eq!(board.evaluate(), baseline_eval, "[seq {}] eval mismatch after make/unmake", seq);
+            assert_eq!(board.halfmove_clock, baseline_halfmove, "[seq {}] halfmove mismatch", seq);
+            assert_eq!(board.position_history.len(), baseline_pos_hist_len, "[seq {}] position history length mismatch", seq);
+            assert_eq!(board.castling_rights, baseline_castle, "[seq {}] castling rights mismatch", seq);
+            assert_eq!(board.en_passant_target, baseline_ep, "[seq {}] en-passant mismatch", seq);
+            assert_eq!(board.white_to_move, baseline_to_move, "[seq {}] side to move mismatch", seq);
+        }
+    }
+
