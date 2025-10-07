@@ -7,6 +7,9 @@ mod types;
 mod uci;
 mod uci_info;
 mod zobrist;
+mod search;
+mod ordering;
+mod engine;
 
 fn main() {
     uci::run_uci_loop();

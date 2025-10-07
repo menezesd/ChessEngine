@@ -4,13 +4,18 @@ use std::thread::{spawn, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::board::{
-    find_best_move, find_best_move_with_sink, find_best_move_with_time_with_sink, parse_uci_move,
+    parse_uci_move,
     Board,
 };
+use crate::engine::{SimpleEngine, SearchOptions, SearchEngine};
 use crate::search_control;
 use crate::transposition_table::TranspositionTable;
 use crate::types::{format_square, Move, Piece};
 
+/// Parse a UCI `position` command into `board`.
+///
+/// Handles `startpos`, `fen` and trailing `moves ...` sequences and mutates
+/// the given `Board` to reach the requested position.
 pub fn parse_position_command(board: &mut Board, parts: &[&str]) {
     let mut i = 1;
     if i < parts.len() && parts[i] == "startpos" {
@@ -35,6 +40,7 @@ pub fn parse_position_command(board: &mut Board, parts: &[&str]) {
     }
 }
 
+/// Format a `Move` as a UCI move string (e.g. "e2e4", with optional promotion).
 pub fn format_uci_move(mv: &Move) -> String {
     let mut s = format!("{}{}", format_square(mv.from), format_square(mv.to));
     if let Some(promo) = mv.promotion {
@@ -49,6 +55,10 @@ pub fn format_uci_move(mv: &Move) -> String {
     s
 }
 
+/// Run the UCI main loop reading stdin and responding to UCI commands.
+///
+/// This function blocks and is intended to be the program entrypoint when
+/// running the engine via UCI.
 pub fn run_uci_loop() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -71,14 +81,24 @@ pub fn run_uci_loop() {
         while let Ok(info) = info_rx.recv() {
             let line = info.to_uci_line();
             let mut lock = stdout.lock();
-            writeln!(lock, "{}", line).ok();
-            lock.flush().ok();
+            if let Err(e) = writeln!(lock, "{}", line) {
+                eprintln!("UCI printer write error: {}", e);
+            }
+            if let Err(e) = lock.flush() {
+                eprintln!("UCI printer flush error: {}", e);
+            }
             // `lock` is dropped here so other threads can lock stdout too
         }
     });
 
-    for line in stdin.lock().lines() {
-        let line = line.unwrap();
+    for line_result in stdin.lock().lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Error reading stdin for UCI: {}", e);
+                continue;
+            }
+        };
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
             continue;
@@ -115,18 +135,34 @@ pub fn run_uci_loop() {
                 let mut btime_ms: Option<u64> = None;
                 let mut winc_ms: u64 = 0;
                 let mut binc_ms: u64 = 0;
-                let movestogo_opt: Option<u32> = None;
+                let movestogo_opt: Option<u32> = Some(30);
                 while i < parts.len() {
                     match parts[i] {
                         "depth" => {
-                            // fixed-depth search request
+                            // fixed-depth search request (synchronous via engine facade)
                             if let Some(d) = parts.get(i + 1).and_then(|s| s.parse::<u32>().ok()) {
-                                // perform depth-limited search synchronously
-                                if let Some(best_move) = find_best_move(&mut board, &mut tt, d) {
-                                    let uci_move = format_uci_move(&best_move);
-                                    println!("bestmove {}", uci_move);
-                                } else {
-                                    println!("bestmove 0000");
+                                let engine = SimpleEngine::new();
+                                let opts = SearchOptions {
+                                    max_depth: Some(d),
+                                    max_time: None,
+                                    max_nodes: None,
+                                    is_ponder: false,
+                                    sink: None,
+                                    info_sender: None,
+                                    move_ordering: None,
+                                };
+                                match engine.search(&mut board, &mut tt, opts) {
+                                    Ok(res) => {
+                                        if let Some(bm) = res.best_move {
+                                            println!("bestmove {}", format_uci_move(&bm));
+                                        } else {
+                                            println!("bestmove 0000");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("search error: {}", e);
+                                        println!("bestmove 0000");
+                                    }
                                 }
                             }
                             i += 2;
@@ -221,7 +257,10 @@ pub fn run_uci_loop() {
                         (btime_ms, binc_ms)
                     };
                     if let Some(tms) = time_ms {
-                        let moves_to_go = movestogo_opt.unwrap_or(30) as u64; // default horizon
+                        let moves_to_go = match movestogo_opt {
+                            Some(v) => v as u64,
+                            None => 30u64,
+                        };
                                                                               // simple allocation: divide remaining time by moves_to_go, minus safety
                         let mut alloc = tms / moves_to_go;
                         if alloc > 50 {
@@ -248,44 +287,54 @@ pub fn run_uci_loop() {
                 let is_ponder = pondering;
                 let handle = std::thread::spawn(move || {
                     // Worker thread: perform search according to mode and publish intermediate best moves
-                    let result: Option<crate::types::Move> = if let Some(d) = use_depth {
-                        find_best_move_with_sink(
-                            &mut board_clone.clone(),
-                            &mut tt_clone,
-                            d,
-                            Some(bm_thread.clone()),
-                            Some(tx.clone()),
+                    let engine = SimpleEngine::new();
+                    let mut local_board = board_clone;
+                    let mut local_tt = tt_clone;
+                    let opts = if let Some(d) = use_depth {
+                        SearchOptions {
+                            max_depth: Some(d),
+                            max_time: None,
+                            max_nodes: None,
                             is_ponder,
-                        )
+                            sink: Some(bm_thread.clone()),
+                            info_sender: Some(tx.clone()),
+                            move_ordering: None,
+                        }
                     } else if let Some(t) = use_movetime {
-                        let start = Instant::now();
-                        find_best_move_with_time_with_sink(
-                            &mut board_clone.clone(),
-                            &mut tt_clone,
-                            t,
-                            start,
-                            Some(bm_thread.clone()),
-                            Some(tx.clone()),
+                        SearchOptions {
+                            max_depth: None,
+                            max_time: Some(t),
+                            max_nodes: None,
                             is_ponder,
-                        )
+                            sink: Some(bm_thread.clone()),
+                            info_sender: Some(tx.clone()),
+                            move_ordering: None,
+                        }
                     } else {
                         // nodes / infinite / ponder: iterative deepening until stop flag
-                        // We'll call the sink-aware iterative-deepening with a high max depth and let search_control stop us
-                        find_best_move_with_sink(
-                            &mut board_clone.clone(),
-                            &mut tt_clone,
-                            64,
-                            Some(bm_thread.clone()),
-                            Some(tx.clone()),
+                        SearchOptions {
+                            max_depth: Some(64),
+                            max_time: None,
+                            max_nodes: None,
                             is_ponder,
-                        )
+                            sink: Some(bm_thread.clone()),
+                            info_sender: Some(tx.clone()),
+                            move_ordering: None,
+                        }
                     };
 
-                    // When the worker naturally finishes, print the bestmove line
-                    if let Some(bm) = result {
-                        println!("bestmove {}", format_uci_move(&bm));
-                    } else {
-                        println!("bestmove 0000");
+                    match engine.search(&mut local_board, &mut local_tt, opts) {
+                        Ok(res) => {
+                            if let Some(bm) = res.best_move {
+                                println!("bestmove {}", format_uci_move(&bm));
+                            } else {
+                                println!("bestmove 0000");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("search error: {}", e);
+                            println!("bestmove 0000");
+                        }
                     }
                 });
 
@@ -300,7 +349,13 @@ pub fn run_uci_loop() {
                 searching = false;
                 // print best move if available
                 if let Some(bm_arc) = &search_best {
-                    let guard = bm_arc.lock().unwrap();
+                    let guard = match bm_arc.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => {
+                            eprintln!("warning: bestmove mutex poisoned, recovering");
+                            poisoned.into_inner()
+                        }
+                    };
                     if let Some(best) = *guard {
                         println!("bestmove {}", format_uci_move(&best));
                     } else {

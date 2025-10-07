@@ -2,12 +2,12 @@ use std::time::{Duration, Instant};
 
 use crate::constants::MATE_SCORE;
 use crate::magic;
-use crate::search_control;
-use crate::transposition_table::{BoundType, TranspositionTable};
+use crate::transposition_table::TranspositionTable;
 use crate::types::{
     bitboard_for_square, file_to_index, format_square, rank_to_index, square_index, Bitboard,
     Color, Move, Piece, Square,
 };
+use crate::ordering;
 use crate::uci_info;
 use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
@@ -86,36 +86,37 @@ fn color_from_index(index: usize) -> Color {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Information required to restore a position after `make_move`.
+///
+/// This struct is returned by `Board::make_move` and passed to `Board::unmake_move`.
+/// It stores only the minimal snapshot needed to restore invariants (hash, clocks,
+/// captured piece, and history length).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnmakeInfo {
-    captured_piece_info: Option<(Color, Piece)>,
-    previous_en_passant_target: Option<Square>,
-    previous_castling_rights: u8,
-    previous_hash: u64, // Store previous hash for unmake
-    previous_halfmove_clock: u32,
-    previous_position_history_len: usize,
+    /// Captured piece (color, piece) if the move captured something.
+    pub captured_piece_info: Option<(Color, Piece)>,
+    /// Previous en-passant target square (if any).
+    pub previous_en_passant_target: Option<Square>,
+    /// Previous castling rights bitmask.
+    pub previous_castling_rights: u8,
+    /// Previous full position hash (Zobrist) — restored directly for correctness.
+    pub previous_hash: u64,
+    /// Previous halfmove clock value.
+    pub previous_halfmove_clock: u32,
+    /// Length of the position history prior to the move (used to truncate back).
+    pub previous_history_len: usize,
 }
 
-fn piece_value(piece: Piece) -> i32 {
-    match piece {
-        Piece::Pawn => 100,
-        Piece::Knight => 300,
-        Piece::Bishop => 300,
-        Piece::Rook => 500,
-        Piece::Queen => 900,
-        Piece::King => 10000, // Usually not used in MVV-LVA since king captures are illegal
-    }
-}
+// piece values moved to `ordering.rs` to centralize move ordering heuristics.
 
+/// MVV-LVA (Most Valuable Victim - Least Valuable Attacker) score helper.
+///
+/// Returns a heuristic score favouring captures of high-value pieces with
+/// low-value attackers. Used for move ordering in search.
 pub fn mvv_lva_score(m: &Move, board: &Board) -> i32 {
-    if let Some(victim) = m.captured_piece {
-        let attacker = board.piece_at(m.from).unwrap().1;
-        let victim_value = piece_value(victim);
-        let attacker_value = piece_value(attacker);
-        victim_value * 10 - attacker_value // prioritize more valuable victims, less valuable attackers
-    } else {
-        0 // Non-captures get low priority
-    }
+    let victim = m.captured_piece;
+    let attacker = board.piece_at(m.from).map(|(_c, p)| p);
+    ordering::mvv_lva_score_by_values(victim, attacker)
 }
 
 #[derive(Clone, Debug)]
@@ -147,11 +148,21 @@ impl Board {
     const NOT_FILE_AB: Bitboard = !Self::FILE_A & !Self::FILE_B;
     const NOT_FILE_GH: Bitboard = !Self::FILE_G & !Self::FILE_H;
 
+    /// Convert a 0-based square index (0..63) to a `Square` (rank, file).
+    ///
+    /// This helper is handy when iterating bitboards and converting
+    /// trailing-zero indices into board coordinates.
     pub fn square_from_index(index: usize) -> Square {
         Square(index / 8, index % 8)
     }
 
+    #[allow(dead_code)]
     pub fn file_mask(file: usize) -> Bitboard {
+        Self::FILE_A << file
+    }
+
+    #[allow(dead_code)]
+    pub fn file_mask_allow(file: usize) -> Bitboard {
         Self::FILE_A << file
     }
 
@@ -181,6 +192,19 @@ impl Board {
         }
     }
 
+    // Helper to iterate set bit indices in a bitboard (LSB-first)
+    fn bits_iter(mut bb: Bitboard) -> impl Iterator<Item = usize> {
+        std::iter::from_fn(move || {
+            if bb == 0 {
+                None
+            } else {
+                let idx = bb.trailing_zeros() as usize;
+                bb &= bb - 1;
+                Some(idx)
+            }
+        })
+    }
+
     // all_occupancy is updated incrementally in place_piece_at and remove_piece_at
 
     pub fn piece_at(&self, square: Square) -> Option<(Color, Piece)> {
@@ -200,7 +224,7 @@ impl Board {
     fn add_leaper_moves<F>(
         &self,
         color: Color,
-        mut pieces: Bitboard,
+        pieces: Bitboard,
         attack_fn: F,
         include_quiet: bool,
         moves: &mut Vec<Move>,
@@ -208,26 +232,20 @@ impl Board {
         F: Fn(Square) -> Bitboard,
     {
         let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
-        while pieces != 0 {
-            let from_index = pieces.trailing_zeros() as usize;
-            pieces &= pieces - 1;
+        for from_index in Self::bits_iter(pieces) {
             let from = Self::square_from_index(from_index);
             let attacks = attack_fn(from);
 
             if include_quiet {
-                let mut quiet_targets = attacks & !self.all_occupancy;
-                while quiet_targets != 0 {
-                    let to_index = quiet_targets.trailing_zeros() as usize;
-                    quiet_targets &= quiet_targets - 1;
+                let quiet_targets = attacks & !self.all_occupancy;
+                for to_index in Self::bits_iter(quiet_targets) {
                     let to = Self::square_from_index(to_index);
                     self.add_move(moves, color, from, to, None, false, false);
                 }
             }
 
-            let mut capture_targets = attacks & self.occupancy[opponent_idx];
-            while capture_targets != 0 {
-                let to_index = capture_targets.trailing_zeros() as usize;
-                capture_targets &= capture_targets - 1;
+            let capture_targets = attacks & self.occupancy[opponent_idx];
+            for to_index in Self::bits_iter(capture_targets) {
                 let to = Self::square_from_index(to_index);
                 self.add_move(moves, color, from, to, None, false, false);
             }
@@ -237,7 +255,7 @@ impl Board {
     fn add_sliding_moves<F>(
         &self,
         color: Color,
-        mut pieces: Bitboard,
+        pieces: Bitboard,
         attack_fn: F,
         include_quiet: bool,
         moves: &mut Vec<Move>,
@@ -245,26 +263,20 @@ impl Board {
         F: Fn(Square, Bitboard) -> Bitboard,
     {
         let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
-        while pieces != 0 {
-            let from_index = pieces.trailing_zeros() as usize;
-            pieces &= pieces - 1;
+        for from_index in Self::bits_iter(pieces) {
             let from = Self::square_from_index(from_index);
             let attacks = attack_fn(from, self.all_occupancy);
 
             if include_quiet {
-                let mut quiet_targets = attacks & !self.all_occupancy;
-                while quiet_targets != 0 {
-                    let to_index = quiet_targets.trailing_zeros() as usize;
-                    quiet_targets &= quiet_targets - 1;
+                let quiet_targets = attacks & !self.all_occupancy;
+                for to_index in Self::bits_iter(quiet_targets) {
                     let to = Self::square_from_index(to_index);
                     self.add_move(moves, color, from, to, None, false, false);
                 }
             }
 
-            let mut capture_targets = attacks & self.occupancy[opponent_idx];
-            while capture_targets != 0 {
-                let to_index = capture_targets.trailing_zeros() as usize;
-                capture_targets &= capture_targets - 1;
+            let capture_targets = attacks & self.occupancy[opponent_idx];
+            for to_index in Self::bits_iter(capture_targets) {
                 let to = Self::square_from_index(to_index);
                 self.add_move(moves, color, from, to, None, false, false);
             }
@@ -276,11 +288,9 @@ impl Board {
         let opponent_idx = color_to_zobrist_index(self.opponent_color(color));
         let dir: isize = if color == Color::White { 1 } else { -1 };
         let promotion_rank = if color == Color::White { 7 } else { 0 };
-        let mut pawns = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Pawn)];
+        let pawns = self.bitboards[color_idx][piece_to_zobrist_index(Piece::Pawn)];
 
-        while pawns != 0 {
-            let from_index = pawns.trailing_zeros() as usize;
-            pawns &= pawns - 1;
+        for from_index in Self::bits_iter(pawns) {
             let from = Self::square_from_index(from_index);
 
             let forward_rank = from.0 as isize + dir;
@@ -431,14 +441,26 @@ impl Board {
     }
 
     pub fn from_fen(fen: &str) -> Self {
+        // Delegate to fallible parser and preserve previous panic behavior for callers
+        match Board::try_from_fen(fen) {
+            Ok(b) => b,
+            Err(msg) => panic!("from_fen failed: {}", msg),
+        }
+    }
+
+    /// Fallible FEN parser. Returns Ok(Board) or Err(String) with a message.
+    pub fn try_from_fen(fen: &str) -> Result<Self, String> {
         let mut board = Board::empty();
         let parts: Vec<&str> = fen.split_whitespace().collect();
-        assert!(parts.len() >= 4, "FEN must have at least 4 parts");
+        if parts.len() < 4 {
+            return Err("FEN must have at least 4 parts".to_string());
+        }
+        // Piece placement
         for (rank_idx, rank_str) in parts[0].split('/').enumerate() {
-            let mut file = 0;
+            let mut file = 0usize;
             for c in rank_str.chars() {
                 if c.is_ascii_digit() {
-                    file += c.to_digit(10).unwrap() as usize;
+                    file += c.to_digit(10).ok_or_else(|| "Invalid digit in FEN".to_string())? as usize;
                 } else {
                     let (color, piece) = match c {
                         'P' => (Color::White, Piece::Pawn),
@@ -453,7 +475,7 @@ impl Board {
                         'r' => (Color::Black, Piece::Rook),
                         'q' => (Color::Black, Piece::Queen),
                         'k' => (Color::Black, Piece::King),
-                        _ => panic!("Invalid piece char"),
+                        _ => return Err(format!("Invalid piece char '{}' in FEN", c)),
                     };
                     board.place_piece_at(Square(7 - rank_idx, file), (color, piece));
                     file += 1;
@@ -463,24 +485,16 @@ impl Board {
         board.white_to_move = match parts[1] {
             "w" => true,
             "b" => false,
-            _ => panic!("Invalid color"),
+            other => return Err(format!("Invalid color part in FEN: {}", other)),
         };
         for c in parts[2].chars() {
             match c {
-                'K' => {
-                    board.add_castling_right(Color::White, 'K');
-                }
-                'Q' => {
-                    board.add_castling_right(Color::White, 'Q');
-                }
-                'k' => {
-                    board.add_castling_right(Color::Black, 'K');
-                }
-                'q' => {
-                    board.add_castling_right(Color::Black, 'Q');
-                }
-                '-' => {}
-                _ => panic!("Invalid castle"),
+                'K' => board.add_castling_right(Color::White, 'K'),
+                'Q' => board.add_castling_right(Color::White, 'Q'),
+                'k' => board.add_castling_right(Color::Black, 'K'),
+                'q' => board.add_castling_right(Color::Black, 'Q'),
+                '-' => (),
+                other => return Err(format!("Invalid castling char in FEN: {}", other)),
             }
         }
         let en_passant_target = if parts[3] != "-" {
@@ -488,7 +502,7 @@ impl Board {
             if chars.len() == 2 {
                 Some(Square(rank_to_index(chars[1]), file_to_index(chars[0])))
             } else {
-                None
+                return Err("Invalid en-passant square in FEN".to_string());
             }
         } else {
             None
@@ -499,20 +513,22 @@ impl Board {
         board.halfmove_clock = 0;
         board.position_history.clear();
         board.position_history.push(board.hash);
-        board
+        Ok(board)
     }
 
-    // Calculate Zobrist hash from scratch
+    /// Calculate the Zobrist hash for the current board state from scratch.
+    ///
+    /// This recomputes the full zobrist hash by XOR-ing piece, side-to-move,
+    /// castling and en-passant keys. It's used when a board is initialized or
+    /// after a FEN is loaded to ensure the `hash` field matches the position.
     fn calculate_initial_hash(&self) -> u64 {
         let mut hash: u64 = 0;
 
         for color_idx in 0..2 {
             for piece_idx in 0..6 {
-                let mut bb = self.bitboards[color_idx][piece_idx];
-                while bb != 0 {
-                    let sq_idx = bb.trailing_zeros() as usize;
+                let bb = self.bitboards[color_idx][piece_idx];
+                for sq_idx in Self::bits_iter(bb) {
                     hash ^= ZOBRIST.piece_keys[piece_idx][color_idx][sq_idx];
-                    bb &= bb - 1;
                 }
             }
         }
@@ -546,11 +562,18 @@ impl Board {
 
     // --- Make/Unmake Logic ---
 
+    /// Make a move on the board, updating internal state and returning the
+    /// minimal snapshot required to restore the previous position.
+    ///
+    /// The returned `UnmakeInfo` must be passed to `unmake_move` to restore
+    /// the board to its previous state. This function updates the zobrist
+    /// `hash`, halfmove clock, castling rights, en-passant target and the
+    /// internal piece bitboards.
     pub fn make_move(&mut self, m: &Move) -> UnmakeInfo {
         let mut current_hash = self.hash;
         let previous_hash = self.hash;
         let previous_halfmove_clock = self.halfmove_clock;
-        let previous_position_history_len = self.position_history.len();
+    let previous_history_len = self.position_history.len();
         let color = self.current_color();
 
         let previous_en_passant_target = self.en_passant_target;
@@ -703,11 +726,15 @@ impl Board {
             previous_castling_rights,
             previous_hash,
             previous_halfmove_clock,
-            previous_position_history_len,
+            previous_history_len,
         }
     }
 
-    // Unmake move now restores the hash directly
+    /// Restore a previously-made move using the `UnmakeInfo` returned by
+    /// `make_move`.
+    ///
+    /// This restores the board state (including `hash`, clocks and pieces)
+    /// exactly to the state before the corresponding `make_move` call.
     pub fn unmake_move(&mut self, m: &Move, info: UnmakeInfo) {
         // Restore state directly from info
         self.white_to_move = !self.white_to_move; // Switch turn back first
@@ -718,7 +745,7 @@ impl Board {
         // Restore halfmove clock and position history
         self.halfmove_clock = info.previous_halfmove_clock;
         self.position_history
-            .truncate(info.previous_position_history_len);
+            .truncate(info.previous_history_len);
 
         // Restore pieces on board (no hash updates needed here as hash is fully restored)
         let color = self.current_color();
@@ -1029,7 +1056,7 @@ impl Board {
     }
 
     // Now takes &self
-    fn is_in_check(&self, color: Color) -> bool {
+    pub(crate) fn is_in_check(&self, color: Color) -> bool {
         if let Some(king_sq) = self.find_king(color) {
             self.is_square_attacked(king_sq, self.opponent_color(color))
         } else {
@@ -1115,7 +1142,7 @@ impl Board {
         occurrences >= 3
     }
 
-    fn evaluate(&self) -> i32 {
+    pub(crate) fn evaluate(&self) -> i32 {
         let mut score = 0;
 
         // Material values for middlegame and endgame
@@ -1234,16 +1261,14 @@ impl Board {
         for color_idx in 0..2 {
             let color = color_from_index(color_idx);
             for piece_idx in 0..6 {
-                let mut bb = self.bitboards[color_idx][piece_idx];
+                let bb = self.bitboards[color_idx][piece_idx];
                 if bb == 0 {
                     continue;
                 }
                 let piece_mg = MATERIAL_MG[piece_idx];
                 let piece_eg = MATERIAL_EG[piece_idx];
 
-                while bb != 0 {
-                    let sq = bb.trailing_zeros() as usize;
-                    bb &= bb - 1;
+                for sq in Self::bits_iter(bb) {
 
                     // Convert sq (0..63) to rank,file
                     let rank = sq / 8;
@@ -1278,16 +1303,14 @@ impl Board {
         }
 
         // Calculate game phase
-        let total_material_mg = {
-            let mut sum = 0i32;
-            for idx in 0..6 {
+        let total_material_mg: i32 = (0..6)
+            .map(|idx| {
                 let white_bb = self.bitboards[0][idx];
                 let black_bb = self.bitboards[1][idx];
                 let cnt = (white_bb.count_ones() + black_bb.count_ones()) as i32;
-                sum += cnt * MATERIAL_MG[idx];
-            }
-            sum
-        };
+                cnt * MATERIAL_MG[idx]
+            })
+            .sum();
         let max_material = 2
             * (MATERIAL_MG[1] * 2
                 + MATERIAL_MG[2] * 2
@@ -1379,53 +1402,24 @@ impl Board {
             // For white: pawn ranks increase; for black: decrease
             // We'll scan each pawn on this file to decide passedness
             // White passed pawns
-            let mut wpawns_on_file = self.bitboards[color_to_zobrist_index(Color::White)]
+            let wpawns_on_file = self.bitboards[color_to_zobrist_index(Color::White)]
                 [piece_to_zobrist_index(Piece::Pawn)]
                 & file_mask;
-            while wpawns_on_file != 0 {
-                let sq = wpawns_on_file.trailing_zeros() as usize;
-                wpawns_on_file &= wpawns_on_file - 1;
+            for sq in Self::bits_iter(wpawns_on_file) {
                 let rank = sq / 8;
-                let mut is_passed = true;
                 // check black pawns ahead on same or adjacent files
-                for _r in 0..rank {
-                    // unused small-range mask (kept for clarity)
-                    let _adj_mask = (Board::FILE_A << file)
-                        | (if file > 0 {
-                            Board::FILE_A << (file - 1)
-                        } else {
-                            0
-                        })
-                        | (if file < 7 {
-                            Board::FILE_A << (file + 1)
-                        } else {
-                            0
-                        });
-                    // simpler check: iterate black pawns and compare ranks
-                    let bb = self.bitboards[color_to_zobrist_index(Color::Black)]
-                        [piece_to_zobrist_index(Piece::Pawn)];
-                    // mask to same/adj files
-                    let file_adj_mask = (Board::FILE_A << file)
-                        | (if file > 0 {
-                            Board::FILE_A << (file - 1)
-                        } else {
-                            0
-                        })
-                        | (if file < 7 {
-                            Board::FILE_A << (file + 1)
-                        } else {
-                            0
-                        });
-                    // all squares with index < rank*8
-                    let ahead_mask = if rank * 8 >= 64 {
-                        u64::MAX
-                    } else {
-                        (1u64 << (rank * 8)) - 1
-                    };
-                    if bb & file_adj_mask & ahead_mask != 0 {
-                        is_passed = false;
-                    }
-                }
+                let bb = self.bitboards[color_to_zobrist_index(Color::Black)]
+                    [piece_to_zobrist_index(Piece::Pawn)];
+                let file_adj_mask = (Board::FILE_A << file)
+                    | (if file > 0 { Board::FILE_A << (file - 1) } else { 0 })
+                    | (if file < 7 { Board::FILE_A << (file + 1) } else { 0 });
+                // all squares with index < rank*8
+                let ahead_mask = if rank * 8 >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << (rank * 8)) - 1
+                };
+                let is_passed = (bb & file_adj_mask & ahead_mask) == 0;
                 if is_passed {
                     let bonus = 10 + (7 - rank as i32) * 7;
                     score += bonus;
@@ -1433,38 +1427,23 @@ impl Board {
             }
 
             // Black passed pawns
-            let mut bpawns_on_file = self.bitboards[color_to_zobrist_index(Color::Black)]
+            let bpawns_on_file = self.bitboards[color_to_zobrist_index(Color::Black)]
                 [piece_to_zobrist_index(Piece::Pawn)]
                 & file_mask;
-            while bpawns_on_file != 0 {
-                let sq = bpawns_on_file.trailing_zeros() as usize;
-                bpawns_on_file &= bpawns_on_file - 1;
+            for sq in Self::bits_iter(bpawns_on_file) {
                 let rank = sq / 8;
-                let mut is_passed = true;
                 // check white pawns ahead on same or adjacent files
-                for r in (rank + 1)..8 {
-                    let file_adj_mask = (Board::FILE_A << file)
-                        | (if file > 0 {
-                            Board::FILE_A << (file - 1)
-                        } else {
-                            0
-                        })
-                        | (if file < 7 {
-                            Board::FILE_A << (file + 1)
-                        } else {
-                            0
-                        });
-                    let ahead_mask = if (r + 1) * 8 >= 64 {
-                        0u64
-                    } else {
-                        !((1u64 << ((r + 1) * 8)) - 1)
-                    };
-                    let bb = self.bitboards[color_to_zobrist_index(Color::White)]
-                        [piece_to_zobrist_index(Piece::Pawn)];
-                    if bb & file_adj_mask & ahead_mask != 0 {
-                        is_passed = false;
-                    }
-                }
+                let bb = self.bitboards[color_to_zobrist_index(Color::White)]
+                    [piece_to_zobrist_index(Piece::Pawn)];
+                let file_adj_mask = (Board::FILE_A << file)
+                    | (if file > 0 { Board::FILE_A << (file - 1) } else { 0 })
+                    | (if file < 7 { Board::FILE_A << (file + 1) } else { 0 });
+                let ahead_mask = if (rank + 1) * 8 >= 64 {
+                    0u64
+                } else {
+                    !((1u64 << ((rank + 1) * 8)) - 1)
+                };
+                let is_passed = (bb & file_adj_mask & ahead_mask) == 0;
                 if is_passed {
                     let bonus = 10 + rank as i32 * 7;
                     score -= bonus;
@@ -1485,193 +1464,74 @@ impl Board {
         &mut self,
         tt: &mut TranspositionTable, // Pass TT
         depth: u32,
-        mut alpha: i32, // Keep mutable
-        mut beta: i32,  // Keep mutable
+        alpha: i32,
+        beta: i32,
         moves_buf: &mut Vec<Move>,
     ) -> i32 {
-        let original_alpha = alpha; // Store original alpha for TT bounds
-        let current_hash = self.hash; // Get hash for current position
-
-        // --- Transposition Table Probe ---
-        let mut hash_move: Option<Move> = None;
-        if let Some(entry) = tt.probe(current_hash) {
-            if entry.depth >= depth {
-                // Use entry only if depth is sufficient
-                match entry.bound_type {
-                    BoundType::Exact => return entry.score, // Found exact score
-                    BoundType::LowerBound => alpha = alpha.max(entry.score), // Update alpha
-                    BoundType::UpperBound => beta = beta.min(entry.score), // Update beta
-                }
-                if alpha >= beta {
-                    return entry.score; // Cutoff based on TT entry
-                }
-            }
-            // Use best move from TT for move ordering, even if depth wasn't sufficient
-            // Must clone the move here as entry is borrowed
-            hash_move = entry.best_move;
-        }
-
-        // Cooperative stop check
-        if search_control::should_stop() {
-            return 0; // best-effort early exit
-        }
-
-        // Draw detection: if this position is a draw by 50-move rule or threefold repetition,
-        // return a draw score of 0 to stop searching this branch.
-        if self.is_draw() {
-            return 0;
-        }
-
-        // Count this node and check node limit
-        search_control::node_visited();
-
-        // --- Base Case: Depth 0 ---
-        if depth == 0 {
-            // Call quiescence search at leaf nodes
-            return self.quiesce(tt, alpha, beta, moves_buf); // Pass TT and moves buffer to quiesce
-        }
-
-        // --- Generate Moves ---
-        moves_buf.clear();
-        self.generate_moves_into(moves_buf);
-        moves_buf.sort_by_key(|m| -mvv_lva_score(m, self));
-
-        // --- Check for Checkmate / Stalemate ---
-        if moves_buf.is_empty() {
-            let current_color = self.current_color();
-            return if self.is_in_check(current_color) {
-                -(MATE_SCORE - (100 - depth as i32)) // Checkmate score depends on depth
-            } else {
-                0 // Stalemate
-            };
-        }
-
-        // --- Move Ordering ---
-        // Basic: Try hash move first if available
-        if let Some(hm) = &hash_move {
-            if let Some(pos) = moves_buf.iter().position(|m| m == hm) {
-                // Swap hash move to the front
-                moves_buf.swap(0, pos);
-            }
-        }
-        // TODO: Implement more sophisticated move ordering (captures, killers, history)
-
-        // --- Iterate Through Moves ---
-        let mut best_score = -MATE_SCORE * 2; // Initialize with very low score
-        let mut best_move_found: Option<Move> = None;
-
-        // Child buffer reused for recursive calls to avoid borrowing the current moves_buf
-        let mut child_buf: Vec<Move> = Vec::new();
-        for (i, m) in moves_buf.iter().enumerate() {
-            if search_control::should_stop() {
-                break;
-            }
-            let info = self.make_move(m);
-            let score = if i == 0 {
-                -self.negamax(tt, depth - 1, -beta, -alpha, &mut child_buf)
-            } else {
-                let mut score = -self.negamax(tt, depth - 1, -alpha - 1, -alpha, &mut child_buf);
-                if score > alpha && score < beta {
-                    score = -self.negamax(tt, depth - 1, -beta, -alpha, &mut child_buf);
-                }
-                score
-            };
-            self.unmake_move(m, info);
-
-            // --- Update Alpha/Beta and Best Score ---
-            if score > best_score {
-                best_score = score;
-                best_move_found = Some(*m); // Store the best move *found* so far
-            }
-
-            alpha = alpha.max(best_score);
-
-            if alpha >= beta {
-                // Beta Cutoff
-                // TODO: Store killer moves here if implementing that heuristic
-                break;
-            }
-        }
-
-        // --- Transposition Table Store ---
-        let bound_type = if best_score <= original_alpha {
-            BoundType::UpperBound // Failed low (score <= alpha), so it's an upper bound for future searches
-        } else if best_score >= beta {
-            BoundType::LowerBound // Failed high (score >= beta), so it's a lower bound
-        } else {
-            BoundType::Exact // Score is within the alpha-beta window
-        };
-
-        tt.store(current_hash, depth, best_score, bound_type, best_move_found); // Store result
-
-        best_score
+        // Create a temporary ordering context for callers that don't provide one
+        let mut ctx = crate::ordering::OrderingContext::new(256);
+        crate::search::negamax(self, tt, depth, alpha, beta, moves_buf, &mut ctx)
     }
 
     // Quiescence search (also takes TT, but primarily for passing down)
     #[allow(clippy::only_used_in_recursion)]
+    #[allow(dead_code)]
     fn quiesce(
         &mut self,
-        tt: &mut TranspositionTable, // Pass TT along (though not used directly here yet)
-        mut alpha: i32,
+        _tt: &mut TranspositionTable, // Pass TT along (though not used directly here yet)
+        alpha: i32,
         beta: i32,
         moves_buf: &mut Vec<Move>,
     ) -> i32 {
-        // --- Standing Pat Score ---
-        let stand_pat_score = self.evaluate();
+        let mut ctx = crate::ordering::OrderingContext::new(256);
+        crate::search::quiesce(self, alpha, beta, moves_buf, &mut ctx)
+    }
 
-        // If position is a forced draw by repetition/50-move, return draw score
-        if self.is_draw() {
-            return 0;
-        }
+    // Run a single root depth search over `root_moves`. This encapsulates the loop
+    // that iterates root moves, calls `negamax`, and returns the best move/score.
+    // The `should_abort` closure is called before each move and may be used by
+    // time-limited searches to abort mid-root.
+    #[allow(dead_code)]
+    pub(crate) fn run_root_search<F>(
+        &mut self,
+        tt: &mut TranspositionTable,
+        depth: u32,
+        root_moves: &mut Vec<Move>,
+        mut should_abort: F,
+    ) -> (Option<Move>, i32, bool)
+    where
+        F: FnMut() -> bool,
+    {
+        let mut best_move: Option<Move> = None;
 
-        // Cooperative stop check at quiescence entry
-        if search_control::should_stop() {
-            return stand_pat_score;
-        }
+        // Alpha/Beta window for root search
+        let mut alpha = -MATE_SCORE * 2;
+        let beta = MATE_SCORE * 2;
+        let mut best_score = -MATE_SCORE * 2;
 
-        // Count this node
-        search_control::node_visited();
+        // Allow TT to promote a suggested move to the front for ordering
+    crate::search::apply_tt_move_hint(&mut root_moves[..], tt, self.hash);
 
-        // --- Alpha-Beta Pruning Check (Standing Pat) ---
-        if stand_pat_score >= beta {
-            return beta; // Fail-high
-        }
-        alpha = alpha.max(stand_pat_score); // Update lower bound
-
-        // --- Generate Only Tactical Moves ---
-        moves_buf.clear();
-        self.generate_tactical_moves_into(moves_buf);
-        moves_buf.sort_by_key(|m| -mvv_lva_score(m, self));
-
-        // TODO: Add move ordering for tactical moves (e.g., MVV-LVA)
-
-        // --- Iterate Through Tactical Moves ---
-        let mut best_score = stand_pat_score; // Start with the standing pat score
-
-        // Clone the generated list so we can safely mutate the shared buffer during recursion
-        let tactical_moves = moves_buf.clone();
-        for m in tactical_moves {
-            if search_control::should_stop() {
-                break;
+        let mut mv_buf = Vec::new();
+        // Create a persistent OrderingContext for the root search so killers/history persist
+        let mut ordering_ctx = crate::ordering::OrderingContext::new(256);
+        for m in &*root_moves {
+            if should_abort() {
+                return (None, 0, false); // aborted mid-root
             }
-            let info = self.make_move(&m);
-            // Recursive call passes TT, alpha, beta and the shared moves buffer
-            let score = -self.quiesce(tt, -beta, -alpha, moves_buf);
-            self.unmake_move(&m, info);
+            let info = self.make_move(m);
+            let score = -crate::search::negamax(self, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx);
+            self.unmake_move(m, info);
 
-            best_score = best_score.max(score);
+            if score > best_score {
+                best_score = score;
+                best_move = Some(*m);
+            }
+
             alpha = alpha.max(best_score);
-
-            if alpha >= beta {
-                break; // Beta cutoff
-            }
         }
 
-        // Note: We typically don't store quiescence results directly in the main TT
-        // in the same way as fixed-depth search, as the 'depth' concept is different.
-        // The result is implicitly stored when negamax calls quiesce at depth 0.
-
-        alpha // Return the best score found (alpha)
+        (best_move, best_score, true)
     }
 
     // Add a function to generate only tactical moves (captures, promotions)
@@ -1835,7 +1695,11 @@ impl Board {
     }
 
     // --- Utility Functions ---
-    fn current_color(&self) -> Color {
+    /// Returns the color whose turn it currently is.
+    ///
+    /// Convenience accessor: `Color::White` when `white_to_move` is true,
+    /// otherwise `Color::Black`.
+    pub(crate) fn current_color(&self) -> Color {
         if self.white_to_move {
             Color::White
         } else {
@@ -1907,6 +1771,12 @@ impl Board {
 
 // Parses a move in UCI format (e.g., "e2e4", "e7e8q")
 // Needs the current board state to find the matching legal move object.
+/// Parse a UCI move string (e.g. "e2e4", "e7e8q") and return the matching
+/// legal `Move` if found.
+///
+/// This function needs `&mut Board` because it calls into move generation to
+/// find the legal move that corresponds to the UCI string. Returns `None` if
+/// the string is invalid or no legal move matches.
 pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     if uci_string.len() < 4 || uci_string.len() > 5 {
         return None; // Invalid length
@@ -1980,10 +1850,18 @@ pub fn find_best_move(
     tt: &mut TranspositionTable,
     max_depth: u32,
 ) -> Option<Move> {
-    find_best_move_with_sink(board, tt, max_depth, None, None, false)
+    find_best_move_with_context(board, tt, max_depth, None, None, false)
 }
 
-pub fn find_best_move_with_sink(
+/// Find the best move using iterative deepening with optional sinks and info publishing.
+///
+/// - `board`: the current position to search.
+/// - `tt`: transposition table used for move ordering and PV extraction.
+/// - `max_depth`: maximum depth to search.
+/// - `sink`: optional Arc<Mutex<Option<Move>>> updated with intermediate best moves.
+/// - `info_sender`: optional sender for structured UCI info messages.
+/// - `_is_ponder`: set to true when this is a ponder search (used for UCI `ponder` info).
+pub fn find_best_move_with_context(
     board: &mut Board,
     tt: &mut TranspositionTable,
     max_depth: u32,
@@ -2060,7 +1938,13 @@ pub fn find_best_move_with_sink(
 
             // publish intermediate best move to sink if provided
             if let Some(ref s) = sink {
-                let mut lock = s.lock().unwrap();
+                let mut lock = match s.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => {
+                        eprintln!("warning: sink mutex poisoned, recovering");
+                        poisoned.into_inner()
+                    }
+                };
                 *lock = best_move;
             }
 
@@ -2115,6 +1999,20 @@ pub fn find_best_move_with_sink(
     best_move
 }
 
+// Backwards-compatible wrapper name preserving previous API; prefer using
+// `find_best_move_with_context` in new code for clarity.
+#[allow(dead_code)]
+pub fn find_best_move_with_sink(
+    board: &mut Board,
+    tt: &mut TranspositionTable,
+    max_depth: u32,
+    sink: Option<std::sync::Arc<std::sync::Mutex<Option<Move>>>>,
+    info_sender: Option<std::sync::mpsc::Sender<uci_info::Info>>,
+    is_ponder: bool,
+) -> Option<Move> {
+    find_best_move_with_context(board, tt, max_depth, sink, info_sender, is_ponder)
+}
+
 #[allow(dead_code)]
 pub fn find_best_move_with_time(
     board: &mut Board,
@@ -2125,7 +2023,7 @@ pub fn find_best_move_with_time(
     find_best_move_with_time_with_sink(board, tt, max_time, start_time, None, None, false)
 }
 
-pub fn find_best_move_with_time_with_sink(
+pub fn find_best_move_with_time_context(
     board: &mut Board,
     tt: &mut TranspositionTable,
     max_time: Duration,
@@ -2203,7 +2101,13 @@ pub fn find_best_move_with_time_with_sink(
             best_move = new_best_move;
             // publish best move for this depth
             if let Some(ref s) = sink {
-                let mut lock = s.lock().unwrap();
+                let mut lock = match s.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => {
+                        eprintln!("warning: sink mutex poisoned, recovering");
+                        poisoned.into_inner()
+                    }
+                };
                 *lock = best_move;
             }
 
@@ -2283,449 +2187,17 @@ pub fn find_best_move_with_time_with_sink(
     best_move
 }
 
-#[cfg(test)]
-mod perft_tests {
-    use super::*;
-
-    struct TestPosition {
-        name: &'static str,
-        fen: &'static str,
-        depths: &'static [(usize, u64)], // (depth, expected node count)
-    }
-
-    // Common test positions with known perft results
-    const TEST_POSITIONS: &[TestPosition] = &[
-        // Initial position
-        TestPosition {
-            name: "Initial Position",
-            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            depths: &[
-                (1, 20),      // 20 possible moves from initial position
-                (2, 400),     // 400 positions after 2 plies
-                (3, 8902),    // 8,902 positions after 3 plies
-                (4, 197281),  // 197,281 positions after 4 plies
-                (5, 4865609), // 4,865,609 positions after 5 plies
-            ],
-        },
-        // Position 2 (Kiwipete)
-        TestPosition {
-            name: "Kiwipete",
-            fen: "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-            depths: &[(1, 48), (2, 2039), (3, 97862), (4, 4085603)],
-        },
-        // Position 3
-        TestPosition {
-            name: "Position 3",
-            fen: "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
-            depths: &[(1, 14), (2, 191), (3, 2812), (4, 43238), (5, 674624)],
-        },
-        // Position 4
-        TestPosition {
-            name: "Position 4",
-            fen: "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
-            depths: &[(1, 6), (2, 264), (3, 9467), (4, 422333)],
-        },
-        // Position 5
-        TestPosition {
-            name: "Position 5",
-            fen: "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
-            depths: &[(1, 44), (2, 1486), (3, 62379), (4, 2103487)],
-        },
-        // Position 6 (Win at Chess)
-        TestPosition {
-            name: "Position 6 (Win at Chess)",
-            fen: "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
-            depths: &[
-                (1, 46),
-                (2, 2079),
-                (3, 89890),
-                //(4, 3894594), // Commented out as it may take too long
-            ],
-        },
-        // Additional edge cases
-        TestPosition {
-            name: "En Passant Capture",
-            fen: "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3",
-            depths: &[
-                (1, 31), // Includes en passant capture
-                (2, 707),
-                (3, 21637),
-            ],
-        },
-        TestPosition {
-            name: "Promotion",
-            fen: "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
-            depths: &[
-                (1, 24), // Many promotion options
-                (2, 496),
-                (3, 9483),
-            ],
-        },
-        TestPosition {
-            name: "Castling",
-            fen: "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
-            depths: &[
-                (1, 26), // Both sides can castle in both directions
-                (2, 568),
-                (3, 13744),
-            ],
-        },
-    ];
-
-    #[test]
-    fn test_all_perft_positions() {
-        for position in TEST_POSITIONS {
-            println!("Testing position: {}", position.name);
-            println!("FEN: {}", position.fen);
-
-            let mut board = Board::from_fen(position.fen);
-
-            for &(depth, expected) in position.depths {
-                let start = Instant::now();
-                let nodes = board.perft(depth);
-                let duration = start.elapsed();
-
-                println!("  Depth {}: {} nodes in {:?}", depth, nodes, duration);
-
-                assert_eq!(
-                    nodes, expected,
-                    "Perft failed for position '{}' at depth {}. Expected: {}, Got: {}",
-                    position.name, depth, expected, nodes
-                );
-            }
-            println!("------------------------------");
-        }
-    }
+#[allow(dead_code)]
+pub fn find_best_move_with_time_with_sink(
+    board: &mut Board,
+    tt: &mut TranspositionTable,
+    max_time: Duration,
+    start_time: Instant,
+    sink: Option<std::sync::Arc<std::sync::Mutex<Option<Move>>>>,
+    info_sender: Option<std::sync::mpsc::Sender<uci_info::Info>>,
+    is_ponder: bool,
+) -> Option<Move> {
+    find_best_move_with_time_context(board, tt, max_time, start_time, sink, info_sender, is_ponder)
 }
 
-#[test]
-fn test_draw_detection_50_move() {
-    // Start from a simple position with only kings and a rook to allow long non-capture moves
-    let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
-    // Set halfmove clock near the limit
-    board.halfmove_clock = 99; // 99 half-moves means next non-capture/pawn move will make it 100
-    board.position_history.clear();
-    board.position_history.push(board.hash);
-
-    // Make a harmless king move and unmake it repeatedly to bump halfmove
-    let mv = Move {
-        from: Square(0, 0),
-        to: Square(0, 1),
-        promotion: None,
-        is_castling: false,
-        is_en_passant: false,
-        captured_piece: None,
-    };
-    let info = board.make_move(&mv);
-    // After making move, halfmove should be 100 (draw)
-    assert!(
-        board.is_draw(),
-        "Expected 50-move draw to be detected after move"
-    );
-    board.unmake_move(&mv, info);
-}
-
-#[test]
-fn test_draw_detection_threefold() {
-    // Use a small repeating position: a legal repetition via rook checks is cumbersome to craft,
-    // but we can simulate by manipulating history: ensure position hash occurs 3 times
-    let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
-    board.position_history.clear();
-    // Push the same hash three times to simulate threefold repetition
-    board.position_history.push(board.hash);
-    board.position_history.push(board.hash);
-    board.position_history.push(board.hash);
-    assert!(
-        board.is_draw(),
-        "Expected threefold repetition to be detected"
-    );
-}
-
-#[test]
-fn test_make_unmake_preserves_evaluate_and_hash() {
-    let mut board = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-    let baseline_eval = board.evaluate();
-    let baseline_hash = board.hash;
-
-    let mut moves = Vec::new();
-    board.generate_moves_into(&mut moves);
-    // Test a handful of moves (or all if small)
-    for m in moves.iter().take(8) {
-        let info = board.make_move(m);
-        // Evaluate while moved
-        let _mid_eval = board.evaluate();
-        board.unmake_move(m, info);
-        // After unmake, hash and eval should match baseline
-        assert_eq!(board.hash, baseline_hash, "Hash mismatch after make/unmake");
-        assert_eq!(
-            board.evaluate(),
-            baseline_eval,
-            "Eval mismatch after make/unmake"
-        );
-    }
-}
-
-#[test]
-fn test_threefold_repetition_via_moves() {
-    let mut board = Board::new(); // standard initial setup
-
-    // Moves: N g1-f3, N g8-f6, N f3-g1, N f6-g8 (one full cycle)
-    let m1 = Move {
-        from: Square(0, 6),
-        to: Square(2, 5),
-        promotion: None,
-        is_castling: false,
-        is_en_passant: false,
-        captured_piece: None,
-    };
-    let m2 = Move {
-        from: Square(7, 6),
-        to: Square(5, 5),
-        promotion: None,
-        is_castling: false,
-        is_en_passant: false,
-        captured_piece: None,
-    };
-    let m3 = Move {
-        from: Square(2, 5),
-        to: Square(0, 6),
-        promotion: None,
-        is_castling: false,
-        is_en_passant: false,
-        captured_piece: None,
-    };
-    let m4 = Move {
-        from: Square(5, 5),
-        to: Square(7, 6),
-        promotion: None,
-        is_castling: false,
-        is_en_passant: false,
-        captured_piece: None,
-    };
-
-    // Perform two cycles; after two cycles the starting position should have occurred 3 times
-    for _ in 0..2 {
-        let _ = board.make_move(&m1);
-        let _ = board.make_move(&m2);
-        let _ = board.make_move(&m3);
-        let _ = board.make_move(&m4);
-    }
-
-    assert!(
-        board.is_draw(),
-        "Expected threefold repetition after repeating knight cycle"
-    );
-}
-
-#[test]
-fn test_negamax_respects_draw() {
-    let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
-    // Force 50-move draw
-    board.halfmove_clock = 100;
-    // Simple TT for the call
-    let mut tt = TranspositionTable::default();
-    let mut buf = Vec::new();
-    let score = board.negamax(&mut tt, 1, -10000, 10000, &mut buf);
-    assert_eq!(
-        score, 0,
-        "Expected negamax to return draw score 0 for drawn position"
-    );
-}
-
-#[test]
-fn test_make_unmake_castling_preserves_state() {
-    let mut board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
-    let baseline_hash = board.hash;
-    let baseline_eval = board.evaluate();
-
-    let mut moves = Vec::new();
-    board.generate_moves_into(&mut moves);
-    let castle_move = moves
-        .iter()
-        .find(|m| m.is_castling)
-        .expect("No castling move found");
-    let info = board.make_move(castle_move);
-    board.unmake_move(castle_move, info);
-
-    assert_eq!(
-        board.hash, baseline_hash,
-        "Hash changed after castling make/unmake"
-    );
-    assert_eq!(
-        board.evaluate(),
-        baseline_eval,
-        "Eval changed after castling make/unmake"
-    );
-}
-
-#[test]
-fn test_en_passant_capture_and_restore() {
-    let fen = "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3";
-    let mut board = Board::from_fen(fen);
-    let mut moves = Vec::new();
-    board.generate_moves_into(&mut moves);
-    // Find en-passant move
-    let ep_move = moves
-        .iter()
-        .find(|m| m.is_en_passant)
-        .expect("No en-passant move found");
-    // Save pre-move piece presence
-    let capture_row = if board.current_color() == Color::White {
-        ep_move.to.0 - 1
-    } else {
-        ep_move.to.0 + 1
-    };
-    let before_cap = board.get_square(capture_row, ep_move.to.1);
-
-    let info = board.make_move(ep_move);
-    // Captured pawn should be removed
-    assert!(
-        board.get_square(capture_row, ep_move.to.1).is_none(),
-        "En-passant captured pawn still on board"
-    );
-    board.unmake_move(ep_move, info);
-    // Restored
-    assert_eq!(board.get_square(capture_row, ep_move.to.1), before_cap);
-}
-
-#[test]
-fn test_promotion_moves_make_unmake() {
-    let mut board = Board::from_fen("8/P7/8/8/8/8/8/k6K w - - 0 1");
-    let mut moves = Vec::new();
-    board.generate_moves_into(&mut moves);
-    let promo_move = moves
-        .iter()
-        .find(|m| m.promotion.is_some())
-        .expect("No promotion move found");
-    let baseline_hash = board.hash;
-    let baseline_eval = board.evaluate();
-    let info = board.make_move(promo_move);
-    board.unmake_move(promo_move, info);
-    assert_eq!(board.hash, baseline_hash);
-    assert_eq!(board.evaluate(), baseline_eval);
-}
-
-#[test]
-fn test_transposition_table_store_probe() {
-    let mut tt = TranspositionTable::new(1);
-    let hash = 0xdeadbeefu64;
-    tt.store(hash, 1, 100, BoundType::Exact, None);
-    let entry = tt.probe(hash).expect("Entry missing");
-    assert_eq!(entry.depth, 1);
-    // Store shallower vs deeper
-    tt.store(hash, 0, 50, BoundType::Exact, None);
-    let entry2 = tt.probe(hash).expect("Entry missing after shallower store");
-    // Depth should remain 1 because new depth 0 should not replace
-    assert_eq!(entry2.depth, 1);
-    // Now store deeper
-    tt.store(hash, 5, 200, BoundType::Exact, None);
-    let entry3 = tt.probe(hash).expect("Entry missing after deeper store");
-    assert_eq!(entry3.depth, 5);
-}
-
-#[test]
-fn test_randomized_stress_make_unmake() {
-    // Simple deterministic RNG (LCG) to avoid adding dependencies
-    struct SimpleRng {
-        state: u64,
-    }
-    impl SimpleRng {
-        fn new(seed: u64) -> Self {
-            Self { state: seed }
-        }
-        fn next_u64(&mut self) -> u64 {
-            // 64-bit LCG parameters
-            self.state = self
-                .state
-                .wrapping_mul(6364136223846793005u64)
-                .wrapping_add(1442695040888963407u64);
-            self.state
-        }
-        fn usize_bounded(&mut self, bound: usize) -> usize {
-            if bound == 0 {
-                return 0;
-            }
-            (self.next_u64() as usize) % bound
-        }
-    }
-
-    let mut rng = SimpleRng::new(0x1234_5678_9abc_def0u64);
-
-    let mut board = Board::new();
-
-    // Number of random sequences to run and max depth per sequence
-    const SEQS: usize = 200;
-    const MAX_DEPTH: usize = 6;
-
-    for seq in 0..SEQS {
-        // Capture baseline invariants
-        let baseline_hash = board.hash;
-        let baseline_eval = board.evaluate();
-        let baseline_halfmove = board.halfmove_clock;
-        let baseline_pos_hist_len = board.position_history.len();
-        let baseline_castle = board.castling_rights;
-        let baseline_ep = board.en_passant_target;
-        let baseline_to_move = board.white_to_move;
-
-        // Choose a random depth
-        let depth = rng.usize_bounded(MAX_DEPTH) + 1;
-        let mut seq_moves: Vec<(Move, UnmakeInfo)> = Vec::new();
-
-        // Make up to `depth` random legal moves; if position is terminal/none, break early
-        for _d in 0..depth {
-            let mut moves = Vec::new();
-            board.generate_moves_into(&mut moves);
-            if moves.is_empty() {
-                break;
-            }
-            let idx = rng.usize_bounded(moves.len());
-            let m = moves[idx];
-            let info = board.make_move(&m);
-            seq_moves.push((m, info));
-        }
-
-        // Now unmake in reverse order
-        while let Some((m, info)) = seq_moves.pop() {
-            board.unmake_move(&m, info);
-        }
-
-        // After unmaking, invariants should match baseline
-        assert_eq!(
-            board.hash, baseline_hash,
-            "[seq {}] hash mismatch after make/unmake",
-            seq
-        );
-        assert_eq!(
-            board.evaluate(),
-            baseline_eval,
-            "[seq {}] eval mismatch after make/unmake",
-            seq
-        );
-        assert_eq!(
-            board.halfmove_clock, baseline_halfmove,
-            "[seq {}] halfmove mismatch",
-            seq
-        );
-        assert_eq!(
-            board.position_history.len(),
-            baseline_pos_hist_len,
-            "[seq {}] position history length mismatch",
-            seq
-        );
-        assert_eq!(
-            board.castling_rights, baseline_castle,
-            "[seq {}] castling rights mismatch",
-            seq
-        );
-        assert_eq!(
-            board.en_passant_target, baseline_ep,
-            "[seq {}] en-passant mismatch",
-            seq
-        );
-        assert_eq!(
-            board.white_to_move, baseline_to_move,
-            "[seq {}] side to move mismatch",
-            seq
-        );
-    }
-}
+// Tests moved to `tests/board_tests.rs` to separate production and test code

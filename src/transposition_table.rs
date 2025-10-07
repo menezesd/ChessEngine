@@ -24,6 +24,10 @@ pub struct TranspositionTable {
 }
 
 impl TranspositionTable {
+    /// Create a new transposition table sized approximately `size_mb` megabytes.
+    ///
+    /// The function computes a power-of-two number of entries and returns a
+    /// simple direct-mapped table used for storing TT entries.
     pub fn new(size_mb: usize) -> Self {
         let entry_size = mem::size_of::<Option<TTEntry>>();
         let mut num_entries = (size_mb * 1024 * 1024) / entry_size;
@@ -53,6 +57,10 @@ impl TranspositionTable {
         None
     }
 
+    /// Store or update a transposition-table entry for `hash`.
+    ///
+    /// Replaces an existing entry at the same index if the incoming `depth`
+    /// is greater-or-equal to the existing entry's depth.
     pub fn store(
         &mut self,
         hash: u64,

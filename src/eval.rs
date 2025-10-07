@@ -95,6 +95,11 @@ pub const PST_EG: [[i32; 64]; 6] = [
 ];
 
 // Public high-level eval: receives pawn MG/EG (from cache or computed) and returns final white-minus-black score
+/// High-level evaluation entrypoint returning a centipawn score (white - black).
+///
+/// `pawn_mg` and `pawn_eg` are precomputed pawn contributions for middlegame
+/// and endgame (from `pawn_eval`). This function adds piece material, PSTs and
+/// simple pawn-structure bonuses/penalties.
 pub fn eval(board: &Board, pawn_mg: i32, pawn_eg: i32) -> i32 {
     let mut mg_score = pawn_mg;
     let mut eg_score = pawn_eg;
@@ -333,7 +338,7 @@ pub fn eval(board: &Board, pawn_mg: i32, pawn_eg: i32) -> i32 {
     // game phase interpolation
     let total_material_mg: i32 = {
         let mut sum = 0i32;
-        for idx in 0..6 {
+        for (idx, _v) in MATERIAL_MG.iter().enumerate().take(6) {
             let white_bb = board.bitboards[0][idx];
             let black_bb = board.bitboards[1][idx];
             let cnt = (white_bb.count_ones() + black_bb.count_ones()) as i32;
@@ -350,8 +355,7 @@ pub fn eval(board: &Board, pawn_mg: i32, pawn_eg: i32) -> i32 {
     let mut phase = (total_material_mg as f32) / (max_material as f32);
     phase = phase.clamp(0.0, 1.0);
 
-    let position_score = (phase * mg_score as f32 + (1.0 - phase) * eg_score as f32) as i32;
-    position_score
+    (phase * mg_score as f32 + (1.0 - phase) * eg_score as f32) as i32
 }
 
 pub const DOUBLED_PAWN_MG: i32 = -9;
@@ -419,8 +423,8 @@ fn compute_king_safety(board: &Board, e: &EvalData, color_idx: usize) -> (i32, i
         while attacks != 0 {
             let s = attacks.trailing_zeros() as usize;
             attacks &= attacks - 1;
-            let dr = (ks as i32 / 8 - s as i32 / 8).abs() as usize;
-            let df = (ks as i32 % 8 - s as i32 % 8).abs() as usize;
+            let dr = (ks as i32 / 8 - s as i32 / 8).unsigned_abs() as usize;
+            let df = (ks as i32 % 8 - s as i32 % 8).unsigned_abs() as usize;
             let d = dr.max(df).min(4);
             per_piece_units += KING_ATTACK_WEIGHTS[piece_idx] * KING_DIST_MULT[d] as i32;
         }
@@ -483,6 +487,9 @@ fn fill_forward_bits(mut b: u64, color: Color) -> u64 {
     }
 }
 
+/// Compute pawn evaluation split into middlegame and endgame contributions.
+///
+/// Returns a tuple (pawn_mg, pawn_eg) which can be supplied to `eval`.
 pub fn pawn_eval(board: &Board) -> (i32, i32) {
     let mut pmg = 0i32;
     let mut peg = 0i32;
@@ -623,6 +630,7 @@ fn knight_mobility_count(square: usize, occ: Bitboard) -> usize {
     mobility.count_ones() as usize
 }
 
+/// Compute knight-specific evaluation contributions into `EvalData`.
 pub fn eval_knight(board: &Board, e: &mut EvalData, color: Color) {
     let color_idx = crate::zobrist::color_to_zobrist_index(color);
     let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Knight)];
@@ -649,6 +657,7 @@ pub fn eval_knight(board: &Board, e: &mut EvalData, color: Color) {
 }
 
 // Bishop evaluator: mobility + control accumulation
+/// Compute bishop-specific evaluation contributions into `EvalData`.
 pub fn eval_bishop(board: &Board, e: &mut EvalData, color: Color) {
     let color_idx = crate::zobrist::color_to_zobrist_index(color);
     let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Bishop)];
@@ -666,6 +675,7 @@ pub fn eval_bishop(board: &Board, e: &mut EvalData, color: Color) {
 }
 
 // Rook evaluator: mobility + control and simple 7th-rank logic
+/// Compute rook-specific evaluation contributions into `EvalData`.
 pub fn eval_rook(board: &Board, e: &mut EvalData, color: Color) {
     let color_idx = crate::zobrist::color_to_zobrist_index(color);
     let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Rook)];
@@ -714,9 +724,7 @@ pub fn eval_rook(board: &Board, e: &mut EvalData, color: Color) {
             };
             let ahead_mask = if color == Color::White {
                 if psq / 8 >= 7 { u64::MAX } else { (1u64 << ((psq/8) * 8)) - 1 }
-            } else {
-                if (psq/8) == 0 { 0u64 } else { !((1u64 << (((psq/8)+1) * 8)) - 1) }
-            };
+            } else if (psq/8) == 0 { 0u64 } else { !((1u64 << (((psq/8)+1) * 8)) - 1) };
             let is_passed = (opp_pawns & adj & ahead_mask) == 0;
             if is_passed {
                 // if rook is behind pawn (closer to own side than pawn), award bonus
@@ -750,6 +758,7 @@ pub fn eval_rook(board: &Board, e: &mut EvalData, color: Color) {
 }
 
 // Queen evaluator: combined rook+bishop mobility
+/// Compute queen-specific evaluation contributions into `EvalData`.
 pub fn eval_queen(board: &Board, e: &mut EvalData, color: Color) {
     let color_idx = crate::zobrist::color_to_zobrist_index(color);
     let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Queen)];
@@ -769,6 +778,7 @@ pub fn eval_queen(board: &Board, e: &mut EvalData, color: Color) {
 }
 
 // King evaluator: PST + pawn shield and safety heuristics placeholder
+/// Compute king-specific evaluation contributions into `EvalData`.
 pub fn eval_king(board: &Board, e: &mut EvalData, color: Color) {
     let color_idx = crate::zobrist::color_to_zobrist_index(color);
     let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::King)];
