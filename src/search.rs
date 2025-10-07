@@ -2,17 +2,14 @@ use crate::transposition_table::TranspositionTable;
 use crate::types::{format_square, Move};
 use crate::board::Board;
 use crate::ordering::{OrderingContext, order_moves};
-use crate::zobrist::ZOBRIST;
-// Local copy of material values (MG) for P, N, B, R, Q, K so we can compute a
-// simple weighted-material sum without depending on public eval symbols.
-const MATERIAL_MG: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
+// Null-move pruning removed.
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 use crate::uci_info;
 use crate::transposition_table::BoundType;
-use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 use crate::see::see_capture;
+use std::env;
 
 pub fn negamax(
     board: &mut Board,
@@ -56,38 +53,8 @@ pub fn negamax(
         return quiesce(board, alpha, beta, moves_buf, ctx);
     }
 
-    // Null-move pruning: if not in check and depth is sufficient, try a reduced-depth null move.
-    // Conditions: depth >= 3 and not in check and not a draw. We set reduction R=2.
-    if depth >= 3 {
-        let current_color = board.current_color();
-        // Don't use null-move in low-material/endgame positions where zugzwang risk is high.
-        if !board.is_in_check(current_color) && should_use_null_move(board) {
-            // Make a null move: flip side and clear en-passant target (save/restore state)
-            let saved_ep = board.en_passant_target;
-            let saved_hash = board.hash;
-            board.en_passant_target = None;
-            board.white_to_move = !board.white_to_move;
-            board.hash ^= ZOBRIST.black_to_move_key;
-
-            // Reduced depth
-            let r = 2u32;
-            let score = -negamax(board, tt, depth - 1 - r, -beta, -beta + 1, moves_buf, ctx);
-
-            // Undo null move
-            board.white_to_move = !board.white_to_move;
-            board.en_passant_target = saved_ep;
-            board.hash = saved_hash;
-
-            if score >= beta {
-                // Verification search: full-window search at depth-1 to avoid zugzwang false cutoffs
-                let ver_score = -negamax(board, tt, depth - 1, -beta, -alpha, moves_buf, ctx);
-                if ver_score >= beta {
-                    return ver_score;
-                }
-                // Otherwise continue searching normally
-            }
-        }
-    }
+    // Null-move pruning disabled: removed to avoid tactical false cutoffs.
+    // Previously, a reduced-depth null-move test was here. It was removed intentionally.
 
     moves_buf.clear();
     board.generate_moves_into(moves_buf);
@@ -173,50 +140,7 @@ pub fn negamax(
 /// current position. We conservatively disable null-move in reduced-material
 /// positions where only kings and pawns (or very little non-pawn material)
 /// remain to avoid zugzwang-related false cutoffs.
-fn should_use_null_move(board: &Board) -> bool {
-    // First, check if a material threshold override is configured. We use a
-    // global atomic i32 where negative value means "no threshold configured".
-    if let Some(threshold) = get_nullmove_material_threshold() {
-        // Compute weighted non-pawn material using MATERIAL_MG for pieces 1..4
-        let mut mat: i32 = 0;
-        for piece_idx in 1..5usize {
-            let cnt = (board.bitboards[0][piece_idx].count_ones()
-                + board.bitboards[1][piece_idx].count_ones()) as i32;
-            mat += cnt * MATERIAL_MG[piece_idx];
-        }
-        // If total non-pawn material is below or equal to threshold, disable null-move
-        return mat > threshold;
-    }
-
-    // Fallback conservative rule: count non-pawn pieces (N,B,R,Q) for both sides.
-    let mut non_pawn_count = 0u32;
-    for piece_idx in 1..5 {
-        let ww = board.bitboards[0][piece_idx];
-        let bb = board.bitboards[1][piece_idx];
-        non_pawn_count += ww.count_ones();
-        non_pawn_count += bb.count_ones();
-    }
-
-    // If there is very little non-pawn material (e.g., <= 1 piece besides kings),
-    // disable null-move to avoid zugzwang issues.
-    non_pawn_count > 1
-}
-
-static NULLMOVE_MATERIAL_THRESHOLD: AtomicI32 = AtomicI32::new(-1);
-
-/// Set a weighted-material threshold (in centipawns) below which null-move
-/// pruning will be disabled. Use `None` to clear the threshold and fall back
-/// to the conservative piece-count heuristic.
-pub fn set_nullmove_material_threshold(opt: Option<i32>) {
-    let v = opt.unwrap_or(-1);
-    NULLMOVE_MATERIAL_THRESHOLD.store(v, AtomicOrdering::SeqCst);
-}
-
-/// Get the configured material threshold, or `None` if not set.
-pub fn get_nullmove_material_threshold() -> Option<i32> {
-    let v = NULLMOVE_MATERIAL_THRESHOLD.load(AtomicOrdering::SeqCst);
-    if v < 0 { None } else { Some(v) }
-}
+// Null-move helpers removed.
 
 /// Quiescence search extracted from Board::quiesce
 pub fn quiesce(
@@ -241,12 +165,15 @@ pub fn quiesce(
 
     moves_buf.clear();
     board.generate_tactical_moves_into(moves_buf);
-    // Use SEE to prune obviously losing captures and order by SEE value
-    moves_buf.retain(|m| {
-        let s = see_capture(board, m);
-        s >= 0
-    });
-    moves_buf.sort_by_key(|m| -see_capture(board, m));
+    // Optionally disable SEE-based pruning/ordering via env var for diagnostics.
+    if env::var_os("CHESS_DISABLE_SEE").is_none() {
+        // Use SEE to prune obviously losing captures and order by SEE value
+        moves_buf.retain(|m| {
+            let s = see_capture(board, m);
+            s >= 0
+        });
+        moves_buf.sort_by_key(|m| -see_capture(board, m));
+    }
     order_moves(ctx, board, &mut moves_buf[..], 0, None);
 
     let mut best_score = stand_pat_score;

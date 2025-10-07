@@ -88,8 +88,6 @@ impl SearchEngine for SimpleEngine {
 
         // Configure move ordering heuristics globally based on option (default = enabled)
         crate::ordering::set_ordering_enabled(opts.move_ordering.unwrap_or(true));
-    // Configure null-move material threshold if provided
-    crate::search::set_nullmove_material_threshold(opts.nullmove_material_threshold);
 
         let best = if let Some(max_time) = opts.max_time {
             // time-limited search
@@ -116,8 +114,7 @@ impl SearchEngine for SimpleEngine {
             return Err(SearchError::MissingOptions);
         };
 
-    // Clear any threshold after search so it doesn't leak to other searches
-    crate::search::set_nullmove_material_threshold(None);
+    // Null-move pruning disabled; nothing to clear here.
 
     let elapsed_ms = start.elapsed().as_millis();
         let nodes = crate::search_control::get_node_count();
