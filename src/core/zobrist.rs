@@ -48,7 +48,7 @@ impl ZobristKeys {
 
 pub static ZOBRIST: Lazy<ZobristKeys> = Lazy::new(ZobristKeys::new);
 
-pub fn piece_to_zobrist_index(piece: Piece) -> usize {
+pub const fn piece_to_zobrist_index(piece: Piece) -> usize {
     match piece {
         Piece::Pawn => 0,
         Piece::Knight => 1,
@@ -59,13 +59,13 @@ pub fn piece_to_zobrist_index(piece: Piece) -> usize {
     }
 }
 
-pub fn color_to_zobrist_index(color: Color) -> usize {
+pub const fn color_to_zobrist_index(color: Color) -> usize {
     match color {
         Color::White => 0,
         Color::Black => 1,
     }
 }
 
-pub fn square_to_zobrist_index(sq: Square) -> usize {
+pub const fn square_to_zobrist_index(sq: Square) -> usize {
     sq.0 * 8 + sq.1
 }

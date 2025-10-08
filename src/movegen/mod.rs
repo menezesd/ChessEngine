@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 pub mod movegen;
 pub mod ordering;
 pub mod see;

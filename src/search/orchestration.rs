@@ -3,7 +3,8 @@ use crate::core::types::{format_square, Move, MoveList};
 use crate::core::board::Board;
 use crate::uci::info as uci_info;
 use crate::search::control as search_control;
-use crate::core::constants;
+use crate::core::config::search::*;
+use crate::core::config::evaluation::*;
 use std::sync::{Arc, Mutex, mpsc::Sender};
 use std::time::{Duration, Instant};
 
@@ -41,7 +42,7 @@ pub fn iterative_deepening_with_sink(
             let mut completed = false;
 
             if let Some(ps) = prev_score {
-                if depth > 2 && ps.abs() < (constants::MATE_SCORE / 2) {
+                if depth > 2 && ps.abs() < (MATE_SCORE / 2) {
                     let mut alpha = ps - 10;
                     let mut beta = ps + 10;
                     let mut margin = 10;
@@ -136,8 +137,8 @@ pub fn iterative_deepening_with_sink(
                             seldepth: Some(depth),
                             ponder: None,
                         };
-                        if score.abs() > (constants::MATE_SCORE / 2) {
-                            let mate_in = (constants::MATE_SCORE - score.abs() + 1) / 2;
+                        if score.abs() > (MATE_SCORE / 2) {
+                            let mate_in = (MATE_SCORE - score.abs() + 1) / 2;
                             info.score_mate = Some(mate_in);
                         } else {
                             info.score_cp = Some(score);
@@ -176,9 +177,6 @@ pub fn time_limited_search_with_sink(
         let mut depth = 1u32;
         let mut last_depth_time = Duration::from_millis(1);
 
-        const SAFETY_MARGIN: Duration = Duration::from_millis(5);
-        const TIME_GROWTH_FACTOR: f32 = 2.0;
-
         let mut prev_score: Option<i32> = None;
         while start_time.elapsed() + SAFETY_MARGIN < max_time {
             // Bump generation each iterative step so TT replacement prefers newer entries
@@ -210,7 +208,7 @@ pub fn time_limited_search_with_sink(
             let mut this_best_score: i32 = 0;
             let mut completed = false;
             if let Some(ps) = prev_score {
-                if depth > 2 && ps.abs() < (constants::MATE_SCORE / 2) {
+                if depth > 2 && ps.abs() < (MATE_SCORE / 2) {
                     let mut margin = 10i32;
                     while margin <= 500 {
                         if start_time.elapsed() + SAFETY_MARGIN >= max_time {
@@ -290,8 +288,8 @@ pub fn time_limited_search_with_sink(
                             seldepth: None,
                             ponder: None,
                         };
-                        if this_best_score.abs() > (constants::MATE_SCORE / 2) {
-                            let mate_in = (constants::MATE_SCORE - this_best_score.abs() + 1) / 2;
+                        if this_best_score.abs() > (MATE_SCORE / 2) {
+                            let mate_in = (MATE_SCORE - this_best_score.abs() + 1) / 2;
                             info.score_mate = Some(mate_in);
                         } else {
                             info.score_cp = Some(this_best_score);
@@ -350,7 +348,7 @@ pub fn find_best_move_with_context(
     _is_ponder: bool,
 ) -> Option<Move> {
     let mut best_move: Option<Move> = None;
-    let mut _best_score = -constants::MATE_SCORE * 2;
+    let mut _best_score = -MATE_SCORE * 2;
 
     let mut legal_moves: crate::core::types::MoveList = crate::core::types::MoveList::new();
     board.generate_moves_into(&mut legal_moves);
@@ -383,9 +381,9 @@ pub fn find_best_move_with_context(
     for depth in 1..=max_depth {
         let _depth_start = Instant::now();
         let _nodes_before = crate::search::control::get_node_count();
-        let mut alpha = -constants::MATE_SCORE * 2;
-        let beta = constants::MATE_SCORE * 2;
-        let mut current_best_score = -constants::MATE_SCORE * 2;
+        let mut alpha = -MATE_SCORE * 2;
+        let beta = MATE_SCORE * 2;
+        let mut current_best_score = -MATE_SCORE * 2;
         let mut current_best_move: Option<Move> = None;
 
         // Optional: order moves using hash move from TT
@@ -401,7 +399,7 @@ pub fn find_best_move_with_context(
     let mut mv_buf: crate::core::types::MoveList = crate::core::types::MoveList::new();
         for m in &root_moves {
             let info = board.make_move(m);
-            let score = -crate::search::algorithms::negamax(board, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut crate::ordering::OrderingContext::new(256));
+            let score = -crate::search::algorithms::negamax(board, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut crate::ordering::OrderingContext::new(256), 0);
             board.unmake_move(m, info);
 
             if score > current_best_score {
@@ -450,8 +448,8 @@ pub fn find_best_move_with_context(
                     seldepth: Some(depth),
                     ponder: None,
                 };
-                if _best_score.abs() > (constants::MATE_SCORE / 2) {
-                    let mate_in = (constants::MATE_SCORE - _best_score.abs() + 1) / 2;
+                if _best_score.abs() > (MATE_SCORE / 2) {
+                    let mate_in = (MATE_SCORE - _best_score.abs() + 1) / 2;
                     info.score_mate = Some(mate_in);
                 } else {
                     info.score_cp = Some(_best_score);
@@ -492,9 +490,6 @@ pub fn find_best_move_with_time_context(
     let mut depth = 1;
     let mut last_depth_time = Duration::from_millis(1); // Prevent div-by-zero on first estimate
 
-    const SAFETY_MARGIN: Duration = Duration::from_millis(5);
-    const TIME_GROWTH_FACTOR: f32 = 2.0; // Each depth takes ~2× longer
-
     while start_time.elapsed() + SAFETY_MARGIN < max_time {
         let elapsed = start_time.elapsed();
         let time_remaining = max_time.checked_sub(elapsed).unwrap_or_default();
@@ -507,9 +502,9 @@ pub fn find_best_move_with_time_context(
 
         let depth_start = Instant::now();
 
-        let mut alpha = -constants::MATE_SCORE * 2;
-        let beta = constants::MATE_SCORE * 2;
-        let mut best_score = -constants::MATE_SCORE * 2;
+        let mut alpha = -MATE_SCORE * 2;
+        let beta = MATE_SCORE * 2;
+        let mut best_score = -MATE_SCORE * 2;
     let mut legal_moves: crate::core::types::MoveList = crate::core::types::MoveList::new();
     board.generate_moves_into(&mut legal_moves);
 
@@ -541,7 +536,7 @@ pub fn find_best_move_with_time_context(
             }
 
             let info = board.make_move(m);
-            let score = -crate::search::algorithms::negamax(board, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut crate::ordering::OrderingContext::new(256));
+            let score = -crate::search::algorithms::negamax(board, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut crate::ordering::OrderingContext::new(256), 0);
             board.unmake_move(m, info);
 
             if score > best_score {
@@ -615,8 +610,8 @@ pub fn find_best_move_with_time_context(
                     seldepth: None,
                     ponder: None,
                 };
-                if best_score.abs() > (constants::MATE_SCORE / 2) {
-                    let mate_in = (constants::MATE_SCORE - best_score.abs() + 1) / 2;
+                if best_score.abs() > (MATE_SCORE / 2) {
+                    let mate_in = (MATE_SCORE - best_score.abs() + 1) / 2;
                     info.score_mate = Some(mate_in);
                 } else {
                     info.score_cp = Some(best_score);

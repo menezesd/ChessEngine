@@ -26,7 +26,7 @@ fn perft_positions() {
     ];
 
     for position in TEST_POSITIONS {
-        let mut board = Board::from_fen(position.fen);
+        let mut board = Board::try_from_fen(position.fen).expect("Invalid FEN in test");
         for &(depth, expected) in position.depths {
             let nodes = board.perft(depth);
             assert_eq!(nodes, expected, "Perft failed for {} at depth {}", position.name, depth);
@@ -38,7 +38,7 @@ fn perft_positions() {
 
 #[test]
 fn test_draw_detection_50_move() {
-    let mut board = Board::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1");
+    let mut board = Board::try_from_fen("8/8/8/8/8/8/8/K6k w - - 0 1").expect("Invalid FEN in test");
     board.halfmove_clock = 99;
     board.position_history.clear();
     board.position_history.push(board.hash);
@@ -76,7 +76,7 @@ fn endgame_no_null_move() {
     // Simple K+P vs K position where null-move pruning may be unsafe.
     // White to move: white has king on e2 and pawn on a2; black king on a8.
     let fen = "k7/8/8/8/8/8/P7/4K3 w - - 0 1";
-    let mut board = Board::from_fen(fen);
+    let mut board = Board::try_from_fen(fen).expect("Invalid FEN in test");
     let mut tt = TranspositionTable::new(1);
     // Run a shallow search: ensure it completes and returns a legal move (or None if mate/stalemate)
     let mv = chess_engine::search::orchestration::find_best_move_with_context(&mut board, &mut tt, 3, None, None, false);

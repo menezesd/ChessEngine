@@ -54,11 +54,11 @@ impl BitboardUtils {
     ///
     /// This helper is handy when iterating bitboards and converting
     /// trailing-zero indices into board coordinates.
-    pub fn square_from_index(index: usize) -> Square {
+    pub const fn square_from_index(index: usize) -> Square {
         Square(index / 8, index % 8)
     }
 
-    pub fn file_mask(file: usize) -> Bitboard {
+    pub const fn file_mask(file: usize) -> Bitboard {
         Self::FILE_A << file
     }
 
@@ -76,7 +76,7 @@ pub const CASTLE_WHITE_QUEENSIDE: u8 = 0b0010;
 pub const CASTLE_BLACK_KINGSIDE: u8 = 0b0100;
 pub const CASTLE_BLACK_QUEENSIDE: u8 = 0b1000;
 
-pub fn castling_bit(color: Color, side: char) -> u8 {
+pub const fn castling_bit(color: Color, side: char) -> u8 {
     match (color, side) {
         (Color::White, 'K') => CASTLE_WHITE_KINGSIDE,
         (Color::White, 'Q') => CASTLE_WHITE_QUEENSIDE,
@@ -103,5 +103,111 @@ pub fn color_from_index(index: usize) -> Color {
         0 => Color::White,
         1 => Color::Black,
         _ => unreachable!("invalid color index"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::types::{Square, square_index};
+
+    #[test]
+    fn test_square_from_index() {
+        assert_eq!(BitboardUtils::square_from_index(0), Square(0, 0)); // a1
+        assert_eq!(BitboardUtils::square_from_index(7), Square(0, 7)); // h1
+        assert_eq!(BitboardUtils::square_from_index(8), Square(1, 0)); // a2
+        assert_eq!(BitboardUtils::square_from_index(63), Square(7, 7)); // h8
+    }
+
+    #[test]
+    fn test_file_mask() {
+        assert_eq!(BitboardUtils::file_mask(0), BitboardUtils::FILE_A);
+        assert_eq!(BitboardUtils::file_mask(1), BitboardUtils::FILE_B);
+        assert_eq!(BitboardUtils::file_mask(7), BitboardUtils::FILE_H);
+    }
+
+    #[test]
+    fn test_knight_attacks() {
+        // Test center knight
+        let e4 = Square(4, 4); // e4 is index 36
+        let attacks = BitboardUtils::knight_attacks(e4);
+        // Knight from e4 should attack: f7, d7, f5, d5, g6, c6, g2, c2
+        let expected_squares = vec![
+            Square(5, 6), Square(5, 2), // f7, d3
+            Square(3, 6), Square(3, 2), // f5, d1
+            Square(6, 5), Square(6, 3), // g6, c5
+            Square(2, 5), Square(2, 3), // g2, c3
+        ];
+        for sq in expected_squares {
+            assert!(attacks & (1u64 << square_index(sq)) != 0, "Missing attack on {:?}", sq);
+        }
+        assert_eq!(attacks.count_ones(), 8); // Center knight has 8 attacks
+    }
+
+    #[test]
+    fn test_king_attacks() {
+        // Test center king
+        let e4 = Square(4, 4);
+        let attacks = BitboardUtils::king_attacks(e4);
+        // King from e4 should attack all 8 adjacent squares
+        let expected_squares = vec![
+            Square(3, 3), Square(3, 4), Square(3, 5), // d3, e3, f3
+            Square(4, 3),              Square(4, 5), // d4,     f4
+            Square(5, 3), Square(5, 4), Square(5, 5), // d5, e5, f5
+        ];
+        for sq in expected_squares {
+            assert!(attacks & (1u64 << square_index(sq)) != 0, "Missing attack on {:?}", sq);
+        }
+        assert_eq!(attacks.count_ones(), 8);
+    }
+
+    #[test]
+    fn test_corner_knight_attacks() {
+        // Test corner knight (should have only 2 attacks)
+        let a1 = Square(0, 0);
+        let attacks = BitboardUtils::knight_attacks(a1);
+        assert_eq!(attacks.count_ones(), 2); // Corner knight has 2 attacks
+        // Should attack b3 and c2
+        assert!(attacks & (1u64 << square_index(Square(2, 1))) != 0); // b3
+        assert!(attacks & (1u64 << square_index(Square(1, 2))) != 0); // c2
+    }
+
+    #[test]
+    fn test_castling_bit() {
+        assert_eq!(castling_bit(Color::White, 'K'), CASTLE_WHITE_KINGSIDE);
+        assert_eq!(castling_bit(Color::White, 'Q'), CASTLE_WHITE_QUEENSIDE);
+        assert_eq!(castling_bit(Color::Black, 'K'), CASTLE_BLACK_KINGSIDE);
+        assert_eq!(castling_bit(Color::Black, 'Q'), CASTLE_BLACK_QUEENSIDE);
+        assert_eq!(castling_bit(Color::White, 'X'), 0);
+    }
+
+    #[test]
+    fn test_piece_from_index() {
+        assert_eq!(piece_from_index(0), Piece::Pawn);
+        assert_eq!(piece_from_index(1), Piece::Knight);
+        assert_eq!(piece_from_index(2), Piece::Bishop);
+        assert_eq!(piece_from_index(3), Piece::Rook);
+        assert_eq!(piece_from_index(4), Piece::Queen);
+        assert_eq!(piece_from_index(5), Piece::King);
+    }
+
+    #[test]
+    fn test_color_from_index() {
+        assert_eq!(color_from_index(0), Color::White);
+        assert_eq!(color_from_index(1), Color::Black);
+    }
+
+    #[test]
+    fn test_file_constants() {
+        // Test that file constants are correct
+        assert_eq!(BitboardUtils::FILE_A.count_ones(), 8);
+        assert_eq!(BitboardUtils::FILE_H.count_ones(), 8);
+        assert_eq!(BitboardUtils::FILE_A & BitboardUtils::FILE_H, 0); // No overlap
+
+        // Test NOT_FILE constants
+        assert_eq!(BitboardUtils::NOT_FILE_A.count_ones(), 56);
+        assert_eq!(BitboardUtils::NOT_FILE_H.count_ones(), 56);
+        assert_eq!(BitboardUtils::NOT_FILE_AB.count_ones(), 48);
+        assert_eq!(BitboardUtils::NOT_FILE_GH.count_ones(), 48);
     }
 }

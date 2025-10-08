@@ -67,4 +67,4 @@ pub fn run_uci_loop() {
 }
 
 // Re-export for backward compatibility
-pub use protocol::{parse_position_command, format_uci_move};
+pub use protocol::format_uci_move;

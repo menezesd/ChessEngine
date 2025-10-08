@@ -2,6 +2,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
 use std::time::Duration;
 
+#[derive(Debug, Clone)]
+pub struct SearchLimits {
+    pub depth: Option<u32>,
+    pub movetime: Option<Duration>,
+    pub wtime: Option<Duration>,
+    pub btime: Option<Duration>,
+    pub winc: Option<Duration>,
+    pub binc: Option<Duration>,
+    pub ponder: bool,
+    pub nodes: Option<u64>,
+}
+
 use crate::core::board::Board;
 use crate::engine::{SimpleEngine, SearchOptions, SearchEngine};
 use crate::search::control as search_control;
@@ -11,7 +23,6 @@ use crate::uci::protocol::{UciCommand, UciResponse};
 /// Search orchestrator that manages search threads and state
 pub struct SearchOrchestrator {
     board: Board,
-    tt: TranspositionTable,
     search_thread: Option<JoinHandle<()>>,
     search_best: Option<Arc<Mutex<Option<crate::core::types::Move>>>>,
     searching: bool,
@@ -23,7 +34,6 @@ impl SearchOrchestrator {
     pub fn new(info_sender: std::sync::mpsc::Sender<crate::uci::info::Info>) -> Self {
         Self {
             board: Board::new(),
-            tt: TranspositionTable::new(1024),
             search_thread: None,
             search_best: None,
             searching: false,
@@ -52,7 +62,13 @@ impl SearchOrchestrator {
             UciCommand::Position { fen, moves } => {
                 // Set position from FEN or startpos
                 if let Some(fen_str) = fen {
-                    self.board = Board::from_fen(&fen_str);
+                    match Board::try_from_fen(fen_str) {
+                        Ok(board) => self.board = board,
+                        Err(e) => {
+                            eprintln!("Invalid FEN: {} - {:?}", fen_str, e);
+                            return vec![];
+                        }
+                    }
                 } else {
                     self.board = Board::new();
                 }
@@ -60,7 +76,7 @@ impl SearchOrchestrator {
                 // Apply moves
                 for move_str in moves {
                     let mut board_copy = self.board.clone();
-                    if let Some(mv) = crate::uci::protocol::parse_uci_move(&mut board_copy, &move_str) {
+                    if let Some(mv) = crate::uci::protocol::parse_uci_move(&mut board_copy, move_str) {
                         self.board.make_move(&mv);
                     } else {
                         eprintln!("Invalid move: {}", move_str);
@@ -75,11 +91,21 @@ impl SearchOrchestrator {
                 btime,
                 winc,
                 binc,
-                infinite,
+                infinite: _,
                 ponder,
                 nodes,
             } => {
-                self.start_search(*depth, *movetime, *wtime, *btime, *winc, *binc, *infinite, *ponder, *nodes)
+                let limits = SearchLimits {
+                    depth: *depth,
+                    movetime: *movetime,
+                    wtime: *wtime,
+                    btime: *btime,
+                    winc: *winc,
+                    binc: *binc,
+                    ponder: *ponder,
+                    nodes: *nodes,
+                };
+                self.start_search(limits)
             }
             UciCommand::Stop => {
                 self.stop_search()
@@ -98,18 +124,7 @@ impl SearchOrchestrator {
         }
     }
 
-    fn start_search(
-        &mut self,
-        depth: Option<u32>,
-        movetime: Option<Duration>,
-        wtime: Option<Duration>,
-        btime: Option<Duration>,
-        winc: Option<Duration>,
-        binc: Option<Duration>,
-        infinite: bool,
-        ponder: bool,
-        nodes: Option<u64>,
-    ) -> Vec<UciResponse> {
+    fn start_search(&mut self, limits: SearchLimits) -> Vec<UciResponse> {
         // Stop any existing search
         if self.searching {
             search_control::set_stop(true);
@@ -121,16 +136,16 @@ impl SearchOrchestrator {
         }
 
         // Set pondering flag
-        self.pondering = ponder;
+        self.pondering = limits.ponder;
 
         // Set node limit if specified
-        if let Some(n) = nodes {
+        if let Some(n) = limits.nodes {
             search_control::set_node_limit(n);
         }
 
         // Compute movetime if not specified but time controls are
-        let computed_movetime = movetime.or_else(|| {
-            self.compute_movetime(wtime, btime, winc, binc)
+        let computed_movetime = limits.movetime.or_else(|| {
+            self.compute_movetime(limits.wtime, limits.btime, limits.winc, limits.binc)
         });
 
         // Clone state for background search
@@ -142,7 +157,7 @@ impl SearchOrchestrator {
         search_control::reset();
 
         let info_tx = self.info_sender.clone();
-        let is_ponder = ponder;
+        let is_ponder = limits.ponder;
 
         // Spawn search thread
         let handle = spawn(move || {
@@ -151,9 +166,8 @@ impl SearchOrchestrator {
             let mut local_tt = tt_clone;
 
             let opts = Self::build_search_options(
-                depth,
+                limits.depth,
                 computed_movetime,
-                infinite,
                 is_ponder,
                 Some(bm_thread),
                 Some(info_tx),
@@ -249,7 +263,6 @@ impl SearchOrchestrator {
     fn build_search_options(
         depth: Option<u32>,
         movetime: Option<Duration>,
-        infinite: bool,
         is_ponder: bool,
         sink: Option<Arc<Mutex<Option<crate::core::types::Move>>>>,
         info_sender: Option<std::sync::mpsc::Sender<crate::uci::info::Info>>,

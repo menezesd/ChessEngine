@@ -2,70 +2,66 @@ use crate::transposition::transposition_table::TranspositionTable;
 use crate::core::types::{Move, MoveList};
 use crate::core::board::Board;
 use crate::movegen::ordering::OrderingContext;
-use crate::transposition::transposition_table::BoundType;
 use crate::evaluation::eval;
-use crate::core::constants;
+// use crate::core::constants;
+use crate::core::config::evaluation::*;
 use crate::movegen::ordering::order_moves;
-
-/// Check if the current position is likely zugzwang (only king and pawns)
-/// In such positions, null move pruning is unsafe
-fn is_zugzwang_position(board: &Board) -> bool {
-    let color_idx = if board.white_to_move { 0 } else { 1 };
-    let opponent_idx = 1 - color_idx;
-    
-    // Count pieces for the side to move
-    let mut piece_count = 0;
-    for piece_type in 0..6 { // Pawn, Knight, Bishop, Rook, Queen, King
-        piece_count += board.bitboards[color_idx][piece_type].count_ones();
-    }
-    
-    // If we have very few pieces (king + pawns only), likely zugzwang
-    // Also check if opponent has many pieces (we might need to move to defend)
-    let opponent_piece_count = (0..6).map(|pt| board.bitboards[opponent_idx][pt].count_ones()).sum::<u32>();
-    
-    piece_count <= 4 && opponent_piece_count > 3
-}
+use crate::search::pruning::*;
+use crate::search::move_selector::{MoveSelector, TranspositionTableHelper};
+use crate::search::extensions::*;
+use crate::search::lmr::*;
+use crate::search::quiescence;
 
 /// Negamax search with alpha-beta pruning
+#[allow(clippy::too_many_arguments)]
 pub fn negamax(
     board: &mut Board,
     tt: &mut TranspositionTable,
     depth: u32,
-    mut alpha: i32,
-    mut beta: i32,
+    alpha: i32,
+    beta: i32,
     moves_buf: &mut MoveList,
     ctx: &mut OrderingContext,
+    ply: usize,
 ) -> i32 {
-    let original_alpha = alpha;
+    // Mate distance pruning: if we're already mating, don't search for longer mates
+    let (alpha, beta) = mate_distance_pruning(alpha, beta, ply);
+    if alpha >= beta {
+        return alpha;
+    }
+
+    let _original_alpha = alpha;
     let current_hash = board.hash;
 
-        // TT probe
-        let mut hash_move: Option<Move> = None;
-        if let Some(entry) = tt.probe(current_hash) {
-            if entry.depth >= depth {
-                match entry.bound_type {
-                    BoundType::Exact => return entry.score,
-                    BoundType::LowerBound => alpha = alpha.max(entry.score),
-                    BoundType::UpperBound => beta = beta.min(entry.score),
-                }
-                if alpha >= beta {
-                    return entry.score;
-                }
-            }
-            hash_move = entry.best_move;
-        }
+    // TT probe using helper
+    let (mut hash_move, alpha, beta, tt_result) = TranspositionTableHelper::probe_and_adjust_bounds(tt, current_hash, depth, alpha, beta);
 
-        // Internal Iterative Deepening (IID): if we have no TT move and depth is large,
-        // do a shallow search (depth-2) to populate the TT with a good move for ordering.
-        if hash_move.is_none() && depth >= 3 {
-            // perform a reduced-depth search to get a usable TT hint
-            let _ = negamax(board, tt, depth - 2, alpha, beta, moves_buf, ctx);
-            if let Some(entry) = tt.probe(current_hash) {
-                hash_move = entry.best_move;
-            }
-        }
+    if let Some(score) = tt_result {
+        return score;
+    }
 
-        if crate::search::control::should_stop() {
+    // Internal Iterative Deepening (IID): if we have no TT move and depth is large,
+    // do a shallow search (depth-2) to populate the TT with a good move for ordering.
+    if hash_move.is_none() {
+        hash_move = TranspositionTableHelper::internal_iterative_deepening(tt, board, current_hash, depth, alpha, beta, moves_buf, ctx, ply);
+    }
+
+    // Razoring: at shallow depths, if evaluation + margin is below beta, drop to quiescence
+    if depth <= 3 && !board.is_in_check(board.current_color()) {
+        let eval = crate::evaluation::eval::evaluate(board);
+        let margin = 200 * depth as i32;
+        if eval + margin < beta {
+            let mut child_buf = std::mem::take(&mut ctx.child_buf);
+            child_buf.clear();
+            let score = quiescence::quiesce(board, alpha, beta, &mut child_buf, ctx);
+            ctx.child_buf = child_buf;
+            return score;
+        }
+    }
+
+    // Singular extension: if we have a TT move and it's much better than alternatives,
+    // extend the search for this move
+    let singular_ext = singular_extension(board, tt, depth, hash_move, current_hash, moves_buf, ctx, ply);        if crate::search::control::should_stop() {
             return 0;
         }
 
@@ -79,172 +75,133 @@ pub fn negamax(
             // Take the child buffer for quiesce
             let mut child_buf = std::mem::take(&mut ctx.child_buf);
             child_buf.clear();
-            let score = quiesce(board, alpha, beta, &mut child_buf, ctx);
+            let score = quiescence::quiesce(board, alpha, beta, &mut child_buf, ctx);
             ctx.child_buf = child_buf;
             return score;
         }
 
-        // Null-move pruning (Publius-style) with verification search on cutoff.
-        // Only apply when depth is sufficiently large, not in check, not zugzwang, and not near mate
-        if depth >= 3 && !board.is_in_check(board.current_color()) 
-           && !is_zugzwang_position(board) 
-           && beta.abs() < (constants::MATE_SCORE - 100) {
-            
-            // Adaptive reduction: deeper searches can afford larger reductions
-            let r = if depth >= 6 { 3u32 } else { 2u32 };
-            let null_info = board.make_null_move();
-            let null_score = -negamax(board, tt, depth - 1 - r, -beta, -beta + 1, moves_buf, ctx);
-            board.unmake_null_move(null_info);
-            
-            if null_score >= beta {
-                // Verification search at the same reduced depth to confirm cutoff
-                let verify_score = -negamax(board, tt, depth - 1 - r, -beta, -alpha, moves_buf, ctx);
-                if verify_score >= beta {
-                    tt.store(current_hash, depth, verify_score, BoundType::LowerBound, None);
-                    return verify_score;
-                }
-                // Otherwise, fall through and search normally (no premature cutoff).
-            }
+        // Null-move pruning with verification search on cutoff.
+        if let Some(null_prune_score) = null_move_pruning(board, tt, depth, beta, alpha, moves_buf, ctx, ply, current_hash) {
+            return null_prune_score;
         }
 
-        moves_buf.clear();
-        board.generate_moves_into(moves_buf);
-        // Use ordering heuristics (TT move already extracted above)
-        order_moves(ctx, board, &mut moves_buf[..], depth as usize, hash_move);
+        let (best_score, best_move_found) = search_moves(board, tt, depth, alpha, beta, hash_move, singular_ext, ctx, ply);
 
-        if moves_buf.is_empty() {
-            let current_color = board.current_color();
-            return if board.is_in_check(current_color) {
-                -(constants::MATE_SCORE - (100 - depth as i32))
-            } else {
-                0
-            };
-        }
-
-        if let Some(hm) = &hash_move {
-            if let Some(pos) = moves_buf.iter().position(|m| m == hm) {
-                moves_buf.swap(0, pos);
-            }
-        }
-
-        let mut best_score: i32 = -constants::MATE_SCORE * 2;
-        let mut best_move_found: Option<Move> = None;
-
-        // Take the reusable child buffer out of the ordering context so we can
-        // borrow it independently without causing multiple mutable borrows of ctx.
-        let mut child_buf = std::mem::take(&mut ctx.child_buf);
-        child_buf.clear();
-        child_buf.reserve(moves_buf.len().max(16));
-        for (i, m) in moves_buf.iter().enumerate() {
-            if crate::search::control::should_stop() {
-                break;
-            }
-            // Capture attacker piece type before making the move (board state will change)
-            let attacker_piece = board.piece_at(m.from).map(|(_c, p)| p);
-            // Futility pruning: at very shallow depths (near leaf), skip quiet moves
-            // that are unlikely to raise alpha. This is a conservative heuristic.
-            let is_quiet = m.captured_piece.is_none() && m.promotion.is_none();
-            if is_quiet && depth <= 2 {
-                // small margin per ply (centipawns)
-                let margin = if depth == 1 { 150 } else { 80 };
-                let stand_pat = eval::evaluate(board);
-                if stand_pat + margin <= alpha {
-                    // treat as a non-improving move: continue to next move
-                    continue;
-                }
-            }
-
-            // Prepare to make the move and search. We'll apply Late Move Reductions (LMR)
-            // for non-captures/non-promotions that appear late in the move ordering.
-            let info = board.make_move(m);
-
-            let mut score: i32;
-            if i == 0 {
-                // principal variation move - full depth
-                score = -negamax(board, tt, depth - 1, -beta, -alpha, &mut child_buf, ctx);
-            } else {
-                let mut did_lmr = false;
-                let mut reduced_score = -constants::MATE_SCORE * 2;
-
-                // Determine if LMR is applicable: non-capture, no promotion, and depth >= 3
-                if m.captured_piece.is_none() && m.promotion.is_none() && depth >= 3 {
-                    // apply reductions only for sufficiently late moves
-                    if i >= 4 {
-                        // basic reduction formula: 1 + (i / 6), capped to depth-2
-                        let mut red = 1u32 + (i as u32 / 6);
-                        if red > depth.saturating_sub(2) {
-                            red = depth.saturating_sub(2);
-                        }
-                        if red > 0 {
-                            did_lmr = true;
-                            let reduced_depth = depth - 1 - red;
-                            reduced_score = -negamax(board, tt, reduced_depth, -alpha - 1, -alpha, &mut child_buf, ctx);
-                        }
-                    }
-                }
-
-                if did_lmr {
-                    score = reduced_score;
-                    // If reduced search suggests the move might be interesting, do full null-window then full-window re-search
-                    if score > alpha && score < beta {
-                        score = -negamax(board, tt, depth - 1, -alpha - 1, -alpha, &mut child_buf, ctx);
-                        if score > alpha && score < beta {
-                            score = -negamax(board, tt, depth - 1, -beta, -alpha, &mut child_buf, ctx);
-                        }
-                    }
-                } else {
-                    // No reduction: PVS-style search
-                    score = -negamax(board, tt, depth - 1, -alpha - 1, -alpha, &mut child_buf, ctx);
-                    if score > alpha && score < beta {
-                        score = -negamax(board, tt, depth - 1, -beta, -alpha, &mut child_buf, ctx);
-                    }
-                }
-            }
-
-            board.unmake_move(m, info);
-
-            // If this move improved best_score, record history for non-capture moves
-            if score > best_score {
-                best_score = score;
-                best_move_found = Some(*m);
-                if m.captured_piece.is_none() {
-                    if let Some(piece) = attacker_piece {
-                        // small increment for history
-                        ctx.record_history(piece, m.from.0 as u8, m.to.0 as u8, 1);
-                    }
-                }
-            }
-
-            alpha = alpha.max(best_score);
-            // On beta cutoff, record killer for non-captures and boost history
-            if alpha >= beta {
-                if m.captured_piece.is_none() {
-                    ctx.record_killer(depth as usize, *m);
-                    if let Some(piece) = attacker_piece {
-                        ctx.record_history(piece, m.from.0 as u8, m.to.0 as u8, 32);
-                    }
-                }
-                break;
-            }
-        }
-
-        let bound_type = if best_score <= original_alpha {
-            BoundType::UpperBound
+        let bound_type = if best_score <= _original_alpha {
+            crate::transposition::transposition_table::BoundType::UpperBound
         } else if best_score >= beta {
-            BoundType::LowerBound
+            crate::transposition::transposition_table::BoundType::LowerBound
         } else {
-            BoundType::Exact
+            crate::transposition::transposition_table::BoundType::Exact
         };
 
-        // Return the child buffer to the ordering context before storing TT and returning
-        ctx.child_buf = child_buf;
-
-        tt.store(current_hash, depth, best_score, bound_type, best_move_found);
+        TranspositionTableHelper::store_result(tt, current_hash, depth, best_score, bound_type, best_move_found);
 
         best_score
     }
 
-/// Quiescence search to avoid horizon effect
+/// Search all moves from the current position and return the best score and move
+fn search_moves(
+    board: &mut Board,
+    tt: &mut TranspositionTable,
+    depth: u32,
+    mut alpha: i32,
+    beta: i32,
+    hash_move: Option<Move>,
+    singular_ext: u32,
+    ctx: &mut OrderingContext,
+    ply: usize,
+) -> (i32, Option<Move>) {
+    let mut move_selector = MoveSelector::new();
+    move_selector.generate_and_order(board, ctx, depth, hash_move);
+
+    if move_selector.is_empty() {
+        let current_color = board.current_color();
+        let score = if board.is_in_check(current_color) {
+            -(MATE_SCORE - (100 - depth as i32))
+        } else {
+            0
+        };
+        return (score, None);
+    }
+
+    let mut best_score = -MATE_SCORE * 2;
+    let mut best_move_found = None;
+
+    // Take the reusable child buffer out of the ordering context
+    let mut child_buf = std::mem::take(&mut ctx.child_buf);
+    child_buf.clear();
+    child_buf.reserve(move_selector.len().max(16));
+
+    while let Some((move_idx, m)) = move_selector.next() {
+        if crate::search::control::should_stop() {
+            break;
+        }
+
+        // Capture attacker piece type before making the move (board state will change)
+        let attacker_piece = board.piece_at(m.from).map(|(_c, p)| p);
+
+        // Apply pruning techniques
+        let is_quiet = m.captured_piece.is_none() && m.promotion.is_none();
+        if should_futility_prune(board, depth, alpha, is_quiet) {
+            continue;
+        }
+        if should_late_move_prune(depth, move_idx, is_quiet) {
+            continue;
+        }
+
+        // Make the move and calculate extensions
+        let info = board.make_move(m);
+        let check_ext = check_extension(board, move_idx, depth);
+        let total_extension = check_ext + singular_ext;
+
+        // Search the move with potential LMR
+        let score = if move_idx == 0 {
+            // Principal variation move - full depth
+            -negamax(board, tt, depth - 1 + total_extension, -beta, -alpha, &mut child_buf, ctx, ply + 1)
+        } else {
+            // Apply LMR for non-PV moves
+            apply_lmr_and_research(
+                board, tt, depth, total_extension, alpha, beta,
+                move_idx, !is_quiet, m.promotion.is_some(),
+                &mut child_buf, ctx, ply
+            )
+        };
+
+        board.unmake_move(m, info);
+
+        // Update best score and move
+        if score > best_score {
+            best_score = score;
+            best_move_found = Some(*m);
+
+            // Record history for non-capture moves
+            if m.captured_piece.is_none() {
+                if let Some(piece) = attacker_piece {
+                    ctx.record_history(piece, m.from.0 as u8, m.to.0 as u8, 1);
+                }
+            }
+        }
+
+        alpha = alpha.max(best_score);
+
+        // Beta cutoff - record killer and history, then break
+        if alpha >= beta {
+            if m.captured_piece.is_none() {
+                ctx.record_killer(depth as usize, *m);
+                if let Some(piece) = attacker_piece {
+                    ctx.record_history(piece, m.from.0 as u8, m.to.0 as u8, 32);
+                }
+            }
+            break;
+        }
+    }
+
+    // Return the child buffer to the ordering context
+    ctx.child_buf = child_buf;
+
+    (best_score, best_move_found)
+}
 pub fn quiesce(
     board: &mut Board,
     mut alpha: i32,
@@ -279,14 +236,13 @@ pub fn quiesce(
         order_moves(ctx, board, &mut local_buf[..], 0, None);
 
         let mut best_score = stand_pat_score;
-        let tactical_moves = local_buf.clone();
-        for m in tactical_moves {
+        for m in &local_buf {
             if crate::search::control::should_stop() {
                 break;
             }
-            let info = board.make_move(&m);
+            let info = board.make_move(m);
             let score = -quiesce(board, -beta, -alpha, &mut MoveList::new(), ctx);
-            board.unmake_move(&m, info);
+            board.unmake_move(m, info);
 
             best_score = best_score.max(score);
             alpha = alpha.max(best_score);

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 fn main() {
     let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
-    let mut board = Board::from_fen(fen);
+    let mut board = Board::try_from_fen(fen).expect("Invalid FEN in perft_divide");
     let depth = 3;
     println!("Perft divide for Kiwipete depth {}", depth);
     let start = Instant::now();

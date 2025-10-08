@@ -1,8 +1,8 @@
 use crate::core::board::Board;
 use crate::core::types::{Move, Piece, Square};
 
-// Piece values in centipawns
-const VALUES: [i32; 6] = [100, 325, 325, 500, 975, 20000];
+// Piece values in centipawns - must match MATERIAL_MG from config
+const VALUES: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
 
 fn piece_value(p: Piece) -> i32 {
     VALUES[p as usize]
@@ -162,7 +162,9 @@ pub fn see_capture(board: &Board, mv: &Move) -> i32 {
 
     // Now solve the minimax-like sequence backwards
     for i in (0..gains.len()-1).rev() {
-        gains[i] = gains[i].max(-gains[i+1]);
+        if gains[i] > -gains[i+1] {
+            gains[i] = -gains[i+1];
+        }
     }
 
     gains[0]

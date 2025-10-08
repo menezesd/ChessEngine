@@ -29,31 +29,6 @@ pub enum UciCommand {
     Display,
 }
 
-/// Parse a UCI position command into board state
-pub fn parse_position_command(board: &mut Board, parts: &[&str]) {
-    let mut i = 1;
-    if i < parts.len() && parts[i] == "startpos" {
-        *board = Board::new();
-        i += 1;
-    } else if i < parts.len() && parts[i] == "fen" {
-        let fen = parts[i + 1..i + 7].join(" ");
-        *board = Board::from_fen(&fen);
-        i += 7;
-    }
-
-    if i < parts.len() && parts[i] == "moves" {
-        i += 1;
-        while i < parts.len() {
-            if let Some(mv) = parse_uci_move(board, parts[i]) {
-                board.make_move(&mv);
-            } else {
-                eprintln!("Invalid move: {}", parts[i]);
-            }
-            i += 1;
-        }
-    }
-}
-
 /// Parse a UCI command from a line of input
 pub fn parse_uci_command(line: &str) -> Option<UciCommand> {
     let parts: Vec<&str> = line.split_whitespace().collect();
@@ -205,10 +180,10 @@ pub enum UciResponse {
 
 /// Parse a UCI move string into a legal Move for the given board position.
 ///
-/// This function needs `&mut Board` because it calls into move generation to
-/// find the legal move that corresponds to the UCI string. Returns `None` if
-/// the string is invalid or no legal move matches.
-pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
+/// This function takes a pre-generated list of legal moves to avoid expensive
+/// move generation during parsing. Returns `None` if the string is invalid
+/// or no legal move matches.
+pub fn parse_uci_move_from_list(legal_moves: &[Move], uci_string: &str) -> Option<Move> {
     if uci_string.len() < 4 || uci_string.len() > 5 {
         return None; // Invalid length
     }
@@ -251,28 +226,27 @@ pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     };
 
     // Find the matching legal move
-    // We need generate_moves, which takes &mut self. This is slightly awkward
-    // if we just want to *find* the move without changing state yet.
-    // A temporary clone *might* be acceptable here, or we pass the pre-generated list.
-    // Let's generate moves here.
-    let mut legal_moves: crate::core::types::MoveList = crate::core::types::MoveList::new();
-    board.generate_moves_into(&mut legal_moves);
-
-    for legal_move in legal_moves {
+    for &legal_move in legal_moves {
         if legal_move.from == from_sq && legal_move.to == to_sq {
             // Check for promotion match
-            if legal_move.promotion == promotion_piece {
-                // Found the move! Return a clone of it.
-                return Some(legal_move);
-            }
-            // If no promotion specified by user AND move is not a promotion, it's a match
-            else if promotion_piece.is_none() && legal_move.promotion.is_none() {
+            if legal_move.promotion == promotion_piece || (promotion_piece.is_none() && legal_move.promotion.is_none()) {
                 return Some(legal_move);
             }
         }
     }
 
     None // No matching legal move found
+}
+
+/// Parse a UCI move string into a legal Move for the given board position.
+///
+/// This function needs `&mut Board` because it calls into move generation to
+/// find the legal move that corresponds to the UCI string. Returns `None` if
+/// the string is invalid or no legal move matches.
+pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
+    let mut legal_moves: crate::core::types::MoveList = crate::core::types::MoveList::new();
+    board.generate_moves_into(&mut legal_moves);
+    parse_uci_move_from_list(&legal_moves, uci_string)
 }
 
 impl UciResponse {

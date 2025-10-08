@@ -10,7 +10,7 @@ pub mod engine;
 pub mod perft;
 
 // Re-export commonly used types for convenience
-pub use core::{Board, Move, Piece, Color, Square, MoveList, Bitboard};
+pub use core::{Board, Move, Piece, Color, Square, MoveList, Bitboard, FenError};
 pub use evaluation::*;
 pub use magic::*;
 pub use movegen::*;
