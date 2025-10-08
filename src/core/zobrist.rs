@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use rand::prelude::*;
 
-use crate::types::{Color, Piece, Square};
+use crate::core::types::{Color, Piece, Square};
 
 pub struct ZobristKeys {
     pub piece_keys: [[[u64; 64]; 2]; 6],

@@ -1,4 +1,4 @@
-use crate::types::Square;
+use crate::core::types::Square;
 use once_cell::sync::Lazy;
 
 pub type Bitboard = u64;

@@ -1,6 +1,6 @@
 use chess_engine::engine::{SimpleEngine, SearchOptions, SearchEngine};
-use chess_engine::transposition_table::TranspositionTable;
-use chess_engine::board::Board;
+use chess_engine::transposition::transposition_table::TranspositionTable;
+use chess_engine::core::board::Board;
 use std::time::Duration;
 
 #[test]

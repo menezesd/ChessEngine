@@ -1,5 +1,5 @@
-use chess_engine::board::Board;
-use chess_engine::types::format_square;
+use chess_engine::core::board::Board;
+use chess_engine::core::types::format_square;
 use std::time::Instant;
 
 fn main() {
@@ -9,12 +9,12 @@ fn main() {
     println!("Perft divide for Kiwipete depth {}", depth);
     let start = Instant::now();
     let mut total = 0u64;
-    let mut root_moves: chess_engine::types::MoveList = chess_engine::types::MoveList::new();
+    let mut root_moves: chess_engine::core::types::MoveList = chess_engine::core::types::MoveList::new();
     board.generate_moves_into(&mut root_moves);
     root_moves.sort_by_key(|m| (m.from.0, m.from.1, m.to.0, m.to.1));
     for m in &root_moves {
         let info = board.make_move(m);
-        let cnt = board.perft(depth - 1);
+        let cnt = chess_engine::perft::Perft::perft(&mut board, depth - 1);
         board.unmake_move(m, info);
         println!(
             "  {}{}: {}",

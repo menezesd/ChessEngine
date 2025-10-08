@@ -1,4 +1,6 @@
-use crate::types::Piece;
+use crate::core::types::Piece;
+use crate::core::board::Board;
+use crate::core::types::Move;
 
 fn piece_value(piece: Piece) -> i32 {
     match piece {
@@ -29,8 +31,16 @@ pub fn mvv_lva_score_by_values(victim: Option<Piece>, attacker: Option<Piece>) -
     }
 }
 
-use crate::types::Move;
-use crate::board::Board;
+/// MVV-LVA (Most Valuable Victim - Least Valuable Attacker) score helper.
+///
+/// Returns a heuristic score favouring captures of high-value pieces with
+/// low-value attackers. Used for move ordering in search.
+pub fn mvv_lva_score(m: &Move, board: &Board) -> i32 {
+    let victim = m.captured_piece;
+    let attacker = board.piece_at(m.from).map(|(_c, p)| p);
+    mvv_lva_score_by_values(victim, attacker)
+}
+
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 static ORDERING_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -61,7 +71,7 @@ pub struct OrderingContext {
     pub history: Vec<i32>,
     pub max_depth: usize,
     /// Reusable small child move buffer to avoid frequent allocations in hot search loops.
-    pub child_buf: crate::types::MoveList,
+    pub child_buf: crate::core::types::MoveList,
 }
 
 impl OrderingContext {
@@ -70,7 +80,7 @@ impl OrderingContext {
             killers: vec![[None, None]; max_depth + 1],
             history: vec![0i32; HISTORY_SIZE],
             max_depth,
-            child_buf: crate::types::MoveList::new(),
+            child_buf: crate::core::types::MoveList::new(),
         }
     }
 
@@ -90,12 +100,12 @@ impl OrderingContext {
 
     pub fn record_history(&mut self, piece: Piece, from: u8, to: u8, delta: i32) {
         let p_idx = match piece {
-            crate::types::Piece::Pawn => 0usize,
-            crate::types::Piece::Knight => 1usize,
-            crate::types::Piece::Bishop => 2usize,
-            crate::types::Piece::Rook => 3usize,
-            crate::types::Piece::Queen => 4usize,
-            crate::types::Piece::King => 5usize,
+            crate::core::types::Piece::Pawn => 0usize,
+            crate::core::types::Piece::Knight => 1usize,
+            crate::core::types::Piece::Bishop => 2usize,
+            crate::core::types::Piece::Rook => 3usize,
+            crate::core::types::Piece::Queen => 4usize,
+            crate::core::types::Piece::King => 5usize,
         };
         let idx = p_idx * HISTORY_SQUARES * HISTORY_SQUARES + (from as usize) * HISTORY_SQUARES + (to as usize);
         if idx < self.history.len() {
@@ -148,12 +158,12 @@ pub fn order_moves(
         if let Some((_p, from_sq, to_sq)) = board.piece_at(m.from).map(|(_c, p)| (p, m.from.0 as u8, m.to.0 as u8)) {
             // compute index
             let p_idx = board.piece_at(m.from).map(|(_c, p)| match p {
-                crate::types::Piece::Pawn => 0usize,
-                crate::types::Piece::Knight => 1usize,
-                crate::types::Piece::Bishop => 2usize,
-                crate::types::Piece::Rook => 3usize,
-                crate::types::Piece::Queen => 4usize,
-                crate::types::Piece::King => 5usize,
+                crate::core::types::Piece::Pawn => 0usize,
+                crate::core::types::Piece::Knight => 1usize,
+                crate::core::types::Piece::Bishop => 2usize,
+                crate::core::types::Piece::Rook => 3usize,
+                crate::core::types::Piece::Queen => 4usize,
+                crate::core::types::Piece::King => 5usize,
             }).unwrap_or(0usize);
             let idx = p_idx * HISTORY_SQUARES * HISTORY_SQUARES + (from_sq as usize) * HISTORY_SQUARES + (to_sq as usize);
             if idx < ctx.history.len() {

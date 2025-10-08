@@ -50,4 +50,4 @@ pub fn bitboard_for_square(sq: Square) -> Bitboard {
 }
 
 // Use SmallVec for small move-lists to avoid frequent heap allocations in search.
-pub type MoveList = smallvec::SmallVec<[crate::types::Move; 64]>;
+pub type MoveList = smallvec::SmallVec<[Move; 64]>;

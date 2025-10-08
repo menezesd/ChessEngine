@@ -1,5 +1,5 @@
-use crate::board::Board;
-use crate::types::{Move, Piece, Square};
+use crate::core::board::Board;
+use crate::core::types::{Move, Piece, Square};
 
 // Piece values in centipawns
 const VALUES: [i32; 6] = [100, 325, 325, 500, 975, 20000];
@@ -21,8 +21,8 @@ fn attackers_to_square(
     pieces: &[[u64; 6]; 2],
     side_index: usize,
 ) -> u64 {
-    use crate::types::square_index;
-    use crate::board::Board as B;
+    use crate::core::types::square_index;
+    use crate::core::board::Board as B;
 
     let mut atk = 0u64;
     let sq_idx = square_index(sq);
@@ -78,7 +78,7 @@ pub fn see_capture(board: &Board, mv: &Move) -> i32 {
         None => return 0,
     };
 
-    use crate::types::square_index;
+    use crate::core::types::square_index;
 
     // Clone bitboards and occupancy to simulate capture sequence
     let mut pieces: [[u64; 6]; 2] = board.bitboards;
@@ -91,7 +91,7 @@ pub fn see_capture(board: &Board, mv: &Move) -> i32 {
 
     // Determine sides
     let (att_side, def_side) = match board.piece_at(mv.from) {
-        Some((c, _)) => (if c == crate::types::Color::White { 0 } else { 1 }, if c == crate::types::Color::White { 1 } else { 0 }),
+        Some((c, _)) => (if c == crate::core::types::Color::White { 0 } else { 1 }, if c == crate::core::types::Color::White { 1 } else { 0 }),
         None => return 0,
     };
 

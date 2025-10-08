@@ -1,6 +1,6 @@
 use std::mem;
 
-use crate::types::Move;
+use crate::core::types::Move;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundType {

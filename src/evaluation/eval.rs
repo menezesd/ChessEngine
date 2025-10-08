@@ -1,6 +1,6 @@
-use crate::board::Board;
-use crate::types::{Bitboard, Color, Piece, Square};
-use crate::zobrist::{color_to_zobrist_index, piece_to_zobrist_index};
+use crate::core::board::Board;
+use crate::core::types::{Bitboard, Color, Piece, Square};
+use crate::core::zobrist::{color_to_zobrist_index, piece_to_zobrist_index};
 
 // Material constants will be defined below (copied from original board::evaluate)
 
@@ -550,7 +550,7 @@ pub fn pawn_eval(board: &Board) -> (i32, i32) {
                 }
             }
 
-            let base = ((paint & 0xfefefefefefefefe) >> 1) | ((paint & 0x7f7f7f7f7f7f7f7f) << 1);
+            let base = ((paint & 0xfefefefefefefefe) >> 1) | ((paint & 0x7f7f7f7f7f7f7f7) << 1);
             let strong_mask = if color == Color::White {
                 base | (base >> 8)
             } else {
@@ -625,15 +625,15 @@ impl EvalData {
 // Compute knight mobility count
 fn knight_mobility_count(square: usize, occ: Bitboard) -> usize {
     let sq = Square(square / 8, square % 8);
-    let attacks = crate::board::Board::knight_attacks(sq);
+    let attacks = crate::core::board::Board::knight_attacks(sq);
     let mobility = attacks & !occ;
     mobility.count_ones() as usize
 }
 
 /// Compute knight-specific evaluation contributions into `EvalData`.
 pub fn eval_knight(board: &Board, e: &mut EvalData, color: Color) {
-    let color_idx = crate::zobrist::color_to_zobrist_index(color);
-    let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Knight)];
+    let color_idx = crate::core::zobrist::color_to_zobrist_index(color);
+    let mut b = board.bitboards[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::Knight)];
     let occ = board.all_occupancy;
     while b != 0 {
         let sq = b.trailing_zeros() as usize;
@@ -643,32 +643,32 @@ pub fn eval_knight(board: &Board, e: &mut EvalData, color: Color) {
     let cnt = knight_mobility_count(sq, occ);
     let add = KNIGHT_MOB[cnt.min(8)];
         // Update control map
-        let attacks = crate::board::Board::knight_attacks(Square(sq / 8, sq % 8));
-        e.control[crate::zobrist::color_to_zobrist_index(color)]
-            [crate::zobrist::piece_to_zobrist_index(Piece::Knight)] |= attacks;
+        let attacks = crate::core::board::Board::knight_attacks(Square(sq / 8, sq % 8));
+        e.control[crate::core::zobrist::color_to_zobrist_index(color)]
+            [crate::core::zobrist::piece_to_zobrist_index(Piece::Knight)] |= attacks;
         // King zone attacks handling will be done by external aggregation; here we count attacks to be used later
-        e.king_att_units[crate::zobrist::color_to_zobrist_index(color)] +=
-            (attacks & e.all_att[crate::zobrist::color_to_zobrist_index(color)]).count_ones()
+        e.king_att_units[crate::core::zobrist::color_to_zobrist_index(color)] +=
+            (attacks & e.all_att[crate::core::zobrist::color_to_zobrist_index(color)]).count_ones()
                 as i32;
-        e.all_att[crate::zobrist::color_to_zobrist_index(color)] |= attacks;
+        e.all_att[crate::core::zobrist::color_to_zobrist_index(color)] |= attacks;
         // mobility contribution
-        e.mobility_score[crate::zobrist::color_to_zobrist_index(color)] += add as i32;
+        e.mobility_score[crate::core::zobrist::color_to_zobrist_index(color)] += add as i32;
     }
 }
 
 // Bishop evaluator: mobility + control accumulation
 /// Compute bishop-specific evaluation contributions into `EvalData`.
 pub fn eval_bishop(board: &Board, e: &mut EvalData, color: Color) {
-    let color_idx = crate::zobrist::color_to_zobrist_index(color);
-    let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Bishop)];
+    let color_idx = crate::core::zobrist::color_to_zobrist_index(color);
+    let mut b = board.bitboards[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::Bishop)];
     let occ = board.all_occupancy;
     while b != 0 {
         let sq = b.trailing_zeros() as usize;
         b &= b - 1;
-        let attacks = crate::board::Board::bishop_attacks(Square(sq / 8, sq % 8), occ);
+        let attacks = crate::core::board::Board::bishop_attacks(Square(sq / 8, sq % 8), occ);
         let mobility = (attacks & !occ).count_ones() as usize;
         let add = BISHOP_MOB[mobility.min(14)];
-        e.control[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Bishop)] |= attacks;
+        e.control[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::Bishop)] |= attacks;
         e.all_att[color_idx] |= attacks;
         e.mobility_score[color_idx] += add as i32;
     }
@@ -677,21 +677,21 @@ pub fn eval_bishop(board: &Board, e: &mut EvalData, color: Color) {
 // Rook evaluator: mobility + control and simple 7th-rank logic
 /// Compute rook-specific evaluation contributions into `EvalData`.
 pub fn eval_rook(board: &Board, e: &mut EvalData, color: Color) {
-    let color_idx = crate::zobrist::color_to_zobrist_index(color);
-    let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Rook)];
+    let color_idx = crate::core::zobrist::color_to_zobrist_index(color);
+    let mut b = board.bitboards[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::Rook)];
     let occ = board.all_occupancy;
     while b != 0 {
         let sq = b.trailing_zeros() as usize;
         b &= b - 1;
-        let attacks = crate::board::Board::rook_attacks(Square(sq / 8, sq % 8), occ);
+        let attacks = crate::core::board::Board::rook_attacks(Square(sq / 8, sq % 8), occ);
         let mobility = (attacks & !occ).count_ones() as usize;
         let add = ROOK_MOB[mobility.min(14)];
-        e.control[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Rook)] |= attacks;
+        e.control[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::Rook)] |= attacks;
         e.all_att[color_idx] |= attacks;
         e.mobility_score[color_idx] += add as i32;
         // per-rook file bonuses: open / semi-open and 7th-rank activity
         let file = sq % 8;
-        let pawn_idx = crate::zobrist::piece_to_zobrist_index(Piece::Pawn);
+        let pawn_idx = crate::core::zobrist::piece_to_zobrist_index(Piece::Pawn);
         let w_pawns_on_file = board.bitboards[color_to_zobrist_index(Color::White)][pawn_idx] & Board::file_mask(file);
         let b_pawns_on_file = board.bitboards[color_to_zobrist_index(Color::Black)][pawn_idx] & Board::file_mask(file);
         // open file bonus
@@ -705,7 +705,7 @@ pub fn eval_rook(board: &Board, e: &mut EvalData, color: Color) {
             }
         }
         // doubled rooks on same file
-        let rooks_on_file = board.bitboards[color_to_zobrist_index(color)][crate::zobrist::piece_to_zobrist_index(Piece::Rook)] & Board::file_mask(file);
+        let rooks_on_file = board.bitboards[color_to_zobrist_index(color)][crate::core::zobrist::piece_to_zobrist_index(Piece::Rook)] & Board::file_mask(file);
         if (rooks_on_file.count_ones() as i32) >= 2 {
             e.mobility_score[color_idx] += 25; // bonus for doubled rooks on file
         }
@@ -736,7 +736,7 @@ pub fn eval_rook(board: &Board, e: &mut EvalData, color: Color) {
         e.mobility_score[color_idx] += passed_bonus;
         // file depth control: count number of controlled squares on this file in opponent half (rook control)
         let mut depth = 0i32;
-        let rook_idx = crate::zobrist::piece_to_zobrist_index(Piece::Rook);
+        let rook_idx = crate::core::zobrist::piece_to_zobrist_index(Piece::Rook);
         let file_mask_bits = Board::file_mask(file) & e.control[color_idx][rook_idx];
         let mut fm = file_mask_bits;
         while fm != 0 {
@@ -760,18 +760,18 @@ pub fn eval_rook(board: &Board, e: &mut EvalData, color: Color) {
 // Queen evaluator: combined rook+bishop mobility
 /// Compute queen-specific evaluation contributions into `EvalData`.
 pub fn eval_queen(board: &Board, e: &mut EvalData, color: Color) {
-    let color_idx = crate::zobrist::color_to_zobrist_index(color);
-    let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Queen)];
+    let color_idx = crate::core::zobrist::color_to_zobrist_index(color);
+    let mut b = board.bitboards[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::Queen)];
     let occ = board.all_occupancy;
     while b != 0 {
         let sq = b.trailing_zeros() as usize;
         b &= b - 1;
-        let rook_att = crate::board::Board::rook_attacks(Square(sq / 8, sq % 8), occ);
-        let bish_att = crate::board::Board::bishop_attacks(Square(sq / 8, sq % 8), occ);
+        let rook_att = crate::core::board::Board::rook_attacks(Square(sq / 8, sq % 8), occ);
+        let bish_att = crate::core::board::Board::bishop_attacks(Square(sq / 8, sq % 8), occ);
         let attacks = rook_att | bish_att;
         let mobility = (attacks & !occ).count_ones() as usize;
         let add = QUEEN_MOB[mobility.min(27)];
-        e.control[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::Queen)] |= attacks;
+        e.control[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::Queen)] |= attacks;
         e.all_att[color_idx] |= attacks;
         e.mobility_score[color_idx] += add as i32;
     }
@@ -780,16 +780,183 @@ pub fn eval_queen(board: &Board, e: &mut EvalData, color: Color) {
 // King evaluator: PST + pawn shield and safety heuristics placeholder
 /// Compute king-specific evaluation contributions into `EvalData`.
 pub fn eval_king(board: &Board, e: &mut EvalData, color: Color) {
-    let color_idx = crate::zobrist::color_to_zobrist_index(color);
-    let mut b = board.bitboards[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::King)];
+    let color_idx = crate::core::zobrist::color_to_zobrist_index(color);
+    let mut b = board.bitboards[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::King)];
     while b != 0 {
         let sq = b.trailing_zeros() as usize;
         b &= b - 1;
         // count king attacks control and accumulate
-        let attacks = crate::board::Board::king_attacks(Square(sq / 8, sq % 8));
-        e.control[color_idx][crate::zobrist::piece_to_zobrist_index(Piece::King)] |= attacks;
+        let attacks = crate::core::board::Board::king_attacks(Square(sq / 8, sq % 8));
+        e.control[color_idx][crate::core::zobrist::piece_to_zobrist_index(Piece::King)] |= attacks;
         e.all_att[color_idx] |= attacks;
         // placeholder: small penalty for being in center early on
         e.king_att_units[color_idx] -= 5;
+    }
+}
+
+/// Main evaluation function that combines all evaluation components
+pub fn evaluate(board: &Board) -> i32 {
+    let mut score = 0;
+
+    // Get pawn evaluation first
+    let (pawn_mg, pawn_eg) = pawn_eval(board);
+
+    // Get full evaluation
+    let position_score = eval(board, pawn_mg, pawn_eg);
+    score += position_score;
+
+    // Bishop pair bonus
+    let white_bishops = board.bitboards[color_to_zobrist_index(Color::White)]
+        [piece_to_zobrist_index(Piece::Bishop)];
+    let black_bishops = board.bitboards[color_to_zobrist_index(Color::Black)]
+        [piece_to_zobrist_index(Piece::Bishop)];
+    let white_bishop_count = white_bishops.count_ones();
+    let black_bishop_count = black_bishops.count_ones();
+
+    if white_bishop_count >= 2 {
+        score += 30;
+    }
+    if black_bishop_count >= 2 {
+        score -= 30;
+    }
+
+    // Rook on open/semi-open files and pawn-structure penalties
+    let mut white_pawns_by_file = [0u32; 8];
+    let mut black_pawns_by_file = [0u32; 8];
+    for file in 0..8 {
+        let file_mask = crate::core::bitboard::BitboardUtils::FILE_A << file;
+        let wp = board.bitboards[color_to_zobrist_index(Color::White)]
+            [piece_to_zobrist_index(Piece::Pawn)]
+            & file_mask;
+        let bp = board.bitboards[color_to_zobrist_index(Color::Black)]
+            [piece_to_zobrist_index(Piece::Pawn)]
+            & file_mask;
+        white_pawns_by_file[file] = wp.count_ones();
+        black_pawns_by_file[file] = bp.count_ones();
+    }
+
+    for file in 0..8 {
+        let fpawns = (white_pawns_by_file[file] + black_pawns_by_file[file]) as i32;
+
+        // Rooks on file: iterate rook bitboards
+        let white_rooks = board.bitboards[color_to_zobrist_index(Color::White)]
+            [piece_to_zobrist_index(Piece::Rook)];
+        let black_rooks = board.bitboards[color_to_zobrist_index(Color::Black)]
+            [piece_to_zobrist_index(Piece::Rook)];
+        let file_mask = crate::core::bitboard::BitboardUtils::FILE_A << file;
+
+        if white_rooks & file_mask != 0 {
+            if fpawns == 0 {
+                score += 15;
+            } else if black_pawns_by_file[file] == 0 {
+                score += 7;
+            }
+        }
+        if black_rooks & file_mask != 0 {
+            if fpawns == 0 {
+                score -= 15;
+            } else if white_pawns_by_file[file] == 0 {
+                score -= 7;
+            }
+        }
+
+        // Pawn structure: isolated / doubled / passed
+        let wpf = white_pawns_by_file[file] as i32;
+        let bpf = black_pawns_by_file[file] as i32;
+
+        if wpf > 0 {
+            let left = if file > 0 {
+                white_pawns_by_file[file - 1]
+            } else {
+                0
+            };
+            let right = if file < 7 {
+                white_pawns_by_file[file + 1]
+            } else {
+                0
+            };
+            if left == 0 && right == 0 {
+                score -= 12;
+            }
+            if wpf > 1 {
+                score -= 12 * (wpf - 1);
+            }
+        }
+        if bpf > 0 {
+            let left = if file > 0 {
+                black_pawns_by_file[file - 1]
+            } else {
+                0
+            };
+            let right = if file < 7 {
+                black_pawns_by_file[file + 1]
+            } else {
+                0
+            };
+            if left == 0 && right == 0 {
+                score += 12;
+            }
+            if bpf > 1 {
+                score += 12 * (bpf - 1);
+            }
+        }
+
+        // passed pawn detection (approximate): no enemy pawns in same or adjacent files ahead
+        // For white: pawn ranks increase; for black: decrease
+        // We'll scan each pawn on this file to decide passedness
+        // White passed pawns
+        let wpawns_on_file = board.bitboards[color_to_zobrist_index(Color::White)]
+            [piece_to_zobrist_index(Piece::Pawn)]
+            & file_mask;
+        for sq in crate::movegen::MoveGen::bits_iter(wpawns_on_file) {
+            let rank = sq / 8;
+            // check black pawns ahead on same or adjacent files
+            let bb = board.bitboards[color_to_zobrist_index(Color::Black)]
+                [piece_to_zobrist_index(Piece::Pawn)];
+            let file_adj_mask = (crate::core::bitboard::BitboardUtils::FILE_A << file)
+                | (if file > 0 { crate::core::bitboard::BitboardUtils::FILE_A << (file - 1) } else { 0 })
+                | (if file < 7 { crate::core::bitboard::BitboardUtils::FILE_A << (file + 1) } else { 0 });
+            // all squares with index < rank*8
+            let ahead_mask = if rank * 8 >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << (rank * 8)) - 1
+            };
+            let is_passed = (bb & file_adj_mask & ahead_mask) == 0;
+            if is_passed {
+                let bonus = 10 + (7 - rank as i32) * 7;
+                score += bonus;
+            }
+        }
+
+        // Black passed pawns
+        let bpawns_on_file = board.bitboards[color_to_zobrist_index(Color::Black)]
+            [piece_to_zobrist_index(Piece::Pawn)]
+            & file_mask;
+        for sq in crate::movegen::MoveGen::bits_iter(bpawns_on_file) {
+            let rank = sq / 8;
+            // check white pawns ahead on same or adjacent files
+            let bb = board.bitboards[color_to_zobrist_index(Color::White)]
+                [piece_to_zobrist_index(Piece::Pawn)];
+            let file_adj_mask = (crate::core::bitboard::BitboardUtils::FILE_A << file)
+                | (if file > 0 { crate::core::bitboard::BitboardUtils::FILE_A << (file - 1) } else { 0 })
+                | (if file < 7 { crate::core::bitboard::BitboardUtils::FILE_A << (file + 1) } else { 0 });
+            let ahead_mask = if (rank + 1) * 8 >= 64 {
+                0u64
+            } else {
+                !((1u64 << ((rank + 1) * 8)) - 1)
+            };
+            let is_passed = (bb & file_adj_mask & ahead_mask) == 0;
+            if is_passed {
+                let bonus = 10 + rank as i32 * 7;
+                score -= bonus;
+            }
+        }
+    }
+
+    if board.white_to_move {
+        score
+    } else {
+        -score
     }
 }

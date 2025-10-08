@@ -1,16 +1,19 @@
 // Crate root - export modules
-pub mod board;
-pub mod constants;
-pub mod eval;
+pub mod core;
+pub mod evaluation;
 pub mod magic;
-pub mod search_control;
-pub mod transposition_table;
-pub mod types;
-pub mod uci;
-pub mod uci_info;
-pub mod zobrist;
-pub mod see;
+pub mod movegen;
+pub mod transposition;
 pub mod search;
-pub mod ordering;
+pub mod uci;
 pub mod engine;
-// see module already declared above
+pub mod perft;
+
+// Re-export commonly used types for convenience
+pub use core::{Board, Move, Piece, Color, Square, MoveList, Bitboard};
+pub use evaluation::*;
+pub use magic::*;
+pub use movegen::*;
+pub use transposition::*;
+pub use search::*;
+pub use uci::*;

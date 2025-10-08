@@ -1,6 +1,6 @@
-use chess_engine::board::Board;
-use chess_engine::transposition_table::TranspositionTable;
-use chess_engine::types::{Square, Move};
+use chess_engine::core::board::Board;
+use chess_engine::transposition::transposition_table::TranspositionTable;
+use chess_engine::core::types::{Square, Move};
 
 #[test]
 fn perft_positions() {
@@ -79,7 +79,7 @@ fn endgame_no_null_move() {
     let mut board = Board::from_fen(fen);
     let mut tt = TranspositionTable::new(1);
     // Run a shallow search: ensure it completes and returns a legal move (or None if mate/stalemate)
-    let mv = chess_engine::board::find_best_move_with_context(&mut board, &mut tt, 3, None, None, false);
+    let mv = chess_engine::search::orchestration::find_best_move_with_context(&mut board, &mut tt, 3, None, None, false);
     // At minimum, search should not panic and should return either Some move or None (no crash)
     let _ = mv;
 }

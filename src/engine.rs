@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 use std::fmt;
 
-use crate::board::Board;
-use crate::transposition_table::TranspositionTable;
-use crate::types::Move;
-use crate::uci_info;
+use crate::core::board::Board;
+use crate::transposition::transposition_table::TranspositionTable;
+use crate::core::types::Move;
+use crate::uci::info as uci_info;
 
 /// Options that control a search invocation. Either `max_depth` or `max_time` should
 /// be provided; if both are provided `max_time` takes precedence. Additional tuning
@@ -82,7 +82,7 @@ impl SearchEngine for SimpleEngine {
 
         // If a node limit is provided, configure the global search control
         if let Some(n) = opts.max_nodes {
-            crate::search_control::set_node_limit(n);
+            crate::search::control::set_node_limit(n);
         }
 
         // Configure move ordering heuristics globally based on option (default = enabled)
