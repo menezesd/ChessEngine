@@ -35,38 +35,53 @@ pub fn iterative_deepening_with_sink(
             // Bump TT generation so entries written at this depth are preferred
             tt.new_generation();
             // Progressive aspiration: if we have a previous score and depth is big enough,
-            // try small windows around prev_score and widen (10,20,40,... up to 500 cp)
+            // try small windows around prev_score and widen on fail-high/fail-low
             let mut mv_opt: Option<Move> = None;
             let mut score: i32 = 0;
             let mut completed = false;
 
             if let Some(ps) = prev_score {
                 if depth > 2 && ps.abs() < (constants::MATE_SCORE / 2) {
-                    let mut margin = 10i32;
-                    while margin <= 500 {
+                    let mut alpha = ps - 10;
+                    let mut beta = ps + 10;
+                    let mut margin = 10;
+
+                    loop {
                         if search_control::should_stop() {
                             break;
                         }
-                        let a = ps.saturating_sub(margin);
-                        let b = ps.saturating_add(margin);
+
                         let (mv_try, sc_try, completed_try) = crate::search::run_root_search(
                             board,
                             tt,
                             depth,
                             &mut root_moves[..],
                             search_control::should_stop,
-                            Some((a, b)),
+                            Some((alpha, beta)),
                         );
-                        if completed_try && sc_try > a && sc_try < b {
+
+                        if !completed_try {
+                            break; // Aborted, fall back to full window
+                        }
+
+                        if sc_try <= alpha {
+                            // Fail low - widen alpha bound
+                            alpha = ps - margin;
+                        } else if sc_try >= beta {
+                            // Fail high - widen beta bound
+                            beta = ps + margin;
+                        } else {
+                            // Success - score is within aspiration window
                             mv_opt = mv_try;
                             score = sc_try;
                             completed = true;
                             break;
                         }
-                        if !completed_try && search_control::should_stop() {
-                            break;
-                        }
+
                         margin = margin.saturating_mul(2);
+                        if margin > 500 {
+                            break; // Give up, fall back to full window
+                        }
                     }
                 }
             }

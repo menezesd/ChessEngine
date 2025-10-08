@@ -7,6 +7,25 @@ use crate::evaluation::eval;
 use crate::core::constants;
 use crate::movegen::ordering::order_moves;
 
+/// Check if the current position is likely zugzwang (only king and pawns)
+/// In such positions, null move pruning is unsafe
+fn is_zugzwang_position(board: &Board) -> bool {
+    let color_idx = if board.white_to_move { 0 } else { 1 };
+    let opponent_idx = 1 - color_idx;
+    
+    // Count pieces for the side to move
+    let mut piece_count = 0;
+    for piece_type in 0..6 { // Pawn, Knight, Bishop, Rook, Queen, King
+        piece_count += board.bitboards[color_idx][piece_type].count_ones();
+    }
+    
+    // If we have very few pieces (king + pawns only), likely zugzwang
+    // Also check if opponent has many pieces (we might need to move to defend)
+    let opponent_piece_count = (0..6).map(|pt| board.bitboards[opponent_idx][pt].count_ones()).sum::<u32>();
+    
+    piece_count <= 4 && opponent_piece_count > 3
+}
+
 /// Negamax search with alpha-beta pruning
 pub fn negamax(
     board: &mut Board,
@@ -66,18 +85,20 @@ pub fn negamax(
         }
 
         // Null-move pruning (Publius-style) with verification search on cutoff.
-        // Only apply when depth is sufficiently large and not in check.
-        if depth >= 3 && !board.is_in_check(board.current_color()) {
-            // reduction R = 2 (default); allow simple depth-adaptive tweak in future
-            let r = 2u32;
+        // Only apply when depth is sufficiently large, not in check, not zugzwang, and not near mate
+        if depth >= 3 && !board.is_in_check(board.current_color()) 
+           && !is_zugzwang_position(board) 
+           && beta.abs() < (constants::MATE_SCORE - 100) {
+            
+            // Adaptive reduction: deeper searches can afford larger reductions
+            let r = if depth >= 6 { 3u32 } else { 2u32 };
             let null_info = board.make_null_move();
             let null_score = -negamax(board, tt, depth - 1 - r, -beta, -beta + 1, moves_buf, ctx);
             board.unmake_null_move(null_info);
+            
             if null_score >= beta {
-                // Verification search: do a cautious full (or full-window) search at reduced depth
-                // to avoid zugzwang false positives. If verification confirms >= beta, store and return.
-                // Use depth-1 for verification (safe since depth >= 3 here).
-                let verify_score = -negamax(board, tt, depth - 1, -beta, -alpha, moves_buf, ctx);
+                // Verification search at the same reduced depth to confirm cutoff
+                let verify_score = -negamax(board, tt, depth - 1 - r, -beta, -alpha, moves_buf, ctx);
                 if verify_score >= beta {
                     tt.store(current_hash, depth, verify_score, BoundType::LowerBound, None);
                     return verify_score;
