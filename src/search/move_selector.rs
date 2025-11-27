@@ -1,3 +1,4 @@
+use crate::search::search_context::SearchContext;
 use crate::transposition::transposition_table::{TranspositionTable, BoundType};
 use crate::core::types::{Move, MoveList};
 use crate::core::board::Board;
@@ -9,27 +10,29 @@ pub struct TranspositionTableHelper;
 
 impl TranspositionTableHelper {
     /// Probe TT and adjust alpha/beta bounds if we have a useful entry
+    /// Returns (hash_move, adjusted_alpha, adjusted_beta, tt_cutoff_score, tt_stored_score)
     pub fn probe_and_adjust_bounds(
         tt: &mut TranspositionTable,
         hash: u64,
         depth: u32,
         mut alpha: i32,
         mut beta: i32,
-    ) -> (Option<Move>, i32, i32, Option<i32>) {
+    ) -> (Option<Move>, i32, i32, Option<i32>, Option<i32>) {
         if let Some(entry) = tt.probe(hash) {
+            let stored_score = Some(entry.score);
             if entry.depth >= depth {
                 match entry.bound_type {
-                    BoundType::Exact => return (entry.best_move, alpha, beta, Some(entry.score)),
+                    BoundType::Exact => return (entry.best_move, alpha, beta, stored_score, stored_score),
                     BoundType::LowerBound => alpha = alpha.max(entry.score),
                     BoundType::UpperBound => beta = beta.min(entry.score),
                 }
                 if alpha >= beta {
-                    return (entry.best_move, alpha, beta, Some(entry.score));
+                    return (entry.best_move, alpha, beta, stored_score, stored_score);
                 }
             }
-            return (entry.best_move, alpha, beta, None);
+            return (entry.best_move, alpha, beta, None, stored_score);
         }
-        (None, alpha, beta, None)
+        (None, alpha, beta, None, None)
     }
 
     /// Store a search result in the transposition table
@@ -39,21 +42,20 @@ impl TranspositionTableHelper {
 
     /// Perform internal iterative deepening to find a good TT move
     pub fn internal_iterative_deepening(
-        tt: &mut TranspositionTable,
         board: &mut Board,
+        s_ctx: &mut SearchContext,
         hash: u64,
         depth: u32,
         alpha: i32,
         beta: i32,
-        moves_buf: &mut MoveList,
-        ctx: &mut OrderingContext,
-        ply: usize,
     ) -> Option<Move> {
         use crate::search::algorithms::negamax;
 
         if depth >= 3 {
-            let _ = negamax(board, tt, depth - 2, alpha, beta, moves_buf, ctx, ply);
-            if let Some(entry) = tt.probe(hash) {
+            // Need to adjust alpha/beta for the search; tt_cutoff_score will be ignored.
+            let (_, adjusted_alpha, adjusted_beta, _, _) = TranspositionTableHelper::probe_and_adjust_bounds(s_ctx.tt, hash, depth, alpha, beta);
+            let _ = negamax(board, s_ctx, depth - 2, adjusted_alpha, adjusted_beta);
+            if let Some(entry) = s_ctx.tt.probe(hash) {
                 return entry.best_move;
             }
         }

@@ -5,8 +5,25 @@ use crate::uci::info as uci_info;
 use crate::search::control as search_control;
 use crate::core::config::search::*;
 use crate::core::config::evaluation::*;
+use crate::evaluation::pawn_hash::PawnHashTable;
 use std::sync::{Arc, Mutex, mpsc::Sender};
 use std::time::{Duration, Instant};
+
+pub enum SearchLimits {
+    Depth(u32),
+    Time(Duration),
+    Infinite,
+}
+
+pub struct SearchConfig<'a> {
+    limits: SearchLimits,
+    board: &'a mut Board,
+    tt: &'a mut TranspositionTable,
+    sink: Option<Arc<Mutex<Option<Move>>>>,
+    info_sender: Option<Sender<uci_info::Info>>,
+    is_ponder: bool,
+    start_time: Instant,
+}
 
 /// Iterative deepening search driver which publishes `uci_info::Info` messages to `info_sender`
 /// and updates an optional sink with intermediate best moves.
@@ -18,149 +35,17 @@ pub fn iterative_deepening_with_sink(
     info_sender: Option<Sender<uci_info::Info>>,
     is_ponder: bool,
 ) -> Option<Move> {
-        let mut best_move: Option<Move> = None;
-
-        let mut legal_moves: MoveList = MoveList::new();
-        board.generate_moves_into(&mut legal_moves);
-        if legal_moves.is_empty() {
-            return None;
-        }
-        if legal_moves.len() == 1 {
-            return Some(legal_moves[0]);
-        }
-        let mut root_moves = legal_moves;
-
-        let search_start = Instant::now();
-        let mut prev_score: Option<i32> = None;
-        for depth in 1..=max_depth {
-            // Bump TT generation so entries written at this depth are preferred
-            tt.new_generation();
-            // Progressive aspiration: if we have a previous score and depth is big enough,
-            // try small windows around prev_score and widen on fail-high/fail-low
-            let mut mv_opt: Option<Move> = None;
-            let mut score: i32 = 0;
-            let mut completed = false;
-
-            if let Some(ps) = prev_score {
-                if depth > 2 && ps.abs() < (MATE_SCORE / 2) {
-                    let mut alpha = ps - 10;
-                    let mut beta = ps + 10;
-                    let mut margin = 10;
-
-                    loop {
-                        if search_control::should_stop() {
-                            break;
-                        }
-
-                        let (mv_try, sc_try, completed_try) = crate::search::run_root_search(
-                            board,
-                            tt,
-                            depth,
-                            &mut root_moves[..],
-                            search_control::should_stop,
-                            Some((alpha, beta)),
-                        );
-
-                        if !completed_try {
-                            break; // Aborted, fall back to full window
-                        }
-
-                        if sc_try <= alpha {
-                            // Fail low - widen alpha bound
-                            alpha = ps - margin;
-                        } else if sc_try >= beta {
-                            // Fail high - widen beta bound
-                            beta = ps + margin;
-                        } else {
-                            // Success - score is within aspiration window
-                            mv_opt = mv_try;
-                            score = sc_try;
-                            completed = true;
-                            break;
-                        }
-
-                        margin = margin.saturating_mul(2);
-                        if margin > 500 {
-                            break; // Give up, fall back to full window
-                        }
-                    }
-                }
-            }
-
-            // Fallback to full-window search if aspiration did not produce a completed result
-            if !completed && !search_control::should_stop() {
-                let (mv_full, sc_full, completed_full) = crate::search::run_root_search(
-                    board,
-                    tt,
-                    depth,
-                    &mut root_moves[..],
-                    search_control::should_stop,
-                    None,
-                );
-                mv_opt = mv_full;
-                score = sc_full;
-                completed = completed_full;
-            }
-
-            if completed {
-                if let Some(mv) = mv_opt {
-                    best_move = Some(mv);
-
-                    if let Some(ref s) = sink {
-                        let mut lock = match s.lock() {
-                            Ok(g) => g,
-                            Err(poisoned) => {
-                                eprintln!("warning: sink mutex poisoned, recovering");
-                                poisoned.into_inner()
-                            }
-                        };
-                        *lock = best_move;
-                    }
-
-                    if let Some(ref sender) = info_sender {
-                        let nodes_total = search_control::get_node_count();
-                        let elapsed_ms = search_start.elapsed().as_millis();
-                        let nps = if elapsed_ms > 0 {
-                            Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
-                        } else {
-                            None
-                        };
-                        let pv = crate::search::build_pv_from_tt(tt, board.hash);
-                        let mut info = uci_info::Info {
-                            depth: Some(depth),
-                            nodes: Some(nodes_total),
-                            nps,
-                            time_ms: Some(elapsed_ms),
-                            score_cp: None,
-                            score_mate: None,
-                            pv: Some(pv),
-                            seldepth: Some(depth),
-                            ponder: None,
-                        };
-                        if score.abs() > (MATE_SCORE / 2) {
-                            let mate_in = (MATE_SCORE - score.abs() + 1) / 2;
-                            info.score_mate = Some(mate_in);
-                        } else {
-                            info.score_cp = Some(score);
-                        }
-                        if is_ponder {
-                            if let Some(bm) = best_move {
-                                info.ponder = Some(format!("{}{}", format_square(bm.from), format_square(bm.to)));
-                            }
-                        }
-                        let _ = sender.send(info);
-                    }
-
-                    if let Some(pos) = root_moves.iter().position(|m| *m == mv) {
-                        root_moves.swap(0, pos);
-                    }
-                    // record previous score for next depth's aspiration window
-                    prev_score = Some(score);
-                }
-            }
-        }
-
-        best_move
+    let config = SearchConfig {
+        limits: SearchLimits::Depth(max_depth),
+        board,
+        tt,
+        sink,
+        info_sender,
+        is_ponder,
+        start_time: Instant::now(),
+    };
+    let mut dummy_pawn_hash_table = crate::evaluation::pawn_hash::PawnHashTable::new();
+    search_internal(config, &mut dummy_pawn_hash_table)
 }
 
 /// Time-limited iterative deepening driver.
@@ -173,480 +58,220 @@ pub fn time_limited_search_with_sink(
     info_sender: Option<Sender<uci_info::Info>>,
     is_ponder: bool,
 ) -> Option<Move> {
-        let mut best_move: Option<Move> = None;
-        let mut depth = 1u32;
-        let mut last_depth_time = Duration::from_millis(1);
-
-        let mut prev_score: Option<i32> = None;
-        while start_time.elapsed() + SAFETY_MARGIN < max_time {
-            // Bump generation each iterative step so TT replacement prefers newer entries
-            tt.new_generation();
-            let elapsed = start_time.elapsed();
-            let time_remaining = max_time.checked_sub(elapsed).unwrap_or_default();
-
-            let estimated_next_time = last_depth_time.mul_f32(TIME_GROWTH_FACTOR);
-            if estimated_next_time + SAFETY_MARGIN > time_remaining {
-                break;
-            }
-
-            let depth_start = Instant::now();
-
-            let mut legal_moves: MoveList = MoveList::new();
-            board.generate_moves_into(&mut legal_moves);
-            if legal_moves.is_empty() {
-                return None;
-            }
-            if legal_moves.len() == 1 {
-                return Some(legal_moves[0]);
-            }
-
-            legal_moves.sort_by_key(|m| -crate::ordering::mvv_lva_score(m, board));
-            crate::search::apply_tt_move_hint(&mut legal_moves[..], tt, board.hash);
-
-            // Progressive aspiration similar to iterative driver
-            let mut this_best_move: Option<Move> = None;
-            let mut this_best_score: i32 = 0;
-            let mut completed = false;
-            if let Some(ps) = prev_score {
-                if depth > 2 && ps.abs() < (MATE_SCORE / 2) {
-                    let mut margin = 10i32;
-                    while margin <= 500 {
-                        if start_time.elapsed() + SAFETY_MARGIN >= max_time {
-                            break;
-                        }
-                        let a = ps.saturating_sub(margin);
-                        let b = ps.saturating_add(margin);
-                        let (mv_try, sc_try, completed_try) = crate::search::run_root_search(
-                            board,
-                            tt,
-                            depth,
-                            &mut legal_moves[..],
-                            || start_time.elapsed() + SAFETY_MARGIN >= max_time || search_control::should_stop(),
-                            Some((a, b)),
-                        );
-                        if completed_try && sc_try > a && sc_try < b {
-                            this_best_move = mv_try;
-                            this_best_score = sc_try;
-                            completed = true;
-                            break;
-                        }
-                        if !completed_try && (start_time.elapsed() + SAFETY_MARGIN >= max_time || search_control::should_stop()) {
-                            break;
-                        }
-                        margin = margin.saturating_mul(2);
-                    }
-                }
-            }
-
-            if !completed {
-                let (mv_full, sc_full, completed_full) = crate::search::run_root_search(
-                    board,
-                    tt,
-                    depth,
-                    &mut legal_moves[..],
-                    || start_time.elapsed() + SAFETY_MARGIN >= max_time || search_control::should_stop(),
-                    None,
-                );
-                if completed_full {
-                    this_best_move = mv_full;
-                    this_best_score = sc_full;
-                    completed = true;
-                }
-            }
-
-            if start_time.elapsed() + SAFETY_MARGIN < max_time {
-                if completed {
-                    best_move = this_best_move;
-                    if let Some(ref s) = sink {
-                        let mut lock = match s.lock() {
-                            Ok(g) => g,
-                            Err(poisoned) => {
-                                eprintln!("warning: sink mutex poisoned, recovering");
-                                poisoned.into_inner()
-                            }
-                        };
-                        *lock = best_move;
-                    }
-
-                    if let Some(ref sender) = info_sender {
-                        let nodes_total = search_control::get_node_count();
-                        let elapsed_ms = start_time.elapsed().as_millis();
-                        let nps = if elapsed_ms > 0 {
-                            Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
-                        } else {
-                            None
-                        };
-                        let pv = crate::search::build_pv_from_tt(tt, board.hash);
-                        let mut info = uci_info::Info {
-                            depth: Some(depth),
-                            nodes: Some(nodes_total),
-                            nps,
-                            time_ms: Some(elapsed_ms),
-                            score_cp: None,
-                            score_mate: None,
-                            pv: Some(pv),
-                            seldepth: None,
-                            ponder: None,
-                        };
-                        if this_best_score.abs() > (MATE_SCORE / 2) {
-                            let mate_in = (MATE_SCORE - this_best_score.abs() + 1) / 2;
-                            info.score_mate = Some(mate_in);
-                        } else {
-                            info.score_cp = Some(this_best_score);
-                        }
-                        if is_ponder {
-                            if let Some(bm) = best_move {
-                                info.ponder = Some(format!("{}{}", format_square(bm.from), format_square(bm.to)));
-                            }
-                        }
-                        let _ = sender.send(info);
-                    }
-
-                    // rotate best move to front in root moves
-                    if let Some(bm) = best_move {
-                        if let Some(pos) = legal_moves.iter().position(|m| *m == bm) {
-                            legal_moves.swap(0, pos);
-                        }
-                    }
-                    // record prev_score for next depth's aspiration window
-                    prev_score = Some(this_best_score);
-                }
-
-                last_depth_time = depth_start.elapsed();
-                depth += 1;
-            } else {
-                break;
-            }
-        }
-
-        best_move
+    let config = SearchConfig {
+        limits: SearchLimits::Time(max_time),
+        board,
+        tt,
+        sink,
+        info_sender,
+        is_ponder,
+        start_time,
+    };
+    let mut dummy_pawn_hash_table = crate::evaluation::pawn_hash::PawnHashTable::new();
+    search_internal(config, &mut dummy_pawn_hash_table)
 }
 
-/// Convenience function to find the best move using depth-limited search
-pub fn find_best_move(
-    board: &mut Board,
-    tt: &mut TranspositionTable,
-    max_depth: u32,
-) -> Option<Move> {
-    find_best_move_with_context(board, tt, max_depth, None, None, false)
-}
-
-/// Find the best move using iterative deepening with optional sinks and info publishing.
-///
-/// - `board`: the current position to search.
-/// - `tt`: transposition table used for move ordering and PV extraction.
-/// - `max_depth`: maximum depth to search.
-/// - `sink`: optional Arc<Mutex<Option<Move>>> updated with intermediate best moves.
-/// - `info_sender`: optional sender for structured UCI info messages.
-/// - `_is_ponder`: set to true when this is a ponder search (used for UCI `ponder` info).
-pub fn find_best_move_with_context(
-    board: &mut Board,
-    tt: &mut TranspositionTable,
-    max_depth: u32,
-    sink: Option<std::sync::Arc<std::sync::Mutex<Option<Move>>>>,
-    info_sender: Option<std::sync::mpsc::Sender<crate::uci::info::Info>>,
-    _is_ponder: bool,
-) -> Option<Move> {
+fn search_internal(config: SearchConfig, pawn_hash_table: &mut PawnHashTable) -> Option<Move> {
     let mut best_move: Option<Move> = None;
-    let mut _best_score = -MATE_SCORE * 2;
+    let mut prev_score: Option<i32> = None;
+    let mut last_depth_time = Duration::from_millis(1);
 
-    let mut legal_moves: crate::core::types::MoveList = crate::core::types::MoveList::new();
-    board.generate_moves_into(&mut legal_moves);
-    if legal_moves.is_empty() {
+    let mut root_moves: MoveList = MoveList::new();
+    config.board.generate_moves_into(&mut root_moves);
+    if root_moves.is_empty() {
         return None;
     }
-    if legal_moves.len() == 1 {
-        return Some(legal_moves[0]); // No need to search further
+    if root_moves.len() == 1 {
+        return Some(root_moves[0]);
     }
-    let mut root_moves = legal_moves; // Reuse for move ordering (moved instead of clone)
 
-    // Helper to build a PV string from the transposition table starting at the current hash
-    fn build_pv_string(tt: &TranspositionTable, start_hash: u64) -> String {
-        let mut pv = Vec::new();
-        if let Some(entry) = tt.probe(start_hash) {
-            if let Some(mv) = entry.best_move {
-                pv.push(mv);
+    // Create the initial SearchContext
+    let mut ordering_ctx = crate::movegen::ordering::OrderingContext::new(255); // Max depth is 255
+    let mut s_ctx = crate::search::search_context::SearchContext {
+        tt: config.tt,
+        moves_buf: &mut MoveList::new(),
+        ordering_ctx: &mut ordering_ctx,
+        ply: 0,
+        pawn_hash_table,
+    };
+
+    for depth in 1..=255 {
+        if should_stop(&config.limits, depth, &config.start_time, last_depth_time) {
+            break;
+        }
+
+        s_ctx.tt.new_generation();
+        let depth_start = Instant::now();
+
+        let mut mv_opt: Option<Move> = None;
+        let mut score: i32 = 0;
+        let mut completed = false;
+
+        // Reset the ply for the root search for each iteration
+        s_ctx.ply = 0;
+
+        if let Some(ps) = prev_score {
+            if depth > 2 && ps.abs() < (MATE_SCORE / 2) {
+                let mut alpha = ps - 10;
+                let mut beta = ps + 10;
+                let mut margin = 10;
+
+                loop {
+                    if search_control::should_stop() {
+                        break;
+                    }
+
+                    let stop_check = || {
+                        should_stop(&config.limits, depth, &config.start_time, last_depth_time)
+                            || search_control::should_stop()
+                    };
+                    let (mv_try, sc_try, completed_try) = crate::search::run_root_search(
+                        config.board,
+                        &mut s_ctx,
+                        depth,
+                        &mut root_moves[..],
+                        stop_check,
+                        Some((alpha, beta)),
+                    );
+
+                    if !completed_try {
+                        break; // Aborted, fall back to full window
+                    }
+
+                    if sc_try <= alpha {
+                        alpha = ps - margin;
+                    } else if sc_try >= beta {
+                        beta = ps + margin;
+                    } else {
+                        mv_opt = mv_try;
+                        score = sc_try;
+                        completed = true;
+                        break;
+                    }
+
+                    margin = margin.saturating_mul(2);
+                    if margin > 500 {
+                        break; // Give up, fall back to full window
+                    }
+                }
             }
         }
-        let pv_strs: Vec<String> = pv
-            .iter()
-            .map(|m| format!("{}{}", crate::core::types::format_square(m.from), crate::core::types::format_square(m.to)))
-            .collect();
-        pv_strs.join(" ")
-    }
 
-    // Iterative Deepening Loop
-    let search_start = Instant::now();
+        if !completed && !search_control::should_stop() {
+            let stop_check = || {
+                should_stop(&config.limits, depth, &config.start_time, last_depth_time)
+                    || search_control::should_stop()
+            };
+            let (mv_full, sc_full, completed_full) = crate::search::run_root_search(
+                config.board,
+                &mut s_ctx,
+                depth,
+                &mut root_moves[..],
+                stop_check,
+                None,
+            );
+            mv_opt = mv_full;
+            score = sc_full;
+            completed = completed_full;
+        }
 
-    for depth in 1..=max_depth {
-        let _depth_start = Instant::now();
-        let _nodes_before = crate::search::control::get_node_count();
-        let mut alpha = -MATE_SCORE * 2;
-        let beta = MATE_SCORE * 2;
-        let mut current_best_score = -MATE_SCORE * 2;
-        let mut current_best_move: Option<Move> = None;
+        if completed {
+            if let Some(mv) = mv_opt {
+                best_move = Some(mv);
+                prev_score = Some(score);
 
-        // Optional: order moves using hash move from TT
-        if let Some(entry) = tt.probe(board.hash) {
-            if let Some(hm) = &entry.best_move {
-                if let Some(pos) = root_moves.iter().position(|m| m == hm) {
+                if let Some(ref s) = config.sink {
+                    let mut lock = match s.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => {
+                            eprintln!("warning: sink mutex poisoned, recovering");
+                            poisoned.into_inner()
+                        }
+                    };
+                    *lock = best_move;
+                }
+
+                if let Some(ref sender) = config.info_sender {
+                    send_uci_info(
+                        sender,
+                        depth,
+                        score,
+                        best_move,
+                        s_ctx.tt,
+                        config.board.hash,
+                        &config.start_time,
+                        config.is_ponder,
+                    );
+                }
+
+                if let Some(pos) = root_moves.iter().position(|m| *m == mv) {
                     root_moves.swap(0, pos);
                 }
             }
         }
-
-        // Temporary moves buffer to pass into recursive negamax/quiesce calls
-    let mut mv_buf: crate::core::types::MoveList = crate::core::types::MoveList::new();
-        for m in &root_moves {
-            let info = board.make_move(m);
-            let score = -crate::search::algorithms::negamax(board, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut crate::ordering::OrderingContext::new(256), 0);
-            board.unmake_move(m, info);
-
-            if score > current_best_score {
-                current_best_score = score;
-                current_best_move = Some(*m);
-            }
-
-            alpha = alpha.max(current_best_score);
-        }
-
-        if let Some(mv) = current_best_move {
-            _best_score = current_best_score;
-            best_move = Some(mv);
-
-            // publish intermediate best move to sink if provided
-            if let Some(ref s) = sink {
-                let mut lock = match s.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => {
-                        eprintln!("warning: sink mutex poisoned, recovering");
-                        poisoned.into_inner()
-                    }
-                };
-                *lock = best_move;
-            }
-
-            // Build structured Info and send to the info channel if present
-            if let Some(ref sender) = info_sender {
-                let nodes_after = crate::search::control::get_node_count();
-                let nodes_total = nodes_after;
-                let elapsed_ms = search_start.elapsed().as_millis();
-                let nps = if elapsed_ms > 0 {
-                    Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
-                } else {
-                    None
-                };
-                let pv = build_pv_string(tt, board.hash);
-                let mut info = crate::uci::info::Info {
-                    depth: Some(depth),
-                    nodes: Some(nodes_total),
-                    nps,
-                    time_ms: Some(elapsed_ms),
-                    score_cp: None,
-                    score_mate: None,
-                    pv: Some(pv.clone()),
-                    seldepth: Some(depth),
-                    ponder: None,
-                };
-                if _best_score.abs() > (MATE_SCORE / 2) {
-                    let mate_in = (MATE_SCORE - _best_score.abs() + 1) / 2;
-                    info.score_mate = Some(mate_in);
-                } else {
-                    info.score_cp = Some(_best_score);
-                }
-                // If the caller indicated we are pondering, include the best move as 'ponder'
-                if _is_ponder {
-                    if let Some(bm) = best_move {
-                        info.ponder = Some(format!(
-                            "{}{}",
-                            crate::core::types::format_square(bm.from),
-                            crate::core::types::format_square(bm.to)
-                        ));
-                    }
-                }
-                let _ = sender.send(info);
-            }
-
-            // Optional: reorder root_moves so best move is searched first in next iteration
-            if let Some(pos) = root_moves.iter().position(|m| *m == mv) {
-                root_moves.swap(0, pos);
-            }
-        }
+        last_depth_time = depth_start.elapsed();
     }
 
     best_move
 }
 
-pub fn find_best_move_with_time_context(
-    board: &mut Board,
-    tt: &mut TranspositionTable,
-    max_time: Duration,
-    start_time: Instant,
-    sink: Option<std::sync::Arc<std::sync::Mutex<Option<Move>>>>,
-    info_sender: Option<std::sync::mpsc::Sender<crate::uci::info::Info>>,
-    _is_ponder: bool,
-) -> Option<Move> {
-    let mut best_move: Option<Move> = None;
-    let mut depth = 1;
-    let mut last_depth_time = Duration::from_millis(1); // Prevent div-by-zero on first estimate
-
-    while start_time.elapsed() + SAFETY_MARGIN < max_time {
-        let elapsed = start_time.elapsed();
-        let time_remaining = max_time.checked_sub(elapsed).unwrap_or_default();
-
-        // Estimate whether we have enough time for the next depth
-        let estimated_next_time = last_depth_time.mul_f32(TIME_GROWTH_FACTOR);
-        if estimated_next_time + SAFETY_MARGIN > time_remaining {
-            break; // Not enough time for another full depth
-        }
-
-        let depth_start = Instant::now();
-
-        let mut alpha = -MATE_SCORE * 2;
-        let beta = MATE_SCORE * 2;
-        let mut best_score = -MATE_SCORE * 2;
-    let mut legal_moves: crate::core::types::MoveList = crate::core::types::MoveList::new();
-    board.generate_moves_into(&mut legal_moves);
-
-        if legal_moves.is_empty() {
-            return None;
-        }
-
-        if legal_moves.len() == 1 {
-            return Some(legal_moves[0]); // No need to search further
-        }
-
-        // MVV-LVA and TT move ordering
-        legal_moves.sort_by_key(|m| -crate::ordering::mvv_lva_score(m, board));
-        if let Some(entry) = tt.probe(board.hash) {
-            if let Some(hm) = &entry.best_move {
-                if let Some(pos) = legal_moves.iter().position(|m| m == hm) {
-                    legal_moves.swap(0, pos);
-                }
+fn should_stop(limits: &SearchLimits, depth: u32, start_time: &Instant, last_depth_time: Duration) -> bool {
+    match limits {
+        SearchLimits::Depth(max_depth) => depth > *max_depth,
+        SearchLimits::Time(max_time) => {
+            let elapsed = start_time.elapsed();
+            if elapsed + SAFETY_MARGIN >= *max_time {
+                return true;
             }
+            let time_remaining = max_time.checked_sub(elapsed).unwrap_or_default();
+            let estimated_next_time = last_depth_time.mul_f32(TIME_GROWTH_FACTOR);
+            estimated_next_time + SAFETY_MARGIN > time_remaining
         }
-
-        let mut new_best_move = None;
-
-        // Temporary moves buffer reused for recursive calls
-    let mut mv_buf: crate::core::types::MoveList = crate::core::types::MoveList::new();
-        for m in &legal_moves {
-            if start_time.elapsed() + SAFETY_MARGIN >= max_time {
-                break;
-            }
-
-            let info = board.make_move(m);
-            let score = -crate::search::algorithms::negamax(board, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut crate::ordering::OrderingContext::new(256), 0);
-            board.unmake_move(m, info);
-
-            if score > best_score {
-                best_score = score;
-                new_best_move = Some(*m);
-            }
-
-            alpha = alpha.max(best_score);
-        }
-
-        // Only update result if completed full depth in time
-        if start_time.elapsed() + SAFETY_MARGIN < max_time {
-            best_move = new_best_move;
-            // publish best move for this depth
-            if let Some(ref s) = sink {
-                let mut lock = match s.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => {
-                        eprintln!("warning: sink mutex poisoned, recovering");
-                        poisoned.into_inner()
-                    }
-                };
-                *lock = best_move;
-            }
-
-            // Send structured Info via channel if available
-            if let Some(ref sender) = info_sender {
-                // Build PV by cloning board and following TT best moves
-                fn build_pv_using_board(
-                    orig: &Board,
-                    tt: &TranspositionTable,
-                    max_ply: usize,
-                ) -> String {
-                    let mut b = orig.clone();
-                    let mut pv = Vec::new();
-                    for _ in 0..max_ply {
-                        if let Some(entry) = tt.probe(b.hash) {
-                            if let Some(mv) = entry.best_move {
-                                pv.push(mv);
-                                let _info = b.make_move(&mv);
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    let pv_strs: Vec<String> = pv
-                        .iter()
-                        .map(|m| format!("{}{}", crate::core::types::format_square(m.from), crate::core::types::format_square(m.to)))
-                        .collect();
-                    pv_strs.join(" ")
-                }
-
-                let nodes_total = crate::search::control::get_node_count();
-                let elapsed_ms = start_time.elapsed().as_millis();
-                let nps = if elapsed_ms > 0 {
-                    Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
-                } else {
-                    None
-                };
-                let pv = build_pv_using_board(board, tt, 20);
-                let mut info = crate::uci::info::Info {
-                    depth: Some(depth),
-                    nodes: Some(nodes_total),
-                    nps,
-                    time_ms: Some(elapsed_ms),
-                    score_cp: None,
-                    score_mate: None,
-                    pv: Some(pv),
-                    seldepth: None,
-                    ponder: None,
-                };
-                if best_score.abs() > (MATE_SCORE / 2) {
-                    let mate_in = (MATE_SCORE - best_score.abs() + 1) / 2;
-                    info.score_mate = Some(mate_in);
-                } else {
-                    info.score_cp = Some(best_score);
-                }
-                if _is_ponder {
-                    if let Some(bm) = best_move {
-                        info.ponder = Some(format!(
-                            "{}{}",
-                            crate::core::types::format_square(bm.from),
-                            crate::core::types::format_square(bm.to)
-                        ));
-                    }
-                }
-                let _ = sender.send(info);
-            }
-
-            last_depth_time = depth_start.elapsed();
-            depth += 1;
-        } else {
-            break;
-        }
+        SearchLimits::Infinite => false,
     }
-
-    best_move
 }
 
-#[allow(dead_code)]
-pub fn find_best_move_with_time_with_sink(
-    board: &mut Board,
-    tt: &mut TranspositionTable,
-    max_time: Duration,
-    start_time: Instant,
-    sink: Option<std::sync::Arc<std::sync::Mutex<Option<Move>>>>,
-    info_sender: Option<std::sync::mpsc::Sender<crate::uci::info::Info>>,
+fn send_uci_info(
+    sender: &Sender<uci_info::Info>,
+    depth: u32,
+    score: i32,
+    best_move: Option<Move>,
+    tt: &TranspositionTable,
+    board_hash: u64,
+    start_time: &Instant,
     is_ponder: bool,
-) -> Option<Move> {
-    find_best_move_with_time_context(board, tt, max_time, start_time, sink, info_sender, is_ponder)
+) {
+    let nodes_total = search_control::get_node_count();
+    let elapsed_ms = start_time.elapsed().as_millis();
+    let nps = if elapsed_ms > 0 {
+        Some(((nodes_total as u128 * 1000) / elapsed_ms) as u64)
+    } else {
+        None
+    };
+    let pv = crate::search::build_pv_from_tt(tt, board_hash);
+    let mut info = uci_info::Info {
+        depth: Some(depth),
+        nodes: Some(nodes_total),
+        nps,
+        time_ms: Some(elapsed_ms),
+        score_cp: None,
+        score_mate: None,
+        pv: Some(pv),
+        seldepth: Some(depth),
+        ponder: None,
+    };
+    if score.abs() > (MATE_SCORE / 2) {
+        let mate_in = (MATE_SCORE - score.abs() + 1) / 2;
+        info.score_mate = Some(mate_in);
+    } else {
+        info.score_cp = Some(score);
+    }
+    if is_ponder {
+        if let Some(bm) = best_move {
+            info.ponder = Some(format!("{}{}", format_square(bm.from), format_square(bm.to)));
+        }
+    }
+    let _ = sender.send(info);
 }
+
+

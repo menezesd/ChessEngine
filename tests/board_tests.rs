@@ -79,7 +79,7 @@ fn endgame_no_null_move() {
     let mut board = Board::try_from_fen(fen).expect("Invalid FEN in test");
     let mut tt = TranspositionTable::new(1);
     // Run a shallow search: ensure it completes and returns a legal move (or None if mate/stalemate)
-    let mv = chess_engine::search::orchestration::find_best_move_with_context(&mut board, &mut tt, 3, None, None, false);
+    let mv = chess_engine::search::orchestration::iterative_deepening_with_sink(&mut board, &mut tt, 3, None, None, false);
     // At minimum, search should not panic and should return either Some move or None (no crash)
     let _ = mv;
 }

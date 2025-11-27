@@ -89,6 +89,9 @@ impl Board {
         // Update position history
         self.position_history.push(self.hash);
 
+        let previous_last_move = self.last_move_made;
+        self.last_move_made = Some(*m);
+
         UnmakeInfo {
             captured_piece_info,
             previous_en_passant_target,
@@ -96,6 +99,7 @@ impl Board {
             previous_hash,
             previous_halfmove_clock,
             previous_history_len,
+            previous_last_move,
         }
     }
 
@@ -115,6 +119,7 @@ impl Board {
         self.halfmove_clock = info.previous_halfmove_clock;
         self.position_history
             .truncate(info.previous_history_len);
+        self.last_move_made = info.previous_last_move;
 
         // Restore pieces on board (no hash updates needed here as hash is fully restored)
         let color = self.current_color();

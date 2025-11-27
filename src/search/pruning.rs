@@ -1,8 +1,7 @@
-use crate::transposition::transposition_table::{TranspositionTable, BoundType};
-use crate::core::types::MoveList;
+use crate::transposition::transposition_table::BoundType;
 use crate::core::board::Board;
-use crate::movegen::ordering::OrderingContext;
 use crate::core::config::evaluation::MATE_SCORE;
+use crate::search::search_context::SearchContext;
 
 /// Check if the current position is likely zugzwang (only king and pawns)
 /// In such positions, null move pruning is unsafe
@@ -33,19 +32,33 @@ pub fn mate_distance_pruning(mut alpha: i32, mut beta: i32, ply: usize) -> (i32,
 /// Check if futility pruning should skip this quiet move
 pub fn should_futility_prune(
     board: &Board,
+    s_ctx: &mut SearchContext,
     depth: u32,
     alpha: i32,
     is_quiet: bool,
+    tt_stored_score: Option<i32>,
 ) -> bool {
-    if !is_quiet || depth > 2 {
+    // Only apply if not in check, and it's a quiet move (not a capture or promotion)
+    if board.is_in_check(board.current_color()) || !is_quiet {
         return false;
     }
 
-    // Futility pruning: at very shallow depths (near leaf), skip quiet moves
-    // that are unlikely to raise alpha. This is a conservative heuristic.
-    let margin = if depth == 1 { 150 } else { 80 };
-    let stand_pat = crate::evaluation::eval::evaluate(board);
-    stand_pat + margin <= alpha
+    let static_eval = tt_stored_score.unwrap_or_else(|| crate::evaluation::eval::evaluate(board, s_ctx.pawn_hash_table));
+
+    // Futility pruning: if the static evaluation is already significantly
+    // worse than alpha, it's unlikely a quiet move will improve the score.
+    // Apply more aggressively at deeper depths.
+    if depth == 1 && static_eval + 200 < alpha {
+        true
+    } else if depth == 2 && static_eval + 300 < alpha {
+        true
+    } else if depth == 3 && static_eval + 500 < alpha {
+        true
+    } else if depth == 4 && static_eval + 700 < alpha {
+        true
+    } else {
+        false
+    }
 }
 
 /// Check if late move pruning should skip this move
@@ -61,13 +74,10 @@ pub fn should_late_move_prune(
 /// Apply null move pruning with verification search
 pub fn null_move_pruning(
     board: &mut Board,
-    tt: &mut TranspositionTable,
+    s_ctx: &mut SearchContext,
     depth: u32,
     beta: i32,
     alpha: i32,
-    moves_buf: &mut MoveList,
-    ctx: &mut OrderingContext,
-    ply: usize,
     current_hash: u64,
 ) -> Option<i32> {
     // Only apply when depth is sufficiently large, not in check, not zugzwang, and not near mate
@@ -78,20 +88,20 @@ pub fn null_move_pruning(
     }
 
     //  adaptive reduction: 4 + depth/6 + eval-beta bonus
-    let eval = crate::evaluation::eval::evaluate(board);
+    let eval = crate::evaluation::eval::evaluate(board, s_ctx.pawn_hash_table);
     let eval_beta_bonus = if eval >= beta { 1 } else { 0 };
     let r = 4u32.saturating_add(depth / 6).saturating_add(eval_beta_bonus);
     let r = r.min(depth.saturating_sub(1)); // Ensure we don't reduce below 1 ply
 
     let null_info = board.make_null_move();
-    let null_score = -crate::search::algorithms::negamax(board, tt, depth - 1 - r, -beta, -beta + 1, moves_buf, ctx, ply);
+    let null_score = -crate::search::algorithms::negamax(board, s_ctx, depth - 1 - r, -beta, -beta + 1);
     board.unmake_null_move(null_info);
 
     if null_score >= beta {
         // Verification search at the same reduced depth to confirm cutoff
-        let verify_score = -crate::search::algorithms::negamax(board, tt, depth - 1 - r, -beta, -alpha, moves_buf, ctx, ply);
+        let verify_score = -crate::search::algorithms::negamax(board, s_ctx, depth - 1 - r, -beta, -alpha);
         if verify_score >= beta {
-            tt.store(current_hash, depth, verify_score, BoundType::LowerBound, None);
+            s_ctx.tt.store(current_hash, depth, verify_score, BoundType::LowerBound, None);
             return Some(verify_score);
         }
         // Otherwise, fall through and search normally (no premature cutoff).

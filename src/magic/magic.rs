@@ -42,22 +42,21 @@ static ROOK_ATTACKS_FLAT: Lazy<(Vec<Bitboard>, [usize; 64], [usize; 64])> = Lazy
 });
 
 fn rook_mask_from_square(sq: usize) -> Bitboard {
-    let rank = (sq / 8) as isize;
-    let file = (sq % 8) as isize;
-    let directions = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let r = sq / 8;
+    let f = sq % 8;
     let mut mask = 0u64;
-    for (dr, df) in directions.iter() {
-        let mut r = rank + dr;
-        let mut f = file + df;
-        while (0..8).contains(&r) && (0..8).contains(&f) {
-            // Stop before reaching the board edge in this direction
-            if (*dr != 0 && (r == 0 || r == 7)) || (*df != 0 && (f == 0 || f == 7)) {
-                break;
-            }
-            let idx = (r as usize) * 8 + (f as usize);
-            mask |= 1u64 << idx;
-            r += dr;
-            f += df;
+
+    // File
+    for rank in 1..7 { // Ranks 1-6 (a2-a7, b2-b7, etc.)
+        if rank != r {
+            mask |= 1u64 << (rank * 8 + f);
+        }
+    }
+
+    // Rank
+    for file in 1..7 { // Files 1-6 (b1-g1, b2-g2, etc.)
+        if file != f {
+            mask |= 1u64 << (r * 8 + file);
         }
     }
     mask
@@ -142,23 +141,44 @@ static BISHOP_ATTACKS_FLAT: Lazy<(Vec<Bitboard>, [usize; 64], [usize; 64])> = La
 });
 
 fn bishop_mask_from_square(sq: usize) -> Bitboard {
-    let rank = (sq / 8) as isize;
-    let file = (sq % 8) as isize;
-    let directions = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+    let r = sq / 8;
+    let f = sq % 8;
     let mut mask = 0u64;
-    for (dr, df) in directions.iter() {
-        let mut r = rank + dr;
-        let mut f = file + df;
-        while (0..8).contains(&r) && (0..8).contains(&f) {
-            // stop before edge
-            if (r == 0 || r == 7) || (f == 0 || f == 7) {
-                break;
-            }
-            let idx = (r as usize) * 8 + (f as usize);
-            mask |= 1u64 << idx;
-            r += dr;
-            f += df;
-        }
+
+    // Up-right diagonal
+    let mut cur_r = r + 1;
+    let mut cur_f = f + 1;
+    while cur_r < 7 && cur_f < 7 {
+        mask |= 1u64 << (cur_r * 8 + cur_f);
+        cur_r += 1;
+        cur_f += 1;
+    }
+
+    // Up-left diagonal
+    let mut cur_r = r + 1;
+    let mut cur_f = f.saturating_sub(1);
+    while cur_r < 7 && cur_f > 0 {
+        mask |= 1u64 << (cur_r * 8 + cur_f);
+        cur_r += 1;
+        cur_f -= 1;
+    }
+
+    // Down-right diagonal
+    let mut cur_r = r.saturating_sub(1);
+    let mut cur_f = f + 1;
+    while cur_r > 0 && cur_f < 7 {
+        mask |= 1u64 << (cur_r * 8 + cur_f);
+        cur_r -= 1;
+        cur_f += 1;
+    }
+
+    // Down-left diagonal
+    let mut cur_r = r.saturating_sub(1);
+    let mut cur_f = f.saturating_sub(1);
+    while cur_r > 0 && cur_f > 0 {
+        mask |= 1u64 << (cur_r * 8 + cur_f);
+        cur_r -= 1;
+        cur_f -= 1;
     }
     mask
 }
@@ -203,3 +223,6 @@ pub fn bishop_attacks(square: Square, occupancy: Bitboard) -> Bitboard {
     let off = offsets[sq];
     flat[off + idx]
 }
+
+
+

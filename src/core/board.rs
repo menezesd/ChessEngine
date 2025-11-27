@@ -71,6 +71,8 @@ pub struct UnmakeInfo {
     pub previous_halfmove_clock: u32,
     /// Length of the position history prior to the move (used to truncate back).
     pub previous_history_len: usize,
+    /// Previous move made (for recapture extension, etc.)
+    pub previous_last_move: Option<crate::core::types::Move>,
 }
 
 /// Minimal snapshot for a null-move so the position can be restored.
@@ -95,6 +97,7 @@ pub struct Board {
     pub hash: u64,
     pub halfmove_clock: u32,
     pub position_history: Vec<u64>,
+    pub last_move_made: Option<crate::core::types::Move>,
 }
 
 impl Default for Board {
@@ -147,6 +150,7 @@ impl Board {
             hash: 0,
             halfmove_clock: 0,
             position_history: Vec::new(),
+            last_move_made: None,
         }
     }
 
@@ -247,6 +251,7 @@ impl Board {
         board.halfmove_clock = 0;
         board.position_history.clear();
         board.position_history.push(board.hash);
+        board.last_move_made = None;
         board
     }
 
@@ -381,8 +386,94 @@ impl Board {
         }
     }
 
+    /// Checks if the current position is a candidate for endgame tablebase lookup.
+    /// Returns true if the total number of pieces (excluding kings) is less than or equal to 3.
+    pub fn is_tablebase_endgame(&self) -> bool {
+        let mut total_pieces = 0;
+        for color_idx in 0..NUM_COLORS {
+            for piece_idx in 0..NUM_PIECES {
+                if piece_idx != piece_to_zobrist_index(Piece::King) {
+                    total_pieces += self.bitboards[color_idx][piece_idx].count_ones();
+                }
+            }
+        }
+        total_pieces <= 3
+    }
+
     // === DEBUGGING AND DISPLAY ===
     // Methods for debugging and displaying the board state
+
+    pub fn to_fen(&self) -> String {
+        let mut fen = String::new();
+
+        // Piece placement
+        for rank in (0..8).rev() {
+            let mut empty_squares = 0;
+            for file in 0..8 {
+                match self.get_square(rank, file) {
+                    Some((color, piece)) => {
+                        if empty_squares > 0 {
+                            fen.push_str(&empty_squares.to_string());
+                            empty_squares = 0;
+                        }
+                        fen.push(Board::piece_to_char(color, piece));
+                    }
+                    None => {
+                        empty_squares += 1;
+                    }
+                }
+            }
+            if empty_squares > 0 {
+                fen.push_str(&empty_squares.to_string());
+            }
+            if rank > 0 {
+                fen.push('/');
+            }
+        }
+
+        // Side to move
+        fen.push(' ');
+        fen.push(if self.white_to_move { 'w' } else { 'b' });
+
+        // Castling rights
+        fen.push(' ');
+        let mut castling_str = String::new();
+        if self.has_castling_right(Color::White, 'K') {
+            castling_str.push('K');
+        }
+        if self.has_castling_right(Color::White, 'Q') {
+            castling_str.push('Q');
+        }
+        if self.has_castling_right(Color::Black, 'K') {
+            castling_str.push('k');
+        }
+        if self.has_castling_right(Color::Black, 'Q') {
+            castling_str.push('q');
+        }
+        if castling_str.is_empty() {
+            fen.push('-');
+        } else {
+            fen.push_str(&castling_str);
+        }
+
+        // En passant target square
+        fen.push(' ');
+        if let Some(ep_target) = self.en_passant_target {
+            fen.push_str(&format_square(ep_target));
+        } else {
+            fen.push('-');
+        }
+
+        // Halfmove clock
+        fen.push(' ');
+        fen.push_str(&self.halfmove_clock.to_string());
+
+        // Fullmove number (always 1 for now, as we don't track it)
+        fen.push(' ');
+        fen.push_str("1"); // Assuming start of game for simplicity in FEN conversion, can be updated if fullmove tracked
+
+        fen
+    }
 
     // Add a print function for debugging and make it public so callers/tests can use it.
     pub fn print(&self) {

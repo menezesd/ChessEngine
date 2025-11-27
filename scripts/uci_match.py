@@ -65,7 +65,6 @@ class UCIEngine:
                 continue
             line = line.strip()
             out_lines.append(line)
-            # print(line)
             if line.startswith(token):
                 return out_lines
 
@@ -76,6 +75,30 @@ class UCIEngine:
             self._send('position startpos moves ' + ' '.join(moves))
         self._send('isready')
         self._drain_until('readyok')
+
+    def get_fen(self) -> str:
+        self._send('d')
+        fen_line = None
+        while True:
+            line = self.proc.stdout.readline()
+            if line is None or line == '':
+                time.sleep(0.01)
+                continue
+            line = line.strip()
+
+            if line.startswith('FEN: '):
+                fen_line = line[len('FEN: '):]
+                break
+            if line.startswith('Fen: '):
+                fen_line = line[len('Fen: '):]
+                break
+            # Continue reading until a FEN line or a "readyok" (for our engine) or timeout
+            if line.startswith('readyok'):
+                if self.cmd[0].endswith('chess_engine'): # Only break on readyok if it's our engine
+                    break
+        if fen_line:
+            return fen_line
+        raise RuntimeError('Fen not found in debug output')
 
     def go_movetime(self, ms: int):
         self._send(f'go movetime {ms}')
@@ -149,6 +172,7 @@ def run_game(engine_white: UCIEngine, engine_black: UCIEngine, movetime_ms: int,
         engine = engine_white if side == 0 else engine_black
         # ensure engine has current position
         engine.set_position(moves)
+        print(f'FEN: {engine.get_fen()}')
 
         if minutes_per_side is None:
             bestmove, info = engine.go_movetime(movetime_ms)
@@ -189,7 +213,7 @@ def main():
     parser.add_argument('--engine-a', default='./target/debug/chess_engine', help='Path to engine A (default: our engine)')
     parser.add_argument('--engine-b', default='/usr/games/stockfish', help='Path to engine B (default: /usr/games/stockfish)')
     parser.add_argument('--games', type=int, default=1, help='Number of games to play')
-    parser.add_argument('--movetime', type=int, default=100, help='Milliseconds per move')
+    parser.add_argument('--movetime', type=int, default=500, help='Milliseconds per move')
     parser.add_argument('--minutes', type=float, default=None, help='Minutes per side (if set, use time control instead of movetime)')
     parser.add_argument('--increment', type=int, default=0, help='Increment per move in milliseconds (used with --minutes)')
     parser.add_argument('--max-moves', type=int, default=200, help='Maximum plies per game')

@@ -114,7 +114,7 @@ impl SearchOrchestrator {
                 self.handle_ponder_hit()
             }
             UciCommand::Display => {
-                self.board.print();
+                println!("FEN: {}", self.board.to_fen());
                 vec![]
             }
             UciCommand::Quit => {

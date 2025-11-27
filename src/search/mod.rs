@@ -22,6 +22,8 @@ pub use extensions::*;
 // Re-export LMR
 pub use lmr::*;
 
+pub use search_context::*;
+
 // Module declarations
 pub mod algorithms;
 pub mod orchestration;
@@ -32,3 +34,4 @@ pub mod move_selector;
 pub mod quiescence;
 pub mod extensions;
 pub mod lmr;
+pub mod search_context;

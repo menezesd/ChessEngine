@@ -2,6 +2,7 @@ use crate::core::board::Board;
 use crate::core::types::{Bitboard, Color, Piece, Square};
 use crate::core::zobrist::{color_to_zobrist_index, piece_to_zobrist_index};
 use crate::core::config::evaluation::*;
+use crate::evaluation::pawn_hash::PawnHashTable;
 
 // Material values and piece-square tables are now imported from config
 
@@ -11,24 +12,9 @@ use crate::core::config::evaluation::*;
 /// `pawn_mg` and `pawn_eg` are precomputed pawn contributions for middlegame
 /// and endgame (from `pawn_eval`). This function adds piece material, PSTs and
 /// simple pawn-structure bonuses/penalties.
-pub fn eval(board: &Board, pawn_mg: i32, pawn_eg: i32) -> i32 {
+pub fn eval(board: &Board, pawn_mg: i32, pawn_eg: i32, _pawn_hash_table: &mut PawnHashTable) -> i32 {
     let mut mg_score = pawn_mg;
     let mut eg_score = pawn_eg;
-
-    // compute pawn files
-    let mut white_pawns_by_file = [0u32; 8];
-    let mut black_pawns_by_file = [0u32; 8];
-    for file in 0..8 {
-        let file_mask = Board::file_mask(file);
-        let wp = board.bitboards[color_to_zobrist_index(Color::White)]
-            [piece_to_zobrist_index(Piece::Pawn)]
-            & file_mask;
-        let bp = board.bitboards[color_to_zobrist_index(Color::Black)]
-            [piece_to_zobrist_index(Piece::Pawn)]
-            & file_mask;
-        white_pawns_by_file[file] = wp.count_ones();
-        black_pawns_by_file[file] = bp.count_ones();
-    }
 
     // piece material + PST
     for color_idx in 0..2 {
@@ -62,151 +48,6 @@ pub fn eval(board: &Board, pawn_mg: i32, pawn_eg: i32) -> i32 {
                     mg_score -= PST_MG[piece_idx][pst_idx];
                     eg_score -= PST_EG[piece_idx][pst_idx];
                 }
-            }
-        }
-    }
-
-    // bishop pair
-    let white_bishops = board.bitboards[color_to_zobrist_index(Color::White)]
-        [piece_to_zobrist_index(Piece::Bishop)];
-    let black_bishops = board.bitboards[color_to_zobrist_index(Color::Black)]
-        [piece_to_zobrist_index(Piece::Bishop)];
-    if white_bishops.count_ones() >= 2 {
-        mg_score += 30;
-    }
-    if black_bishops.count_ones() >= 2 {
-        mg_score -= 30;
-    }
-
-    // rook open/semi-open files and pawn-structure penalties (copied logic)
-    for file in 0..8 {
-        let fpawns = (white_pawns_by_file[file] + black_pawns_by_file[file]) as i32;
-        let white_rooks = board.bitboards[color_to_zobrist_index(Color::White)]
-            [piece_to_zobrist_index(Piece::Rook)];
-        let black_rooks = board.bitboards[color_to_zobrist_index(Color::Black)]
-            [piece_to_zobrist_index(Piece::Rook)];
-        let file_mask = Board::file_mask(file);
-        if white_rooks & file_mask != 0 {
-            if fpawns == 0 {
-                mg_score += 15;
-            } else if black_pawns_by_file[file] == 0 {
-                mg_score += 7;
-            }
-        }
-        if black_rooks & file_mask != 0 {
-            if fpawns == 0 {
-                mg_score -= 15;
-            } else if white_pawns_by_file[file] == 0 {
-                mg_score -= 7;
-            }
-        }
-
-        let wpf = white_pawns_by_file[file] as i32;
-        let bpf = black_pawns_by_file[file] as i32;
-        if wpf > 0 {
-            let left = if file > 0 {
-                white_pawns_by_file[file - 1]
-            } else {
-                0
-            };
-            let right = if file < 7 {
-                white_pawns_by_file[file + 1]
-            } else {
-                0
-            };
-            if left == 0 && right == 0 {
-                mg_score -= 12;
-            }
-            if wpf > 1 {
-                mg_score -= 12 * (wpf - 1);
-            }
-        }
-        if bpf > 0 {
-            let left = if file > 0 {
-                black_pawns_by_file[file - 1]
-            } else {
-                0
-            };
-            let right = if file < 7 {
-                black_pawns_by_file[file + 1]
-            } else {
-                0
-            };
-            if left == 0 && right == 0 {
-                mg_score += 12;
-            }
-            if bpf > 1 {
-                mg_score += 12 * (bpf - 1);
-            }
-        }
-
-        // passed pawn detection (approx)
-        let mut wpawns_on_file = board.bitboards[color_to_zobrist_index(Color::White)]
-            [piece_to_zobrist_index(Piece::Pawn)]
-            & file_mask;
-        while wpawns_on_file != 0 {
-            let sq = wpawns_on_file.trailing_zeros() as usize;
-            wpawns_on_file &= wpawns_on_file - 1;
-            let rank = sq / 8;
-            let mut is_passed = true;
-            let file_adj_mask = Board::file_mask(file)
-                | if file > 0 {
-                    Board::file_mask(file - 1)
-                } else {
-                    0
-                }
-                | if file < 7 {
-                    Board::file_mask(file + 1)
-                } else {
-                    0
-                };
-            let ahead_mask = if rank * 8 >= 64 {
-                u64::MAX
-            } else {
-                (1u64 << (rank * 8)) - 1
-            };
-            let bb = board.bitboards[color_to_zobrist_index(Color::Black)]
-                [piece_to_zobrist_index(Piece::Pawn)];
-            if bb & file_adj_mask & ahead_mask != 0 {
-                is_passed = false;
-            }
-            if is_passed {
-                let bonus = 10 + (7 - rank as i32) * 7;
-                mg_score += bonus;
-            }
-        }
-        let mut bpawns_on_file = board.bitboards[color_to_zobrist_index(Color::Black)]
-            [piece_to_zobrist_index(Piece::Pawn)]
-            & file_mask;
-        while bpawns_on_file != 0 {
-            let sq = bpawns_on_file.trailing_zeros() as usize;
-            bpawns_on_file &= bpawns_on_file - 1;
-            let rank = sq / 8;
-            let mut is_passed = true;
-            let file_adj_mask = Board::file_mask(file)
-                | if file > 0 {
-                    Board::file_mask(file - 1)
-                } else {
-                    0
-                }
-                | if file < 7 {
-                    Board::file_mask(file + 1)
-                } else {
-                    0
-                };
-            let ahead_mask = if (rank + 1) * 8 >= 64 {
-                0u64
-            } else {
-                !((1u64 << ((rank + 1) * 8)) - 1)
-            };
-            let bb = board.bitboards[color_to_zobrist_index(Color::White)]
-                [piece_to_zobrist_index(Piece::Pawn)];
-            if bb & file_adj_mask & ahead_mask != 0 {
-                is_passed = false;
-            }
-            if is_passed {
-                let bonus = 10 + rank as i32 * 7;
-                mg_score -= bonus;
             }
         }
     }
@@ -329,15 +170,7 @@ pub fn eval(board: &Board, pawn_mg: i32, pawn_eg: i32) -> i32 {
     let mut phase = (total_material_mg as f32) / (max_material as f32);
     phase = phase.clamp(0.0, 1.0);
 
-    let mut score = (phase * mg_score as f32 + (1.0 - phase) * eg_score as f32) as i32;
-    
-    // Add tempo bonus for side to move
-    if board.white_to_move {
-        score += TEMPO;
-    } else {
-        score -= TEMPO;
-    }
-
+    let score = (phase * mg_score as f32 + (1.0 - phase) * eg_score as f32) as i32;
     score
 }
 
@@ -407,9 +240,18 @@ fn compute_king_safety(board: &Board, e: &EvalData, color_idx: usize) -> (i32, i
     let idx = attack_units.clamp(0, (KING_ATTACK_PEN_MG.len() - 1) as i32) as usize;
     let mut mg_pen = KING_ATTACK_PEN_MG[idx];
     let mut eg_pen = KING_ATTACK_PEN_EG[idx];
-    // Add shield missing penalty
-    mg_pen += missing * SHIELD_MISSING_PEN_MG;
-    eg_pen += missing * SHIELD_MISSING_PEN_EG;
+
+    // Add shield missing penalty based on number of missing pawns
+    if missing == 1 {
+        mg_pen += SHIELD_ONE_PAWN_MISSING_MG;
+        eg_pen += SHIELD_ONE_PAWN_MISSING_EG;
+    } else if missing == 2 {
+        mg_pen += SHIELD_TWO_PAWNS_MISSING_MG;
+        eg_pen += SHIELD_TWO_PAWNS_MISSING_EG;
+    } else if missing == 3 {
+        mg_pen += SHIELD_THREE_PAWNS_MISSING_MG;
+        eg_pen += SHIELD_THREE_PAWNS_MISSING_EG;
+    }
 
     // King file penalties
     let file_mask = Board::file_mask(file);
@@ -505,51 +347,108 @@ pub fn pawn_eval(board: &Board) -> (i32, i32) {
                 }
             }
 
-            let base = ((paint & 0xfefefefefefefefe) >> 1) | ((paint & 0x7f7f7f7f7f7f7f7) << 1);
-            let strong_mask = if color == Color::White {
-                base | (base >> 8)
-            } else {
-                base | (base << 8)
-            };
-            if strong_mask & own != 0 {
-                let support_val = P_SUPPORT[sq];
+            let mut adj_mask = 0u64;
+            if file > 0 {
+                adj_mask |= Board::file_mask(file - 1);
+            }
+            if file < 7 {
+                adj_mask |= Board::file_mask(file + 1);
+            }
+            if (adj_mask & own) == 0 {
                 if color == Color::White {
-                    pmg += support_val;
+                    pmg += ISOLATED_PAWN_MG + (is_open as i32) * ISOLATED_OPEN_MG;
+                    peg += ISOLATED_PAWN_EG + (is_open as i32) * ISOLATED_OPEN_EG;
                 } else {
-                    pmg -= support_val;
+                    pmg -= ISOLATED_PAWN_MG + (is_open as i32) * ISOLATED_OPEN_MG;
+                    peg -= ISOLATED_PAWN_EG + (is_open as i32) * ISOLATED_OPEN_EG;
                 }
             } else {
-                let mut adj_mask = 0u64;
-                if file > 0 {
-                    adj_mask |= Board::file_mask(file - 1);
-                }
-                if file < 7 {
-                    adj_mask |= Board::file_mask(file + 1);
-                }
-                if (adj_mask & own) == 0 {
-                    if color == Color::White {
-                        pmg += ISOLATED_PAWN_MG + (is_open as i32) * ISOLATED_OPEN_MG;
-                        peg += ISOLATED_PAWN_EG + (is_open as i32) * ISOLATED_OPEN_EG;
-                    } else {
-                        pmg -= ISOLATED_PAWN_MG + (is_open as i32) * ISOLATED_OPEN_MG;
-                        peg -= ISOLATED_PAWN_EG + (is_open as i32) * ISOLATED_OPEN_EG;
-                    }
+                let base = ((paint & 0xfefefefefefefefe) >> 1) | ((paint & 0x7f7f7f7f7f7f7f7f) << 1);
+                let support_mask = if color == Color::White {
+                    base | (base >> 8)
                 } else {
-                    let support_mask = if color == Color::White {
-                        base | (base >> 8)
+                    base | (base << 8)
+                };
+                if (support_mask & own) == 0 {
+                    if color == Color::White {
+                        pmg += BACKWARD_PAWN_MG + (is_open as i32) * BACKWARD_OPEN_MG;
+                        peg += BACKWARD_PAWN_EG + (is_open as i32) * BACKWARD_OPEN_EG;
                     } else {
-                        base | (base << 8)
-                    };
-                    if (support_mask & own) == 0 {
-                        if color == Color::White {
-                            pmg += BACKWARD_PAWN_MG + (is_open as i32) * BACKWARD_OPEN_MG;
-                            peg += BACKWARD_PAWN_EG + (is_open as i32) * BACKWARD_OPEN_EG;
-                        } else {
-                            pmg -= BACKWARD_PAWN_MG + (is_open as i32) * BACKWARD_OPEN_MG;
-                            peg -= BACKWARD_PAWN_EG + (is_open as i32) * BACKWARD_OPEN_EG;
-                        }
+                        pmg -= BACKWARD_PAWN_MG + (is_open as i32) * BACKWARD_OPEN_MG;
+                        peg -= BACKWARD_PAWN_EG + (is_open as i32) * BACKWARD_OPEN_EG;
                     }
                 }
+            }
+
+            // Passed pawn
+            let file_adj_mask = Board::file_mask(file)
+                | if file > 0 {
+                    Board::file_mask(file - 1)
+                } else {
+                    0
+                }
+                | if file < 7 {
+                    Board::file_mask(file + 1)
+                } else {
+                    0
+                };
+            let ahead_mask = fill_forward_bits(1u64 << sq, color);
+            if (opp & file_adj_mask & ahead_mask) == 0 {
+                let bonus = if color == Color::White {
+                    PASSED_PAWN_BONUS[rank]
+                } else {
+                    PASSED_PAWN_BONUS[7-rank]
+                };
+                pmg += bonus.0;
+                peg += bonus.1;
+            }
+
+            // Connected Pawns
+            let mut connected_mask = 0u64;
+            if color == Color::White {
+                // Check if pawn is not on 8th rank
+                if rank < 7 {
+                    // Check up-left diagonal
+                    if file > 0 { connected_mask |= 1u64 << (sq + 7); }
+                    // Check up-right diagonal
+                    if file < 7 { connected_mask |= 1u64 << (sq + 9); }
+                }
+            } else {
+                // Check if pawn is not on 1st rank
+                if rank > 0 {
+                    // Check down-left diagonal
+                    if file > 0 { connected_mask |= 1u64 << (sq - 9); }
+                    // Check down-right diagonal
+                    if file < 7 { connected_mask |= 1u64 << (sq - 7); }
+                }
+            }
+            if (own & connected_mask) != 0 {
+                pmg += CONNECTED_PAWN_BONUS;
+                peg += CONNECTED_PAWN_BONUS;
+            }
+
+            // Pawn Chains (supported by a friendly pawn behind it on an adjacent file)
+            let mut chain_mask = 0u64;
+            if color == Color::White {
+                // Check if pawn is not on 1st rank
+                if rank > 0 {
+                    // Check down-left diagonal
+                    if file > 0 { chain_mask |= 1u64 << (sq - 9); }
+                    // Check down-right diagonal
+                    if file < 7 { chain_mask |= 1u64 << (sq - 7); }
+                }
+            } else {
+                // Check if pawn is not on 8th rank
+                if rank < 7 {
+                    // Check up-left diagonal
+                    if file > 0 { chain_mask |= 1u64 << (sq + 7); }
+                    // Check up-right diagonal
+                    if file < 7 { chain_mask |= 1u64 << (sq + 9); }
+                }
+            }
+            if (own & chain_mask) != 0 {
+                pmg += PAWN_CHAIN_BONUS;
+                peg += PAWN_CHAIN_BONUS;
             }
         }
     }
@@ -755,13 +654,29 @@ pub fn eval_king(board: &Board, e: &mut EvalData, color: Color) {
 }
 
 /// Main evaluation function that combines all evaluation components
-pub fn evaluate(board: &Board) -> i32 {
-    let (pawn_mg, pawn_eg) = pawn_eval(board);
-    let score = eval(board, pawn_mg, pawn_eg);
-    if board.white_to_move {
-        score
+pub fn evaluate(board: &Board, pawn_hash_table: &mut PawnHashTable) -> i32 {
+    let pawn_hash = PawnHashTable::generate_pawn_hash(board);
+    let (pawn_mg, pawn_eg) = if let Some(entry) = pawn_hash_table.probe(pawn_hash) {
+        (entry.pmg, entry.peg)
     } else {
-        -score
+        let (pmg, peg) = pawn_eval(board);
+        pawn_hash_table.store(pawn_hash, crate::evaluation::pawn_hash::PawnEntry { pmg, peg });
+        (pmg, peg)
+    };
+
+    let static_score_white_perspective = eval(board, pawn_mg, pawn_eg, pawn_hash_table); // white - black
+
+    // Tablebase endgame detection (placeholder for actual EGTB lookup)
+    if board.is_tablebase_endgame() {
+        // In a real engine, this would query a tablebase for win/loss/draw
+        // For now, we just acknowledge it.
+        println!("INFO: Tablebase endgame detected!");
+    }
+
+    if board.white_to_move {
+        static_score_white_perspective + TEMPO
+    } else {
+        -(static_score_white_perspective) - TEMPO
     }
 }
 
@@ -775,7 +690,8 @@ mod tests {
     fn test_eval_starting_position() {
         let board = Board::new();
         let (pawn_mg, pawn_eg) = pawn_eval(&board);
-        let score = eval(&board, pawn_mg, pawn_eg);
+        let mut dummy_pawn_hash_table = PawnHashTable::new();
+        let score = eval(&board, pawn_mg, pawn_eg, &mut dummy_pawn_hash_table);
 
         // Starting position should be roughly equal (score close to 0)
         assert!(score.abs() < 100); // Adjust expectation based on current implementation
@@ -788,7 +704,7 @@ mod tests {
 
         // Starting position pawn evaluation - current implementation has slight asymmetry
         // due to P_SUPPORT table not being perfectly symmetric
-        assert_eq!(pawn_mg, -67);
+        assert_eq!(pawn_mg, 0);
         assert_eq!(pawn_eg, 0);
     }
 
@@ -808,7 +724,8 @@ mod tests {
         // White has extra queen
         let board = Board::try_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKQNR w - - 0 1").unwrap();
         let (pawn_mg, pawn_eg) = pawn_eval(&board);
-        let score = eval(&board, pawn_mg, pawn_eg);
+        let mut dummy_pawn_hash_table = PawnHashTable::new();
+        let score = eval(&board, pawn_mg, pawn_eg, &mut dummy_pawn_hash_table);
 
         // White should have huge material advantage
         assert!(score > 400); // Adjust expectation
@@ -819,7 +736,8 @@ mod tests {
         // White has bishop pair, black has none
         let board = Board::try_from_fen("8/8/8/8/8/8/8/B1B5 w - - 0 1").unwrap();
         let (pawn_mg, pawn_eg) = pawn_eval(&board);
-        let score = eval(&board, pawn_mg, pawn_eg);
+        let mut dummy_pawn_hash_table = PawnHashTable::new();
+        let score = eval(&board, pawn_mg, pawn_eg, &mut dummy_pawn_hash_table);
 
         // White should get bishop pair bonus
         assert!(score > 25); // Bishop pair is worth 30 centipawns
@@ -830,7 +748,8 @@ mod tests {
         // White rook on open file
         let board = Board::try_from_fen("8/8/8/8/8/8/8/R7 w - - 0 1").unwrap();
         let (pawn_mg, pawn_eg) = pawn_eval(&board);
-        let score = eval(&board, pawn_mg, pawn_eg);
+        let mut dummy_pawn_hash_table = PawnHashTable::new();
+        let score = eval(&board, pawn_mg, pawn_eg, &mut dummy_pawn_hash_table);
 
         // White should get open file bonus
         assert!(score > 10); // Open file rook bonus is 15 centipawns
@@ -862,12 +781,13 @@ mod tests {
     #[test]
     fn test_eval_symmetric_when_flipped() {
         let board = Board::new();
-        let score_white_to_move = evaluate(&board);
+        let mut dummy_pawn_hash_table = PawnHashTable::new();
+        let score_white_to_move = evaluate(&board, &mut dummy_pawn_hash_table);
 
         // Flip the board (black to move)
         let mut board_flipped = board.clone();
         board_flipped.white_to_move = false;
-        let score_black_to_move = evaluate(&board_flipped);
+        let score_black_to_move = evaluate(&board_flipped, &mut dummy_pawn_hash_table);
 
         // Scores should be negations in starting position
         assert_eq!(score_white_to_move, -score_black_to_move);

@@ -1,18 +1,43 @@
 use crate::core::types::MoveList;
 use crate::core::board::Board;
-use crate::movegen::ordering::OrderingContext;
 use crate::evaluation::eval;
 use crate::movegen::ordering::order_moves;
+use crate::search::search_context::SearchContext;
 
 /// Quiescence search to avoid horizon effect
 pub fn quiesce(
     board: &mut Board,
+    s_ctx: &mut SearchContext,
     mut alpha: i32,
     beta: i32,
-    _moves_buf: &mut MoveList,  // Not used, kept for API compatibility
-    ctx: &mut OrderingContext,
 ) -> i32 {
-    let stand_pat_score = eval::evaluate(board);
+    let in_check = board.is_in_check(board.current_color());
+
+    // In check: generate all moves to escape check
+    if in_check {
+        let mut all_moves = MoveList::new();
+        board.generate_moves_into(&mut all_moves); // This generates all legal moves
+
+        let mut best_score = -i32::MAX;
+        for m in &all_moves {
+            if crate::search::control::should_stop() {
+                break;
+            }
+            let info = board.make_move(m);
+            let score = -quiesce(board, s_ctx, -beta, -alpha);
+            board.unmake_move(m, info);
+
+            best_score = best_score.max(score);
+            alpha = alpha.max(best_score);
+            if alpha >= beta {
+                return beta; // Fail hard beta-cutoff
+            }
+        }
+        return best_score; // Return the best score found to escape check
+    }
+
+
+    let stand_pat_score = eval::evaluate(board, s_ctx.pawn_hash_table);
     if board.is_draw() {
         return 0;
     }
@@ -28,24 +53,9 @@ pub fn quiesce(
     let mut local_buf = MoveList::new();
     board.generate_tactical_moves_into(&mut local_buf);
 
-    // Generate checks if in check or if stand pat is low (delta pruning)
-    let in_check = board.is_in_check(board.current_color());
-    if in_check || stand_pat_score + 200 >= alpha {
-        let mut check_buf = MoveList::new();
-        board.generate_moves_into(&mut check_buf);
-        // Filter to only checking moves
-        check_buf.retain(|m| {
-            let info = board.make_move(m);
-            let gives_check = board.is_in_check(board.current_color());
-            board.unmake_move(m, info);
-            gives_check
-        });
-        local_buf.extend(check_buf);
-    }
-
     // Apply SEE-based pruning and ordering
     apply_see_pruning_and_ordering(board, &mut local_buf);
-    order_moves(ctx, board, &mut local_buf[..], 0, None);
+    order_moves(s_ctx.ordering_ctx, board, &mut local_buf[..], 0, None);
 
     let mut best_score = stand_pat_score;
     for m in &local_buf {
@@ -53,7 +63,14 @@ pub fn quiesce(
             break;
         }
         let info = board.make_move(m);
-        let score = -quiesce(board, -beta, -alpha, &mut MoveList::new(), ctx);
+        let mut child_s_ctx = SearchContext {
+            tt: s_ctx.tt,
+            moves_buf: &mut MoveList::new(),
+            ordering_ctx: s_ctx.ordering_ctx,
+            ply: s_ctx.ply + 1,
+            pawn_hash_table: s_ctx.pawn_hash_table,
+        };
+        let score = -quiesce(board, &mut child_s_ctx, -beta, -alpha);
         board.unmake_move(m, info);
 
         best_score = best_score.max(score);

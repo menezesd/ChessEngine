@@ -2,6 +2,7 @@ use crate::transposition::transposition_table::TranspositionTable;
 use crate::core::types::Move;
 use crate::core::board::Board;
 use crate::core::config::evaluation::*;
+use crate::search::search_context::SearchContext;
 
 /// Build principal variation string from transposition table
 #[allow(clippy::never_loop)]
@@ -39,7 +40,7 @@ pub fn apply_tt_move_hint(moves: &mut [Move], tt: &TranspositionTable, hash: u64
 /// Run a single root depth search over root_moves
 pub fn run_root_search<F>(
     board: &mut Board,
-    tt: &mut TranspositionTable,
+    s_ctx: &mut SearchContext,
     depth: u32,
     root_moves: &mut [Move],
     mut should_abort: F,
@@ -56,11 +57,8 @@ pub fn run_root_search<F>(
         let mut best_score = -MATE_SCORE * 2;
 
         // Allow TT to promote a suggested move to the front for ordering
-        apply_tt_move_hint(&mut root_moves[..], tt, board.hash);
+        apply_tt_move_hint(&mut root_moves[..], s_ctx.tt, board.hash);
 
-        let mut mv_buf: crate::core::types::MoveList = crate::core::types::MoveList::new();
-        // Create a persistent OrderingContext for the root search so killers/history persist
-        let mut ordering_ctx = crate::ordering::OrderingContext::new(256);
         for (idx, m) in root_moves.iter().enumerate() {
             if should_abort() {
                 return (None, 0, false); // aborted mid-root
@@ -69,12 +67,12 @@ pub fn run_root_search<F>(
             // Use the aspiration window for the first root move if provided
             let score = if idx == 0 {
                 if let Some((w_alpha, w_beta)) = window {
-                    -crate::search::algorithms::negamax(board, tt, depth - 1, w_alpha, w_beta, &mut mv_buf, &mut ordering_ctx, 0)
+                    -crate::search::algorithms::negamax(board, s_ctx, depth - 1, w_alpha, w_beta)
                 } else {
-                    -crate::search::algorithms::negamax(board, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx, 0)
+                    -crate::search::algorithms::negamax(board, s_ctx, depth - 1, -beta, -alpha)
                 }
             } else {
-                -crate::search::algorithms::negamax(board, tt, depth - 1, -beta, -alpha, &mut mv_buf, &mut ordering_ctx, 0)
+                -crate::search::algorithms::negamax(board, s_ctx, depth - 1, -beta, -alpha)
             };
             board.unmake_move(m, info);
 

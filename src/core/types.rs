@@ -19,7 +19,13 @@ pub enum Color {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Square(pub usize, pub usize);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+impl std::fmt::Display for Square {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}{}", (self.1 as u8 + b'a') as char, self.0 + 1)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Move {
     pub from: Square,
     pub to: Square,
@@ -27,6 +33,24 @@ pub struct Move {
     pub is_en_passant: bool,
     pub promotion: Option<Piece>,
     pub captured_piece: Option<Piece>,
+}
+
+impl std::fmt::Display for Move {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let promotion_str = if let Some(p) = self.promotion {
+            match p {
+                Piece::Knight => "n",
+                Piece::Bishop => "b",
+                Piece::Rook => "r",
+                Piece::Queen => "q",
+                _ => "",
+            }
+            .to_string()
+        } else {
+            "".to_string()
+        };
+        write!(f, "{}{}{}", self.from, self.to, promotion_str)
+    }
 }
 
 pub fn file_to_index(file: char) -> usize {

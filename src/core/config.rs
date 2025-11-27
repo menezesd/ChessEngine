@@ -55,11 +55,16 @@ pub mod evaluation {
     pub const KING_ATTACK_CAPS: [i32; 6] = [0, 9, 5, 7, 15, 0]; // Caps per piece type
 
     /// King shield missing penalties
-    pub const SHIELD_MISSING_PEN_MG: i32 = 25;
-    pub const SHIELD_MISSING_PEN_EG: i32 = 10;
+    pub const SHIELD_ONE_PAWN_MISSING_MG: i32 = 15;
+    pub const SHIELD_ONE_PAWN_MISSING_EG: i32 = 5;
+    pub const SHIELD_TWO_PAWNS_MISSING_MG: i32 = 30;
+    pub const SHIELD_TWO_PAWNS_MISSING_EG: i32 = 10;
+    pub const SHIELD_THREE_PAWNS_MISSING_MG: i32 = 50;
+    pub const SHIELD_THREE_PAWNS_MISSING_EG: i32 = 20;
 
     /// Additional evaluation bonuses
     pub const TEMPO: i32 = 5; // Tempo bonus for side to move
+    pub const RFP_MARGIN: i32 = 100; // Reverse Futility Pruning margin
     pub const BISHOP_PAIR_MG: i32 = 40;
     pub const BISHOP_PAIR_EG: i32 = 60;
     pub const ROOK_HALF_OPEN_MG: i32 = 12;
@@ -73,6 +78,8 @@ pub mod evaluation {
     pub const KING_NEAR_OPEN_PENALTY: i32 = -6;
     pub const MINOR_ON_MINOR: i32 = 15;
     pub const TRAPPED_ROOK: i32 = -25;
+    pub const CONNECTED_PAWN_BONUS: i32 = 10;
+    pub const PAWN_CHAIN_BONUS: i32 = 15;
 
     /// Piece-square tables for middle game
     pub const PST_MG: [[i32; 64]; 6] = [
@@ -221,6 +228,11 @@ pub mod evaluation {
         0, 0, 0, 0, 0, 0, 0, 0, -3, -4, 10, 12, 12, 10, -4, -3, -3, 0, -1, 0, 0, -1, 0, -3, 2, 2, -5,
         -14, -14, -5, 2, 2, 19, 11, 2, -13, -13, 2, 11, -7, 46, 40, 22, 5, 5, 22, 40, -2, 52, 63, 43,
         32, 32, 43, 63, 52, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+
+    /// Passed pawn bonuses by rank (mg, eg)
+    pub const PASSED_PAWN_BONUS: [(i32, i32); 8] = [
+        (0, 0), (5, 10), (10, 20), (20, 40), (40, 80), (80, 160), (160, 320), (0, 0)
     ];
 }
 
