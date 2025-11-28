@@ -1,30 +1,49 @@
 use crate::transposition::transposition_table::TranspositionTable;
-use crate::core::types::Move;
+use crate::core::types::{Move, MoveList};
 use crate::core::board::Board;
 use crate::core::config::evaluation::*;
 use crate::search::search_context::SearchContext;
 
-/// Build principal variation string from transposition table
-#[allow(clippy::never_loop)]
-pub fn build_pv_from_tt(tt: &TranspositionTable, start_hash: u64) -> String {
-        let mut pv = Vec::new();
-        let current_hash = start_hash;
+/// Build principal variation string from transposition table by following best moves.
+pub fn build_pv_from_tt(tt: &TranspositionTable, board: &Board) -> String {
+    let mut pv_moves: Vec<Move> = Vec::new();
+    let mut temp_board = board.clone();
 
-        while let Some(entry) = tt.probe(current_hash) {
-            if let Some(mv) = entry.best_move {
-                pv.push(mv);
-                // For simplicity, just break after first move to avoid complex board state management
-                break;
-            } else {
-                break;
-            }
+    // Follow the TT best move chain, stopping on missing/illegal moves or repetition.
+    for _ in 0..32 {
+        let hash = temp_board.hash;
+        let entry = match tt.probe(hash) {
+            Some(e) => e,
+            None => break,
+        };
+        let mv = match entry.best_move {
+            Some(m) => m,
+            None => break,
+        };
+
+        // Only follow legally generated moves to avoid stale TT entries.
+        let mut moves = MoveList::new();
+        temp_board.generate_moves_into(&mut moves);
+        if !moves.iter().any(|m| *m == mv) {
+            break;
         }
 
-        pv.iter()
-            .map(|m| format!("{}{}", crate::core::types::format_square(m.from), crate::core::types::format_square(m.to)))
-            .collect::<Vec<_>>()
-            .join(" ")
+        let info = temp_board.make_move(&mv);
+        pv_moves.push(mv);
+
+        if temp_board.is_draw() {
+            // Avoid cycling forever on repetitions/tablebase draws.
+            temp_board.unmake_move(&mv, info);
+            break;
+        }
     }
+
+    pv_moves
+        .iter()
+        .map(|m| format!("{}{}", crate::core::types::format_square(m.from), crate::core::types::format_square(m.to)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Apply transposition table move hint to move ordering
 pub fn apply_tt_move_hint(moves: &mut [Move], tt: &TranspositionTable, hash: u64) {
@@ -59,11 +78,11 @@ pub fn run_root_search<F>(
         // Allow TT to promote a suggested move to the front for ordering
         apply_tt_move_hint(&mut root_moves[..], s_ctx.tt, board.hash);
 
-        for (idx, m) in root_moves.iter().enumerate() {
-            if should_abort() {
-                return (None, 0, false); // aborted mid-root
-            }
-            let info = board.make_move(m);
+    for (idx, m) in root_moves.iter().enumerate() {
+        if should_abort() {
+            return (best_move, best_score, false); // aborted mid-root, return last best
+        }
+        let info = board.make_move(m);
             // Use the aspiration window for the first root move if provided
             let score = if idx == 0 {
                 if let Some((w_alpha, w_beta)) = window {

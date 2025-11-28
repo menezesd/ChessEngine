@@ -9,10 +9,10 @@ pub mod evaluation {
     // use crate::core::constants::{PAWN_INDEX, KNIGHT_INDEX, BISHOP_INDEX, ROOK_INDEX, QUEEN_INDEX, KING_INDEX};
 
     /// Material values for middle game
-    pub const MATERIAL_MG: [i32; 6] = [93, 402, 407, 589, 1250, 0];
+    pub const MATERIAL_MG: [i32; crate::core::board::PieceIndex::count()] = [93, 402, 407, 589, 1250, 0];
 
     /// Material values for end game
-    pub const MATERIAL_EG: [i32; 6] = [104, 345, 375, 645, 1240, 0];
+    pub const MATERIAL_EG: [i32; crate::core::board::PieceIndex::count()] = [104, 345, 375, 645, 1240, 0];
 
     /// King value (used for mate scoring)
     pub const KING_VALUE: i32 = 20000;
@@ -32,6 +32,10 @@ pub mod evaluation {
     pub const BACKWARD_OPEN_MG: i32 = -6;
     pub const BACKWARD_OPEN_EG: i32 = 0;
 
+    // Pawn island penalties
+    pub const PAWN_ISLAND_PENALTY_MG: i32 = -20;
+    pub const PAWN_ISLAND_PENALTY_EG: i32 = -30;
+
     /// Piece mobility bonuses
     pub const KNIGHT_MOB: [i32; 9] = [-28, -6, -3, -2, 16, 17, 17, 20, 25];
     pub const BISHOP_MOB: [i32; 15] = [-30, -29, -23, -11, -5, 2, 8, 12, 20, 19, 23, 28, 35, 44, 40];
@@ -50,9 +54,9 @@ pub mod evaluation {
     ];
 
     /// King safety evaluation parameters
-    pub const KING_ATTACK_WEIGHTS: [i32; 6] = [0, 2, 2, 3, 3, 0]; // Pawn, Knight, Bishop, Rook, Queen, King
+    pub const KING_ATTACK_WEIGHTS: [i32; crate::core::board::PieceIndex::count()] = [0, 2, 2, 3, 3, 0]; // Pawn, Knight, Bishop, Rook, Queen, King
     pub const KING_DIST_MULT: [i32; 5] = [0, 7, 6, 4, 2]; // Distance multipliers for king attacks
-    pub const KING_ATTACK_CAPS: [i32; 6] = [0, 9, 5, 7, 15, 0]; // Caps per piece type
+    pub const KING_ATTACK_CAPS: [i32; crate::core::board::PieceIndex::count()] = [0, 9, 5, 7, 15, 0]; // Caps per piece type
 
     /// King shield missing penalties
     pub const SHIELD_ONE_PAWN_MISSING_MG: i32 = 15;
@@ -234,6 +238,11 @@ pub mod evaluation {
     pub const PASSED_PAWN_BONUS: [(i32, i32); 8] = [
         (0, 0), (5, 10), (10, 20), (20, 40), (40, 80), (80, 160), (160, 320), (0, 0)
     ];
+
+    /// Passed pawn push bonuses by rank (mg, eg)
+    pub const PASSED_PAWN_PUSH_BONUS: [(i32, i32); 8] = [
+        (0, 0), (0, 0), (5, 10), (10, 20), (20, 40), (40, 80), (80, 160), (0, 0)
+    ];
 }
 
 /// Game rules and board configuration
@@ -242,10 +251,10 @@ pub mod game {
     pub const BOARD_SIZE: usize = 8;
 
     /// Number of colors (White, Black)
-    pub const NUM_COLORS: usize = 2;
+    pub const NUM_COLORS: usize = crate::core::board::ColorIndex::count();
 
     /// Number of piece types (Pawn, Knight, Bishop, Rook, Queen, King)
-    pub const NUM_PIECES: usize = 6;
+    pub const NUM_PIECES: usize = crate::core::board::PieceIndex::count();
 
     /// Starting ranks for pieces
     pub const WHITE_START_RANK: usize = 0;
@@ -276,4 +285,19 @@ pub mod search {
 
     /// Safety margin as Duration
     pub const SAFETY_MARGIN: Duration = Duration::from_millis(SAFETY_MARGIN_MS);
+
+    // Late Move Pruning thresholds
+    pub const LMP_DEPTH_THRESHOLD: u32 = 6;
+    pub const LMP_MOVE_INDEX_THRESHOLD: usize = 4;
+    // Singular Extension parameters
+    pub const SINGULAR_EXTENSION_MIN_DEPTH: u32 = 8;
+    pub const SINGULAR_EXTENSION_MARGIN: i32 = 50; // Centipawns
+    pub const SINGULAR_EXTENSION_VERIFICATION_REDUCTION: u32 = 3;
+
+    // Quiescence Search parameters
+    pub const QS_FUTILITY_MARGIN: i32 = 100; // Centipawns (e.g., 1 Pawn)
+    pub const QS_SEE_PRUNING_MARGIN: i32 = -50; // Centipawns (e.g., lose more than 0.5 pawn)
+
+    // History Pruning parameters
+    pub const HISTORY_PRUNING_THRESHOLD: i32 = 500;
 }

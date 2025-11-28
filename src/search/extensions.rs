@@ -42,6 +42,10 @@ pub fn singular_extension(
     hash_move: Option<Move>,
     current_hash: u64,
 ) -> u32 {
+    const MAX_PLY: usize = 64;
+    if s_ctx.ply >= MAX_PLY {
+        return 0;
+    }
     if depth < 8 || hash_move.is_none() {
         return 0;
     }

@@ -1,8 +1,16 @@
 use crate::core::board::Board;
 use crate::core::types::{Move, Piece, Square};
+use crate::core::config::evaluation::{KING_VALUE, MATERIAL_MG};
 
-// Piece values in centipawns - must match MATERIAL_MG from config
-const VALUES: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
+// Piece values in centipawns - mirror MATERIAL_MG to keep SEE consistent with eval.
+const VALUES: [i32; 6] = [
+    MATERIAL_MG[0],
+    MATERIAL_MG[1],
+    MATERIAL_MG[2],
+    MATERIAL_MG[3],
+    MATERIAL_MG[4],
+    KING_VALUE,
+];
 
 fn piece_value(p: Piece) -> i32 {
     VALUES[p as usize]

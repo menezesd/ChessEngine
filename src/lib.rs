@@ -8,6 +8,7 @@ pub mod search;
 pub mod uci;
 pub mod engine;
 pub mod perft;
+pub mod tablebase;
 
 // Re-export commonly used types for convenience
 pub use core::{Board, Move, Piece, Color, Square, MoveList, Bitboard, FenError};

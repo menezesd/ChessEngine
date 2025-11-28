@@ -8,7 +8,7 @@ use crate::core::zobrist::{
 };
 use crate::core::bitboard::{BitboardUtils, castling_bit, color_from_index, piece_from_index};
 use crate::core::bitboard::{CASTLE_WHITE_KINGSIDE, CASTLE_WHITE_QUEENSIDE, CASTLE_BLACK_KINGSIDE, CASTLE_BLACK_QUEENSIDE};
-use crate::core::constants::*;
+
 
 // --- Constants for array indices and magic numbers ---
 /// White's starting rank
@@ -36,6 +36,10 @@ impl PieceIndex {
     pub const fn as_usize(self) -> usize {
         self as usize
     }
+
+    pub const fn count() -> usize {
+        6 // Pawn, Knight, Bishop, Rook, Queen, King
+    }
 }
 
 /// Type-safe color index for array access
@@ -49,6 +53,10 @@ pub enum ColorIndex {
 impl ColorIndex {
     pub const fn as_usize(self) -> usize {
         self as usize
+    }
+
+    pub const fn count() -> usize {
+        2 // White, Black
     }
 }
 
@@ -88,8 +96,8 @@ pub struct NullUnmake {
 
 #[derive(Clone, Debug)]
 pub struct Board {
-    pub bitboards: [[Bitboard; NUM_PIECES]; NUM_COLORS],
-    pub occupancy: [Bitboard; NUM_COLORS],
+    pub bitboards: [[Bitboard; PieceIndex::count()]; ColorIndex::count()],
+    pub occupancy: [Bitboard; ColorIndex::count()],
     pub all_occupancy: Bitboard,
     pub white_to_move: bool,
     pub en_passant_target: Option<Square>,
@@ -139,10 +147,10 @@ impl Board {
 
     // === BOARD CONSTRUCTION ===
 
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Board {
-            bitboards: [[0; NUM_PIECES]; NUM_COLORS],
-            occupancy: [0; NUM_COLORS],
+            bitboards: [[0; PieceIndex::count()]; ColorIndex::count()],
+            occupancy: [0; ColorIndex::count()],
             all_occupancy: 0,
             white_to_move: true,
             en_passant_target: None,
@@ -173,9 +181,9 @@ impl Board {
 
     fn remove_piece_at(&mut self, square: Square) -> Option<(Color, Piece)> {
         let mask = bitboard_for_square(square);
-        for color_idx in 0..NUM_COLORS {
+        for color_idx in 0..ColorIndex::count() {
             if self.occupancy[color_idx] & mask != 0 {
-                for piece_idx in 0..NUM_PIECES {
+                for piece_idx in 0..PieceIndex::count() {
                     if self.bitboards[color_idx][piece_idx] & mask != 0 {
                         self.bitboards[color_idx][piece_idx] &= !mask;
                         self.occupancy[color_idx] &= !mask;
@@ -189,7 +197,7 @@ impl Board {
         None
     }
 
-    pub(crate) fn place_piece_at(&mut self, square: Square, piece: (Color, Piece)) {
+    pub fn place_piece_at(&mut self, square: Square, piece: (Color, Piece)) {
         let mask = bitboard_for_square(square);
         let color_idx = color_to_zobrist_index(piece.0);
         let piece_idx = piece_to_zobrist_index(piece.1);
@@ -263,11 +271,11 @@ impl Board {
         }
     }
 
-    pub(crate) fn calculate_initial_hash(&self) -> u64 {
+    pub fn calculate_initial_hash(&self) -> u64 {
         let mut hash: u64 = 0;
 
-        for color_idx in 0..NUM_COLORS {
-            for piece_idx in 0..NUM_PIECES {
+        for color_idx in 0..ColorIndex::count() {
+            for piece_idx in 0..PieceIndex::count() {
                 let bb = self.bitboards[color_idx][piece_idx];
                 for sq_idx in Self::bits_iter(bb) {
                     hash ^= ZOBRIST.piece_keys[piece_idx][color_idx][sq_idx];
@@ -281,17 +289,17 @@ impl Board {
         }
 
         // Castling rights
-        if self.has_castling_right(Color::White, 'K') {
-            hash ^= ZOBRIST.castling_keys[WHITE_INDEX][0];
-        }
-        if self.has_castling_right(Color::White, 'Q') {
-            hash ^= ZOBRIST.castling_keys[WHITE_INDEX][1];
-        }
-        if self.has_castling_right(Color::Black, 'K') {
-            hash ^= ZOBRIST.castling_keys[BLACK_INDEX][0];
-        }
-        if self.has_castling_right(Color::Black, 'Q') {
-            hash ^= ZOBRIST.castling_keys[BLACK_INDEX][1];
+        const KINGSIDE: usize = 0;
+        const QUEENSIDE: usize = 1;
+        
+        for color_idx in 0..ColorIndex::count() {
+            let color = color_from_index(color_idx);
+            if self.has_castling_right(color, 'K') {
+                hash ^= ZOBRIST.castling_keys[color_idx][KINGSIDE];
+            }
+            if self.has_castling_right(color, 'Q') {
+                hash ^= ZOBRIST.castling_keys[color_idx][QUEENSIDE];
+            }
         }
 
         // En passant target
@@ -320,10 +328,13 @@ impl Board {
     pub fn generate_moves_into(&mut self, out: &mut crate::core::types::MoveList) {
         let mut pseudo_moves = crate::core::types::MoveList::new();
         crate::movegen::MoveGen::generate_pseudo_moves_into(self, &mut pseudo_moves);
+        self.filter_illegal_moves_into(&mut pseudo_moves, out);
+    }
 
-        // Filter out illegal moves (moves that leave king in check)
+    /// Helper to filter out pseudo-legal moves that leave the king in check.
+    fn filter_illegal_moves_into(&mut self, pseudo_moves: &mut crate::core::types::MoveList, out: &mut crate::core::types::MoveList) {
         let current_color = self.current_color();
-        for m in pseudo_moves {
+        for m in pseudo_moves.drain(..) { // Use drain to efficiently move elements
             let info = self.make_move(&m);
             let is_legal = !self.is_in_check(current_color);
             self.unmake_move(&m, info);
@@ -333,8 +344,6 @@ impl Board {
         }
     }
 
-    // Removed unused allocation-creating wrapper `generate_moves`. Prefer `generate_moves_into`.
-
     // === TACTICAL MOVE GENERATION ===
     // Methods for generating tactical moves (captures, promotions, etc.)
 
@@ -343,17 +352,7 @@ impl Board {
     pub fn generate_tactical_moves_into(&mut self, out: &mut crate::core::types::MoveList) {
         let mut pseudo_tactical = crate::core::types::MoveList::new();
         crate::movegen::MoveGen::generate_tactical_moves_into(self, &mut pseudo_tactical);
-
-        // Filter out illegal moves (moves that leave king in check)
-        let current_color = self.current_color();
-        for m in pseudo_tactical {
-            let info = self.make_move(&m);
-            let is_legal = !self.is_in_check(current_color);
-            self.unmake_move(&m, info);
-            if is_legal {
-                out.push(m);
-            }
-        }
+        self.filter_illegal_moves_into(&mut pseudo_tactical, out);
     }
 
     // === PERFORMANCE TESTING ===
@@ -390,8 +389,8 @@ impl Board {
     /// Returns true if the total number of pieces (excluding kings) is less than or equal to 3.
     pub fn is_tablebase_endgame(&self) -> bool {
         let mut total_pieces = 0;
-        for color_idx in 0..NUM_COLORS {
-            for piece_idx in 0..NUM_PIECES {
+        for color_idx in 0..ColorIndex::count() {
+            for piece_idx in 0..PieceIndex::count() {
                 if piece_idx != piece_to_zobrist_index(Piece::King) {
                     total_pieces += self.bitboards[color_idx][piece_idx].count_ones();
                 }
@@ -402,6 +401,28 @@ impl Board {
 
     // === DEBUGGING AND DISPLAY ===
     // Methods for debugging and displaying the board state
+
+    /// Returns the FEN-style castling rights string for the current board state.
+    fn get_castling_string(&self) -> String {
+        let mut castling_str = String::new();
+        if self.has_castling_right(Color::White, 'K') {
+            castling_str.push('K');
+        }
+        if self.has_castling_right(Color::White, 'Q') {
+            castling_str.push('Q');
+        }
+        if self.has_castling_right(Color::Black, 'K') {
+            castling_str.push('k');
+        }
+        if self.has_castling_right(Color::Black, 'Q') {
+            castling_str.push('q');
+        }
+        if castling_str.is_empty() {
+            "-".to_string()
+        } else {
+            castling_str
+        }
+    }
 
     pub fn to_fen(&self) -> String {
         let mut fen = String::new();
@@ -437,24 +458,7 @@ impl Board {
 
         // Castling rights
         fen.push(' ');
-        let mut castling_str = String::new();
-        if self.has_castling_right(Color::White, 'K') {
-            castling_str.push('K');
-        }
-        if self.has_castling_right(Color::White, 'Q') {
-            castling_str.push('Q');
-        }
-        if self.has_castling_right(Color::Black, 'K') {
-            castling_str.push('k');
-        }
-        if self.has_castling_right(Color::Black, 'Q') {
-            castling_str.push('q');
-        }
-        if castling_str.is_empty() {
-            fen.push('-');
-        } else {
-            fen.push_str(&castling_str);
-        }
+        fen.push_str(&self.get_castling_string());
 
         // En passant target square
         fen.push(' ');
@@ -497,23 +501,7 @@ impl Board {
         if let Some(ep_target) = self.en_passant_target {
             println!("EP Target: {}", format_square(ep_target));
         }
-        let mut castling_str = String::new();
-        if self.has_castling_right(Color::White, 'K') {
-            castling_str.push('K');
-        }
-        if self.has_castling_right(Color::White, 'Q') {
-            castling_str.push('Q');
-        }
-        if self.has_castling_right(Color::Black, 'K') {
-            castling_str.push('k');
-        }
-        if self.has_castling_right(Color::Black, 'Q') {
-            castling_str.push('q');
-        }
-        if castling_str.is_empty() {
-            castling_str.push('-');
-        }
-        println!("Castling: {}", castling_str);
+        println!("Castling: {}", self.get_castling_string());
         println!("------------------------------------");
     }
 } // end impl Board

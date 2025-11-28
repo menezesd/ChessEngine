@@ -56,7 +56,7 @@ pub fn ordering_enabled() -> bool {
 }
 
 // History table dimensions: piece (6) x from_sq (64) x to_sq (64) = 24576 entries
-const HISTORY_PIECES: usize = 6;
+const HISTORY_PIECES: usize = crate::core::board::PieceIndex::count();
 const HISTORY_SQUARES: usize = 64;
 const HISTORY_SIZE: usize = HISTORY_PIECES * HISTORY_SQUARES * HISTORY_SQUARES;
 
@@ -69,6 +69,12 @@ pub struct OrderingContext {
     pub killers: Vec<[Option<Move>; 2]>,
     /// history indexed by piece/from/to -> score
     pub history: Vec<i32>,
+    /// capture history indexed by piece/to -> score
+    pub capture_history: Vec<i32>,
+    /// continuation history indexed by prev_to * 64 + to -> score
+    pub continuation_history: Vec<i32>,
+    /// correction history (piece,to) -> eval bias
+    pub correction_history: Vec<i32>,
     pub max_depth: usize,
     /// Reusable small child move buffer to avoid frequent allocations in hot search loops.
     pub child_buf: crate::core::types::MoveList,
@@ -79,6 +85,9 @@ impl OrderingContext {
         Self {
             killers: vec![[None, None]; max_depth + 1],
             history: vec![0i32; HISTORY_SIZE],
+            capture_history: vec![0i32; crate::core::board::PieceIndex::count() * HISTORY_SQUARES],
+            continuation_history: vec![0i32; HISTORY_SQUARES * HISTORY_SQUARES],
+            correction_history: vec![0i32; crate::core::board::PieceIndex::count() * HISTORY_SQUARES],
             max_depth,
             child_buf: crate::core::types::MoveList::new(),
         }
@@ -110,6 +119,83 @@ impl OrderingContext {
         let idx = p_idx * HISTORY_SQUARES * HISTORY_SQUARES + (from as usize) * HISTORY_SQUARES + (to as usize);
         if idx < self.history.len() {
             self.history[idx] = self.history[idx].saturating_add(delta);
+        }
+    }
+
+    pub fn record_capture_history(&mut self, piece: Piece, to: u8, delta: i32) {
+        let p_idx = match piece {
+            crate::core::types::Piece::Pawn => 0usize,
+            crate::core::types::Piece::Knight => 1usize,
+            crate::core::types::Piece::Bishop => 2usize,
+            crate::core::types::Piece::Rook => 3usize,
+            crate::core::types::Piece::Queen => 4usize,
+            crate::core::types::Piece::King => 5usize,
+        };
+        let idx = p_idx * HISTORY_SQUARES + to as usize;
+        if idx < self.capture_history.len() {
+            self.capture_history[idx] = self.capture_history[idx].saturating_add(delta);
+        }
+    }
+
+    pub fn record_continuation(&mut self, prev_to: u8, to: u8, delta: i32) {
+        let idx = prev_to as usize * HISTORY_SQUARES + to as usize;
+        if idx < self.continuation_history.len() {
+            self.continuation_history[idx] = self.continuation_history[idx].saturating_add(delta);
+        }
+    }
+
+    pub fn record_correction(&mut self, piece: Piece, to: u8, delta: i32) {
+        let p_idx = match piece {
+            crate::core::types::Piece::Pawn => 0usize,
+            crate::core::types::Piece::Knight => 1usize,
+            crate::core::types::Piece::Bishop => 2usize,
+            crate::core::types::Piece::Rook => 3usize,
+            crate::core::types::Piece::Queen => 4usize,
+            crate::core::types::Piece::King => 5usize,
+        };
+        let idx = p_idx * HISTORY_SQUARES + to as usize;
+        if idx < self.correction_history.len() {
+            self.correction_history[idx] = self.correction_history[idx].saturating_add(delta);
+        }
+    }
+
+    pub fn correction_for_square(&self, piece: Piece, to: u8) -> i32 {
+        let p_idx = match piece {
+            crate::core::types::Piece::Pawn => 0usize,
+            crate::core::types::Piece::Knight => 1usize,
+            crate::core::types::Piece::Bishop => 2usize,
+            crate::core::types::Piece::Rook => 3usize,
+            crate::core::types::Piece::Queen => 4usize,
+            crate::core::types::Piece::King => 5usize,
+        };
+        let idx = p_idx * HISTORY_SQUARES + to as usize;
+        self.correction_history.get(idx).copied().unwrap_or(0)
+    }
+
+    pub fn history_score(&self, piece: Piece, from: u8, to: u8) -> i32 {
+        let p_idx = match piece {
+            crate::core::types::Piece::Pawn => 0usize,
+            crate::core::types::Piece::Knight => 1usize,
+            crate::core::types::Piece::Bishop => 2usize,
+            crate::core::types::Piece::Rook => 3usize,
+            crate::core::types::Piece::Queen => 4usize,
+            crate::core::types::Piece::King => 5usize,
+        };
+        let idx = p_idx * HISTORY_SQUARES * HISTORY_SQUARES + (from as usize) * HISTORY_SQUARES + (to as usize);
+        self.history.get(idx).copied().unwrap_or(0)
+    }
+    pub fn decay(&mut self) {
+        for h in &mut self.history {
+            *h /= 2;
+        }
+        for h in &mut self.capture_history {
+            *h /= 2;
+        }
+        for h in &mut self.continuation_history {
+            *h /= 2;
+        }
+        for h in &mut self.correction_history {
+            *h /= 2;
         }
     }
 }
@@ -154,7 +240,7 @@ pub fn order_moves(
                 score += 4000;
             }
         }
-        // History heuristic
+        // History heuristic + correction
         if let Some((_p, from_sq, to_sq)) = board.piece_at(m.from).map(|(_c, p)| (p, m.from.0 as u8, m.to.0 as u8)) {
             // compute index
             let p_idx = board.piece_at(m.from).map(|(_c, p)| match p {
@@ -169,9 +255,41 @@ pub fn order_moves(
             if idx < ctx.history.len() {
                 score += ctx.history[idx];
             }
+            if let Some((_c, piece)) = board.piece_at(m.from) {
+                score += ctx.correction_for_square(piece, to_sq) / 2;
+            }
         }
+        // Continuation history based on previous move (by destination square)
+        if let Some(prev) = board.last_move_made {
+            let idx = prev.to.0 as usize * HISTORY_SQUARES + (m.to.0 as usize);
+            if idx < ctx.continuation_history.len() {
+                score += ctx.continuation_history[idx];
+            }
+        }
+
         -score
     });
 }
 
-
+/// Compute a lightweight history/correction score for a move (used by LMR gating).
+pub fn order_moves_score(ctx: &OrderingContext, board: &Board, m: &Move) -> i32 {
+    let mut score = 0;
+    if let Some((_p, from_sq, to_sq)) = board.piece_at(m.from).map(|(_c, p)| (p, m.from.0 as u8, m.to.0 as u8)) {
+        let p_idx = board.piece_at(m.from).map(|(_c, p)| match p {
+            crate::core::types::Piece::Pawn => 0usize,
+            crate::core::types::Piece::Knight => 1usize,
+            crate::core::types::Piece::Bishop => 2usize,
+            crate::core::types::Piece::Rook => 3usize,
+            crate::core::types::Piece::Queen => 4usize,
+            crate::core::types::Piece::King => 5usize,
+        }).unwrap_or(0usize);
+        let idx = p_idx * HISTORY_SQUARES * HISTORY_SQUARES + (from_sq as usize) * HISTORY_SQUARES + (to_sq as usize);
+        if idx < ctx.history.len() {
+            score += ctx.history[idx];
+        }
+        if let Some((_c, piece)) = board.piece_at(m.from) {
+            score += ctx.correction_for_square(piece, to_sq) / 2;
+        }
+    }
+    score
+}

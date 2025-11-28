@@ -16,6 +16,8 @@ fn engine_depth_search_returns_move() {
         sink: None,
         info_sender: None,
         move_ordering: None,
+        remaining_time_ms: None,
+        moves_to_go: None,
     };
     let res = engine.search(&mut board, &mut tt, opts).expect("search failed");
     // At depth 1 we should always have at least one legal move from the starting position
@@ -35,7 +37,10 @@ fn engine_time_limited_search_returns_move_within_time() {
         sink: None,
         info_sender: None,
         move_ordering: None,
+        remaining_time_ms: None,
+        moves_to_go: None,
     };
     let res = engine.search(&mut board, &mut tt, opts).expect("time-limited search failed");
     assert!(res.best_move.is_some());
 }
+

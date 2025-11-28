@@ -2,7 +2,7 @@ use crate::core::board::{Board, UnmakeInfo, NullUnmake};
 use crate::core::types::{Move, Color, Piece, Square};
 use crate::core::zobrist::{color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST};
 use crate::core::bitboard::castling_bit;
-use crate::core::constants::*;
+
 
 /// Castling rook and king file positions
 const KINGSIDE_ROOK_FILE: usize = 7;
@@ -221,7 +221,7 @@ impl Board {
     fn execute_castling(&mut self, m: &Move, current_hash: &mut u64) {
         let color = self.current_color();
         self.set_square(m.to.0, m.to.1, Some((color, Piece::King)));
-        *current_hash ^= ZOBRIST.piece_keys[KING_INDEX][color_to_zobrist_index(color)][square_to_zobrist_index(m.to)];
+        *current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::King)][color_to_zobrist_index(color)][square_to_zobrist_index(m.to)];
 
         let (rook_from_f, rook_to_f) = if m.to.1 == KINGSIDE_KING_FILE {
             (KINGSIDE_ROOK_FILE, KINGSIDE_ROOK_DEST_FILE)
@@ -236,8 +236,8 @@ impl Board {
         self.set_square(rook_from_sq.0, rook_from_sq.1, None);
         self.set_square(rook_to_sq.0, rook_to_sq.1, Some(rook_info));
 
-        *current_hash ^= ZOBRIST.piece_keys[ROOK_INDEX][color_to_zobrist_index(color)][square_to_zobrist_index(rook_from_sq)];
-        *current_hash ^= ZOBRIST.piece_keys[ROOK_INDEX][color_to_zobrist_index(color)][square_to_zobrist_index(rook_to_sq)];
+        *current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)][color_to_zobrist_index(color)][square_to_zobrist_index(rook_from_sq)];
+        *current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)][color_to_zobrist_index(color)][square_to_zobrist_index(rook_to_sq)];
     }
 
     /// Undo castling move
@@ -272,7 +272,7 @@ impl Board {
                 self.castling_rights &= !castling_bit(color, 'Q');
             }
         } else if moving_piece == Piece::Rook {
-            let start_rank = if color == Color::White { WHITE_START_RANK } else { BLACK_START_RANK };
+            let start_rank = if color == Color::White { 0 } else { 7 };
             if m.from == Square(start_rank, KINGSIDE_ROOK_FILE)
                 && self.castling_rights & castling_bit(color, 'K') != 0
             {
@@ -288,7 +288,7 @@ impl Board {
 
         if let Some((captured_color, captured_piece)) = captured_piece_info {
             if captured_piece == Piece::Rook {
-                let start_rank = if captured_color == Color::White { WHITE_START_RANK } else { BLACK_START_RANK };
+                let start_rank = if captured_color == Color::White { 0 } else { 7 };
                 if m.to == Square(start_rank, KINGSIDE_ROOK_FILE)
                     && self.castling_rights & castling_bit(captured_color, 'K') != 0
                 {

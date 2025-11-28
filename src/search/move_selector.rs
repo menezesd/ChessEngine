@@ -54,7 +54,8 @@ impl TranspositionTableHelper {
         if depth >= 3 {
             // Need to adjust alpha/beta for the search; tt_cutoff_score will be ignored.
             let (_, adjusted_alpha, adjusted_beta, _, _) = TranspositionTableHelper::probe_and_adjust_bounds(s_ctx.tt, hash, depth, alpha, beta);
-            let _ = negamax(board, s_ctx, depth - 2, adjusted_alpha, adjusted_beta);
+            let search_depth = depth.saturating_sub(1);
+            let _ = negamax(board, s_ctx, search_depth, adjusted_alpha, adjusted_beta);
             if let Some(entry) = s_ctx.tt.probe(hash) {
                 return entry.best_move;
             }
@@ -117,13 +118,26 @@ impl MoveSelector {
             }
         }
 
-        // Order captures by MVV-LVA and SEE
-        captures.sort_by_key(|m| -crate::ordering::mvv_lva_score(m, board));
-        captures.retain(|m| {
-            let see = crate::see::see_capture(board, m);
-            see >= 0
+        // Order captures by SEE plus capture history bonus
+        captures.sort_by_key(|m| {
+            let see = crate::movegen::see::see_capture(board, m);
+            let hist = board
+                .piece_at(m.from)
+                .map(|(_c, p)| {
+                    let p_idx = match p {
+                        crate::core::types::Piece::Pawn => 0usize,
+                        crate::core::types::Piece::Knight => 1usize,
+                        crate::core::types::Piece::Bishop => 2usize,
+                        crate::core::types::Piece::Rook => 3usize,
+                        crate::core::types::Piece::Queen => 4usize,
+                        crate::core::types::Piece::King => 5usize,
+                    };
+                    let idx = p_idx * 64 + m.to.0 as usize;
+                    ctx.capture_history.get(idx).copied().unwrap_or(0)
+                })
+                .unwrap_or(0);
+            -(see + hist)
         });
-        captures.sort_by_key(|m| -crate::see::see_capture(board, m));
 
         // Order quiets with full ordering logic
         order_moves(ctx, board, &mut quiets[..], depth as usize, hash_move);

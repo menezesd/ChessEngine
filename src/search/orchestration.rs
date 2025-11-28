@@ -4,6 +4,7 @@ use crate::core::board::Board;
 use crate::uci::info as uci_info;
 use crate::search::control as search_control;
 use crate::core::config::search::*;
+const SOFT_TIME_RATIO: f32 = 0.90;
 use crate::core::config::evaluation::*;
 use crate::evaluation::pawn_hash::PawnHashTable;
 use std::sync::{Arc, Mutex, mpsc::Sender};
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 pub enum SearchLimits {
     Depth(u32),
     Time(Duration),
+    Nodes(u64),
     Infinite,
 }
 
@@ -67,14 +69,26 @@ pub fn time_limited_search_with_sink(
         is_ponder,
         start_time,
     };
+    // Set a hard deadline in control for recursive stop checks.
+    let deadline_ms = std::time::SystemTime::now()
+        .checked_add(max_time)
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    crate::search::control::set_deadline(deadline_ms);
     let mut dummy_pawn_hash_table = crate::evaluation::pawn_hash::PawnHashTable::new();
-    search_internal(config, &mut dummy_pawn_hash_table)
+    let res = search_internal(config, &mut dummy_pawn_hash_table);
+    crate::search::control::clear_deadline();
+    res
 }
 
 fn search_internal(config: SearchConfig, pawn_hash_table: &mut PawnHashTable) -> Option<Move> {
+    crate::search::control::reset();
     let mut best_move: Option<Move> = None;
     let mut prev_score: Option<i32> = None;
     let mut last_depth_time = Duration::from_millis(1);
+    let mut last_completed_move: Option<Move> = None;
+    let mut _last_completed_score: Option<i32> = None;
 
     let mut root_moves: MoveList = MoveList::new();
     config.board.generate_moves_into(&mut root_moves);
@@ -96,6 +110,12 @@ fn search_internal(config: SearchConfig, pawn_hash_table: &mut PawnHashTable) ->
     };
 
     for depth in 1..=255 {
+        if let SearchLimits::Time(max_time) = config.limits {
+            let elapsed = config.start_time.elapsed();
+            if elapsed.as_secs_f32() > SOFT_TIME_RATIO * max_time.as_secs_f32() && depth > 1 {
+                break;
+            }
+        }
         if should_stop(&config.limits, depth, &config.start_time, last_depth_time) {
             break;
         }
@@ -112,11 +132,12 @@ fn search_internal(config: SearchConfig, pawn_hash_table: &mut PawnHashTable) ->
 
         if let Some(ps) = prev_score {
             if depth > 2 && ps.abs() < (MATE_SCORE / 2) {
-                let mut alpha = ps - 10;
-                let mut beta = ps + 10;
-                let mut margin = 10;
+                let mut margin = 16 + depth as i32 * 2;
+                let mut alpha = ps - margin;
+                let mut beta = ps + margin;
+                let mut attempts = 0;
 
-                loop {
+                while attempts < 3 {
                     if search_control::should_stop() {
                         break;
                     }
@@ -149,10 +170,8 @@ fn search_internal(config: SearchConfig, pawn_hash_table: &mut PawnHashTable) ->
                         break;
                     }
 
-                    margin = margin.saturating_mul(2);
-                    if margin > 500 {
-                        break; // Give up, fall back to full window
-                    }
+                    margin = (margin * 3 / 2).min(400);
+                    attempts += 1;
                 }
             }
         }
@@ -179,12 +198,14 @@ fn search_internal(config: SearchConfig, pawn_hash_table: &mut PawnHashTable) ->
             if let Some(mv) = mv_opt {
                 best_move = Some(mv);
                 prev_score = Some(score);
+                last_completed_move = best_move;
+                _last_completed_score = Some(score);
 
                 if let Some(ref s) = config.sink {
                     let mut lock = match s.lock() {
                         Ok(g) => g,
                         Err(poisoned) => {
-                            eprintln!("warning: sink mutex poisoned, recovering");
+                            
                             poisoned.into_inner()
                         }
                     };
@@ -198,7 +219,7 @@ fn search_internal(config: SearchConfig, pawn_hash_table: &mut PawnHashTable) ->
                         score,
                         best_move,
                         s_ctx.tt,
-                        config.board.hash,
+                        config.board,
                         &config.start_time,
                         config.is_ponder,
                     );
@@ -208,8 +229,28 @@ fn search_internal(config: SearchConfig, pawn_hash_table: &mut PawnHashTable) ->
                     root_moves.swap(0, pos);
                 }
             }
+        } else if best_move.is_none() && mv_opt.is_some() {
+            // If this iteration aborted but produced a move, keep it as fallback.
+            best_move = mv_opt;
         }
         last_depth_time = depth_start.elapsed();
+        // Periodically decay histories to prevent saturation.
+        s_ctx.ordering_ctx.decay();
+    }
+
+    #[cfg(debug_assertions)]
+    {
+
+        
+    }
+
+    // Ensure we return some move if available
+    if best_move.is_none() {
+        if let Some(mv) = last_completed_move {
+            best_move = Some(mv);
+        } else if !root_moves.is_empty() {
+            best_move = Some(root_moves[0]);
+        }
     }
 
     best_move
@@ -227,6 +268,7 @@ fn should_stop(limits: &SearchLimits, depth: u32, start_time: &Instant, last_dep
             let estimated_next_time = last_depth_time.mul_f32(TIME_GROWTH_FACTOR);
             estimated_next_time + SAFETY_MARGIN > time_remaining
         }
+        SearchLimits::Nodes(max_nodes) => search_control::get_node_count() >= *max_nodes,
         SearchLimits::Infinite => false,
     }
 }
@@ -237,7 +279,7 @@ fn send_uci_info(
     score: i32,
     best_move: Option<Move>,
     tt: &TranspositionTable,
-    board_hash: u64,
+    board: &Board,
     start_time: &Instant,
     is_ponder: bool,
 ) {
@@ -248,7 +290,7 @@ fn send_uci_info(
     } else {
         None
     };
-    let pv = crate::search::build_pv_from_tt(tt, board_hash);
+    let pv = crate::search::build_pv_from_tt(tt, board);
     let mut info = uci_info::Info {
         depth: Some(depth),
         nodes: Some(nodes_total),
@@ -273,5 +315,3 @@ fn send_uci_info(
     }
     let _ = sender.send(info);
 }
-
-

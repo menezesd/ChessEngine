@@ -17,6 +17,10 @@ pub struct SearchOptions {
     /// Optional node limit for the search driver. If provided, the engine will set
     /// the node limit via `search_control` before starting the search.
     pub max_nodes: Option<u64>,
+    /// Optional remaining time on the clock (ms) to derive a per-move budget when max_time is None.
+    pub remaining_time_ms: Option<u64>,
+    /// Optional moves to go for time allocation.
+    pub moves_to_go: Option<u32>,
     /// If true, include a ponder move string in info messages where applicable
     pub is_ponder: bool,
     /// Optional sink for intermediate best-move updates (shared Arc<Mutex<Option<Move>>>).
@@ -86,7 +90,7 @@ impl SearchEngine for SimpleEngine {
         }
 
         // Configure move ordering heuristics globally based on option (default = enabled)
-        crate::ordering::set_ordering_enabled(opts.move_ordering.unwrap_or(true));
+        crate::movegen::ordering::set_ordering_enabled(opts.move_ordering.unwrap_or(true));
 
         let best = if let Some(max_time) = opts.max_time {
             // time-limited search
@@ -105,6 +109,20 @@ impl SearchEngine for SimpleEngine {
                 board,
                 tt,
                 depth,
+                opts.sink.clone(),
+                opts.info_sender.clone(),
+                opts.is_ponder,
+            )
+        } else if let Some(rem_ms) = opts.remaining_time_ms {
+            let mtg = opts.moves_to_go.unwrap_or(30);
+            // Basic allocator: give ~1/(mtg+6) of remaining time, with a floor.
+            let slice = (rem_ms as f64 / (mtg as f64 + 6.0)).max(50.0) as u64;
+            let budget = Duration::from_millis(slice);
+            crate::search::time_limited_search_with_sink(
+                board,
+                tt,
+                budget,
+                start,
                 opts.sink.clone(),
                 opts.info_sender.clone(),
                 opts.is_ponder,

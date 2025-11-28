@@ -31,19 +31,16 @@ pub fn mate_distance_pruning(mut alpha: i32, mut beta: i32, ply: usize) -> (i32,
 
 /// Check if futility pruning should skip this quiet move
 pub fn should_futility_prune(
-    board: &Board,
-    s_ctx: &mut SearchContext,
+    in_check: bool,
     depth: u32,
     alpha: i32,
     is_quiet: bool,
-    tt_stored_score: Option<i32>,
+    static_eval: i32,
 ) -> bool {
     // Only apply if not in check, and it's a quiet move (not a capture or promotion)
-    if board.is_in_check(board.current_color()) || !is_quiet {
+    if in_check || !is_quiet {
         return false;
     }
-
-    let static_eval = tt_stored_score.unwrap_or_else(|| crate::evaluation::eval::evaluate(board, s_ctx.pawn_hash_table));
 
     // Futility pruning: if the static evaluation is already significantly
     // worse than alpha, it's unlikely a quiet move will improve the score.
@@ -80,6 +77,11 @@ pub fn null_move_pruning(
     alpha: i32,
     current_hash: u64,
 ) -> Option<i32> {
+    // Respect ply cap from caller.
+    const MAX_PLY: usize = 64;
+    if s_ctx.ply >= MAX_PLY {
+        return None;
+    }
     // Only apply when depth is sufficiently large, not in check, not zugzwang, and not near mate
     if depth < 3 || board.is_in_check(board.current_color())
        || is_zugzwang_position(board)
@@ -94,7 +96,19 @@ pub fn null_move_pruning(
     let r = r.min(depth.saturating_sub(1)); // Ensure we don't reduce below 1 ply
 
     let null_info = board.make_null_move();
-    let null_score = -crate::search::algorithms::negamax(board, s_ctx, depth - 1 - r, -beta, -beta + 1);
+    // Use a child context with incremented ply to respect ply caps.
+    let mut child_ctx = SearchContext {
+        tt: s_ctx.tt,
+        moves_buf: s_ctx.moves_buf,
+        ordering_ctx: s_ctx.ordering_ctx,
+        ply: s_ctx.ply + 1,
+        pawn_hash_table: s_ctx.pawn_hash_table,
+    };
+    if crate::search::control::should_stop() {
+        board.unmake_null_move(null_info);
+        return None;
+    }
+    let null_score = -crate::search::algorithms::negamax(board, &mut child_ctx, depth - 1 - r, -beta, -beta + 1);
     board.unmake_null_move(null_info);
 
     if null_score >= beta {

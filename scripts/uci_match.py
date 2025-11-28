@@ -32,9 +32,6 @@ class UCIEngine:
             self.cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
             universal_newlines=True,
         )
         # Run handshake
@@ -172,7 +169,7 @@ def run_game(engine_white: UCIEngine, engine_black: UCIEngine, movetime_ms: int,
         engine = engine_white if side == 0 else engine_black
         # ensure engine has current position
         engine.set_position(moves)
-        print(f'FEN: {engine.get_fen()}')
+        # print(f'FEN: {engine.get_fen()}')
 
         if minutes_per_side is None:
             bestmove, info = engine.go_movetime(movetime_ms)
@@ -193,7 +190,7 @@ def run_game(engine_white: UCIEngine, engine_black: UCIEngine, movetime_ms: int,
             break
 
         moves.append(bestmove)
-        print(f'Ply {ply+1:>3} {"White" if side==0 else "Black"} -> {bestmove}')
+        # print(f'Ply {ply+1:>3} {"White" if side==0 else "Black"} -> {bestmove}')
 
         # Update clocks: approximate by parsing engine info lines for 'bestmove' timing is tricky,
         # so measure wall-time around the go invocation to subtract from the side's clock.

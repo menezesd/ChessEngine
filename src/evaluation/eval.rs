@@ -401,6 +401,15 @@ pub fn pawn_eval(board: &Board) -> (i32, i32) {
                 };
                 pmg += bonus.0;
                 peg += bonus.1;
+
+                // Add passed pawn push bonus
+                let push_bonus = if color == Color::White {
+                    PASSED_PAWN_PUSH_BONUS[rank]
+                } else {
+                    PASSED_PAWN_PUSH_BONUS[7-rank]
+                };
+                pmg += push_bonus.0;
+                peg += push_bonus.1;
             }
 
             // Connected Pawns
@@ -450,6 +459,33 @@ pub fn pawn_eval(board: &Board) -> (i32, i32) {
                 pmg += PAWN_CHAIN_BONUS;
                 peg += PAWN_CHAIN_BONUS;
             }
+
+            // Count pawn islands for the current color
+            let mut pawn_islands = 0;
+            let mut has_pawn_on_prev_file = false;
+            for file_idx in 0..8 {
+                let file_mask = Board::file_mask(file_idx);
+                let has_pawn_on_current_file = (own & file_mask) != 0;
+
+                if has_pawn_on_current_file && !has_pawn_on_prev_file {
+                    pawn_islands += 1;
+                }
+                has_pawn_on_prev_file = has_pawn_on_current_file;
+            }
+
+            // Apply penalty for each additional pawn island beyond the first
+            if pawn_islands > 1 {
+                let penalty = (pawn_islands - 1) * PAWN_ISLAND_PENALTY_MG;
+                let eg_penalty = (pawn_islands - 1) * PAWN_ISLAND_PENALTY_EG;
+                if color == Color::White {
+                    pmg += penalty;
+                    peg += eg_penalty;
+                } else {
+                    pmg -= penalty;
+                    peg -= eg_penalty;
+                }
+            }
+
         }
     }
 
@@ -655,6 +691,11 @@ pub fn eval_king(board: &Board, e: &mut EvalData, color: Color) {
 
 /// Main evaluation function that combines all evaluation components
 pub fn evaluate(board: &Board, pawn_hash_table: &mut PawnHashTable) -> i32 {
+    if let Some(tb_score) = crate::tablebase::probe_three_piece(board) {
+        // Exact tablebase result; return immediately.
+        return if board.white_to_move { tb_score } else { -tb_score };
+    }
+
     let pawn_hash = PawnHashTable::generate_pawn_hash(board);
     let (pawn_mg, pawn_eg) = if let Some(entry) = pawn_hash_table.probe(pawn_hash) {
         (entry.pmg, entry.peg)
@@ -665,13 +706,6 @@ pub fn evaluate(board: &Board, pawn_hash_table: &mut PawnHashTable) -> i32 {
     };
 
     let static_score_white_perspective = eval(board, pawn_mg, pawn_eg, pawn_hash_table); // white - black
-
-    // Tablebase endgame detection (placeholder for actual EGTB lookup)
-    if board.is_tablebase_endgame() {
-        // In a real engine, this would query a tablebase for win/loss/draw
-        // For now, we just acknowledge it.
-        println!("INFO: Tablebase endgame detected!");
-    }
 
     if board.white_to_move {
         static_score_white_perspective + TEMPO
