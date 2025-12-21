@@ -1,0 +1,305 @@
+use super::{Board, Color, Piece, Square};
+
+impl Board {
+    pub(crate) fn evaluate(&self) -> i32 {
+        let mut score = 0;
+
+        const MATERIAL_MG: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
+        const MATERIAL_EG: [i32; 6] = [94, 281, 297, 512, 936, 20000];
+
+        const PST_MG: [[i32; 64]; 6] = [
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, -35, -1, -20, -23, -15, 24, 38, -22, -26, -4, -4, -10, 3,
+                3, 33, -12, -27, -2, -5, 12, 17, 6, 10, -25, -14, 13, 6, 21, 23, 12, 17, -23, -6,
+                7, 26, 31, 65, 56, 25, -20, 98, 134, 61, 95, 68, 126, 34, -11, 0, 0, 0, 0, 0, 0, 0,
+                0,
+            ],
+            [
+                -105, -21, -58, -33, -17, -28, -19, -23, -29, -53, -12, -3, -1, 18, -14, -19, -23,
+                -9, 12, 10, 19, 17, 25, -16, -13, 4, 16, 13, 28, 19, 21, -8, -9, 17, 19, 53, 37,
+                69, 18, 22, -47, 60, 37, 65, 84, 129, 73, 44, -73, -41, 72, 36, 23, 62, 7, -17,
+                -167, -89, -34, -49, 61, -97, -15, -107,
+            ],
+            [
+                -33, -3, -14, -21, -13, -12, -39, -21, 4, 15, 16, 0, 7, 21, 33, 1, 0, 15, 15, 15,
+                14, 27, 18, 10, -6, 13, 13, 26, 34, 12, 10, 4, -4, 5, 19, 50, 37, 37, 7, -2, -16,
+                37, 43, 40, 35, 50, 37, -2, -26, 16, -18, -13, 30, 59, 18, -47, -29, 4, -82, -37,
+                -25, -42, 7, -8,
+            ],
+            [
+                -19, -13, 1, 17, 16, 7, -37, -26, -44, -16, -20, -9, -1, 11, -6, -71, -45, -25,
+                -16, -17, 3, 0, -5, -33, -36, -26, -12, -1, 9, -7, 6, -23, -24, -11, 7, 26, 24, 35,
+                -8, -20, -5, 19, 26, 36, 17, 45, 61, 16, 27, 32, 58, 62, 80, 67, 26, 44, 32, 42,
+                32, 51, 63, 9, 31, 43,
+            ],
+            [
+                -1, -18, -9, 10, -15, -25, -31, -50, -35, -8, 11, 2, 8, 15, -3, 1, -14, 2, -11, -2,
+                -5, 2, 14, 5, -9, -26, -9, -10, -2, -4, 3, -3, -27, -27, -16, -16, -1, 17, -2, 1,
+                -13, -17, 7, 8, 29, 56, 47, 57, -24, -39, -5, 1, -16, 57, 28, 54, -28, 0, 29, 12,
+                59, 44, 43, 45,
+            ],
+            [
+                -15, 36, 12, -54, 8, -28, 34, 14, 1, 7, -8, -64, -43, -16, 9, 8, -14, -14, -22,
+                -46, -44, -30, -15, -27, -49, -1, -27, -39, -46, -44, -33, -51, -17, -20, -12, -27,
+                -30, -25, -14, -36, -9, 24, 2, -16, -20, 6, 22, -22, 29, -1, -20, -7, -8, -4, -38,
+                -29, -65, 23, 16, -15, -56, -34, 2, 13,
+            ],
+        ];
+
+        const PST_EG: [[i32; 64]; 6] = [
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 13, 8, 8, 10, 13, 0, 2, -7, 4, 7, -6, 1, 0, -5, -1, -8, 13,
+                9, -3, -7, -7, -8, 3, -1, 32, 24, 13, 5, -2, 4, 17, 17, 94, 100, 85, 67, 56, 53,
+                82, 84, 178, 173, 158, 134, 147, 132, 165, 187, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            [
+                -29, -51, -23, -15, -22, -18, -50, -64, -42, -20, -10, -5, -2, -20, -23, -44, -23,
+                -3, -1, 15, 10, -3, -20, -22, -18, -6, 16, 25, 16, 17, 4, -18, -17, 3, 22, 22, 22,
+                11, 8, -18, -24, -20, 10, 9, -1, -9, -19, -41, -25, -8, -25, -2, -9, -25, -24, -52,
+                -58, -38, -13, -28, -31, -27, -63, -99,
+            ],
+            [
+                -23, -9, -23, -5, -9, -16, -5, -17, -14, -18, -7, -1, 4, -9, -15, -27, -12, -3, 8,
+                10, 13, 3, -7, -15, -6, 3, 13, 19, 7, 10, -3, -9, -3, 9, 12, 9, 14, 10, 3, 2, 2,
+                -8, 0, -1, -2, 6, 0, 4, -8, -4, 7, -12, -3, -13, -4, -14, -14, -21, -11, -8, -7,
+                -9, -17, -24,
+            ],
+            [
+                -9, 2, 3, -1, -5, -13, 4, -20, -6, -6, 0, 2, -9, -9, -11, -3, -4, 0, -5, -1, -7,
+                -12, -8, -16, 3, 5, 8, 4, -5, -6, -8, -11, 4, 3, 13, 1, 2, 1, -1, 2, 7, 7, 7, 5, 4,
+                -3, -5, -3, 11, 13, 13, 11, -3, 3, 8, 3, 13, 10, 18, 15, 12, 12, 8, 5,
+            ],
+            [
+                -33, -28, -22, -43, -5, -32, -20, -41, -22, -23, -30, -16, -16, -23, -36, -32, -16,
+                -27, 15, 6, 9, 17, 10, 5, -18, 28, 19, 47, 31, 34, 39, 23, 3, 22, 24, 45, 57, 40,
+                57, 36, -20, 6, 9, 49, 47, 35, 19, 9, -17, 20, 32, 41, 58, 25, 30, 0, -9, 22, 22,
+                27, 27, 19, 10, 20,
+            ],
+            [
+                -53, -34, -21, -11, -28, -14, -24, -43, -27, -11, 4, 13, 14, 4, -5, -17, -19, -3,
+                11, 21, 23, 16, 7, -9, -18, -4, 21, 24, 27, 23, 9, -11, -8, 22, 24, 27, 26, 33, 26,
+                3, 10, 17, 23, 15, 20, 45, 44, 13, -12, 17, 14, 17, 17, 38, 23, 11, -74, -35, -18,
+                -18, -11, 15, 4, -17,
+            ],
+        ];
+
+        fn square_to_index(rank: usize, file: usize) -> usize {
+            rank * 8 + file
+        }
+
+        fn piece_to_index(piece: Piece) -> usize {
+            match piece {
+                Piece::Pawn => 0,
+                Piece::Knight => 1,
+                Piece::Bishop => 2,
+                Piece::Rook => 3,
+                Piece::Queen => 4,
+                Piece::King => 5,
+            }
+        }
+
+        let mut white_material_mg = 0;
+        let mut black_material_mg = 0;
+        let mut white_bishop_count = 0;
+        let mut black_bishop_count = 0;
+        let mut white_pawns_by_file = [0; 8];
+        let mut black_pawns_by_file = [0; 8];
+
+        for rank in 0..8 {
+            for file in 0..8 {
+                if let Some((color, piece)) = self.piece_at(Square(rank, file)) {
+                    let piece_idx = piece_to_index(piece);
+
+                    if color == Color::White {
+                        if piece == Piece::Bishop {
+                            white_bishop_count += 1;
+                        } else if piece == Piece::Pawn {
+                            white_pawns_by_file[file] += 1;
+                        }
+
+                        white_material_mg += MATERIAL_MG[piece_idx];
+                    } else {
+                        if piece == Piece::Bishop {
+                            black_bishop_count += 1;
+                        } else if piece == Piece::Pawn {
+                            black_pawns_by_file[file] += 1;
+                        }
+
+                        black_material_mg += MATERIAL_MG[piece_idx];
+                    }
+                }
+            }
+        }
+
+        let total_material_mg = white_material_mg + black_material_mg;
+        let max_material = 2
+            * (MATERIAL_MG[1] * 2
+                + MATERIAL_MG[2] * 2
+                + MATERIAL_MG[3] * 2
+                + MATERIAL_MG[4]
+                + MATERIAL_MG[0] * 8);
+        let phase = (total_material_mg as f32) / (max_material as f32);
+        let phase = phase.min(1.0).max(0.0);
+
+        let mut mg_score = 0;
+        let mut eg_score = 0;
+
+        for rank in 0..8 {
+            for file in 0..8 {
+                if let Some((color, piece)) = self.piece_at(Square(rank, file)) {
+                    let piece_idx = piece_to_index(piece);
+
+                    let sq_idx = if color == Color::White {
+                        square_to_index(7 - rank, file)
+                    } else {
+                        square_to_index(rank, file)
+                    };
+
+                    let mg_value = MATERIAL_MG[piece_idx] + PST_MG[piece_idx][sq_idx];
+                    let eg_value = MATERIAL_EG[piece_idx] + PST_EG[piece_idx][sq_idx];
+
+                    if color == Color::White {
+                        mg_score += mg_value;
+                        eg_score += eg_value;
+                    } else {
+                        mg_score -= mg_value;
+                        eg_score -= eg_value;
+                    }
+                }
+            }
+        }
+
+        let position_score = (phase * mg_score as f32 + (1.0 - phase) * eg_score as f32) as i32;
+        score += position_score;
+
+        if white_bishop_count >= 2 {
+            score += 30;
+        }
+        if black_bishop_count >= 2 {
+            score -= 30;
+        }
+
+        for file in 0..8 {
+            for rank in 0..8 {
+                if let Some((color, piece)) = self.piece_at(Square(rank, file)) {
+                    if piece == Piece::Rook {
+                        let file_pawns = white_pawns_by_file[file] + black_pawns_by_file[file];
+
+                        if file_pawns == 0 {
+                            let bonus = 15;
+                            if color == Color::White {
+                                score += bonus;
+                            } else {
+                                score -= bonus;
+                            }
+                        } else if (color == Color::White && black_pawns_by_file[file] == 0)
+                            || (color == Color::Black && white_pawns_by_file[file] == 0)
+                        {
+                            let bonus = 7;
+                            if color == Color::White {
+                                score += bonus;
+                            } else {
+                                score -= bonus;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for file in 0..8 {
+            if white_pawns_by_file[file] > 0 {
+                let left_file = if file > 0 {
+                    white_pawns_by_file[file - 1]
+                } else {
+                    0
+                };
+                let right_file = if file < 7 {
+                    white_pawns_by_file[file + 1]
+                } else {
+                    0
+                };
+
+                if left_file == 0 && right_file == 0 {
+                    score -= 12;
+                }
+            }
+
+            if black_pawns_by_file[file] > 0 {
+                let left_file = if file > 0 {
+                    black_pawns_by_file[file - 1]
+                } else {
+                    0
+                };
+                let right_file = if file < 7 {
+                    black_pawns_by_file[file + 1]
+                } else {
+                    0
+                };
+
+                if left_file == 0 && right_file == 0 {
+                    score += 12;
+                }
+            }
+
+            if white_pawns_by_file[file] > 1 {
+                score -= 12 * (white_pawns_by_file[file] - 1);
+            }
+
+            if black_pawns_by_file[file] > 1 {
+                score += 12 * (black_pawns_by_file[file] - 1);
+            }
+
+            for rank in 0..8 {
+                let sq = Square(rank, file);
+                if let Some((Color::White, Piece::Pawn)) = self.piece_at(sq) {
+                    let mut is_passed = true;
+
+                    for check_rank in 0..rank {
+                        for check_file in file.saturating_sub(1)..=(file + 1).min(7) {
+                            let check_sq = Square(check_rank, check_file);
+                            if let Some((Color::Black, Piece::Pawn)) = self.piece_at(check_sq) {
+                                is_passed = false;
+                                break;
+                            }
+                        }
+                        if !is_passed {
+                            break;
+                        }
+                    }
+
+                    if is_passed {
+                        let bonus = 10 + (7 - rank as i32) * 7;
+                        score += bonus;
+                    }
+                } else if let Some((Color::Black, Piece::Pawn)) = self.piece_at(sq) {
+                    let mut is_passed = true;
+
+                    for check_rank in (rank + 1)..8 {
+                        for check_file in file.saturating_sub(1)..=(file + 1).min(7) {
+                            let check_sq = Square(check_rank, check_file);
+                            if let Some((Color::White, Piece::Pawn)) = self.piece_at(check_sq) {
+                                is_passed = false;
+                                break;
+                            }
+                        }
+                        if !is_passed {
+                            break;
+                        }
+                    }
+
+                    if is_passed {
+                        let bonus = 10 + rank as i32 * 7;
+                        score -= bonus;
+                    }
+                }
+            }
+        }
+
+        if self.white_to_move {
+            score
+        } else {
+            -score
+        }
+    }
+}
