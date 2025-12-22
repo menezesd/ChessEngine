@@ -18,17 +18,20 @@ pub(crate) struct TTEntry {
     pub(crate) score: i32,              // The score found
     pub(crate) bound_type: BoundType,   // Type of score (Exact, LowerBound, UpperBound)
     pub(crate) best_move: Option<Move>, // Best move found from this position (for move ordering)
+    pub(crate) generation: u16,         // Search generation for aging/replacement
+    pub(crate) eval: i32,               // Static eval for the position
 }
 
 pub struct TranspositionTable {
-    table: Vec<Option<TTEntry>>,
+    table: Vec<[Option<TTEntry>; 4]>,
     mask: usize, // To wrap index around using bitwise AND (table size must be power of 2)
+    occupied: usize,
 }
 
 impl TranspositionTable {
     // size_mb: Desired size in Megabytes
     pub fn new(size_mb: usize) -> Self {
-        let entry_size = mem::size_of::<Option<TTEntry>>();
+        let entry_size = mem::size_of::<[Option<TTEntry>; 4]>();
         let mut num_entries = (size_mb * 1024 * 1024) / entry_size;
 
         // Ensure num_entries is a power of 2 for efficient indexing
@@ -38,8 +41,9 @@ impl TranspositionTable {
         } // Minimum size fallback
 
         TranspositionTable {
-            table: vec![None; num_entries],
+            table: vec![[None, None, None, None]; num_entries],
             mask: num_entries - 1, // e.g., if size is 1024, mask is 1023 (0b1111111111)
+            occupied: 0,
         }
     }
 
@@ -51,17 +55,18 @@ impl TranspositionTable {
     // Probe the table for a given hash
     pub(crate) fn probe(&self, hash: u64) -> Option<&TTEntry> {
         let index = self.index(hash);
-        if let Some(entry) = &self.table[index] {
-            if entry.hash == hash {
-                // Verify hash to handle collisions
-                return Some(entry);
+        let bucket = &self.table[index];
+        for slot in bucket.iter() {
+            if let Some(entry) = slot {
+                if entry.hash == hash {
+                    return Some(entry);
+                }
             }
         }
         None
     }
 
     // Store an entry in the table
-    // Uses simple always-replace scheme
     pub(crate) fn store(
         &mut self,
         hash: u64,
@@ -69,23 +74,75 @@ impl TranspositionTable {
         score: i32,
         bound_type: BoundType,
         best_move: Option<Move>,
+        generation: u16,
+        eval: i32,
     ) {
         let index = self.index(hash);
-        // Store only if the new entry is from a deeper search or replaces nothing
-        // (Could implement more sophisticated replacement strategies)
-        let should_replace = match &self.table[index] {
-            Some(existing_entry) => depth >= existing_entry.depth, // Replace if new search is deeper or equal
-            None => true,                                          // Replace if slot is empty
-        };
+        let bucket = &mut self.table[index];
 
-        if should_replace {
-            self.table[index] = Some(TTEntry {
-                hash,
-                depth,
-                score,
-                bound_type,
-                best_move, // Pass ownership/clone
-            });
+        for slot in bucket.iter_mut() {
+            if let Some(existing) = slot {
+                if existing.hash == hash {
+                    *slot = Some(TTEntry {
+                        hash,
+                        depth,
+                        score,
+                        bound_type,
+                        best_move,
+                        generation,
+                        eval,
+                    });
+                    return;
+                }
+            }
         }
+
+        for slot in bucket.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(TTEntry {
+                    hash,
+                    depth,
+                    score,
+                    bound_type,
+                    best_move,
+                    generation,
+                    eval,
+                });
+                self.occupied += 1;
+                return;
+            }
+        }
+
+        let mut replace_idx = 0;
+        let mut worst_priority = i32::MAX;
+
+        for (idx, slot) in bucket.iter().enumerate() {
+            if let Some(entry) = slot {
+                let age = generation.wrapping_sub(entry.generation);
+                let priority = entry.depth.saturating_mul(2) as i32 - age as i32;
+                if idx == 0 || priority < worst_priority {
+                    replace_idx = idx;
+                    worst_priority = priority;
+                }
+            }
+        }
+
+        bucket[replace_idx] = Some(TTEntry {
+            hash,
+            depth,
+            score,
+            bound_type,
+            best_move,
+            generation,
+            eval,
+        });
+    }
+
+    pub fn hashfull_per_mille(&self) -> u32 {
+        let total_slots = self.table.len().saturating_mul(4);
+        if total_slots == 0 {
+            return 0;
+        }
+        ((self.occupied as u64 * 1000) / total_slots as u64) as u32
     }
 }

@@ -4,9 +4,14 @@ mod make_unmake;
 mod movegen;
 
 use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Mutex,
+};
 use std::time::{Duration, Instant};
 
 use crate::tt::{BoundType, TranspositionTable};
+use crate::board::attack_tables::{slider_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS};
 
 // --- Helper functions ---
 pub(crate) fn file_to_index(file: char) -> usize {
@@ -113,6 +118,7 @@ pub struct Move {
 }
 
 const MAX_MOVES: usize = 256;
+const MAX_PLY: usize = 128;
 const EMPTY_MOVE: Move = Move {
     from: Square(0, 0),
     to: Square(0, 0),
@@ -164,19 +170,105 @@ impl MoveList {
 
 pub struct SearchState {
     tt: TranspositionTable,
+    nodes: u64,
+    seldepth: u32,
+    generation: u16,
+    total_nodes: u64,
+    max_nodes: u64,
+    killer_moves: [[Move; 2]; MAX_PLY],
+    history: [i32; 4096],
+    counter_moves: [[Move; 64]; 64],
+    last_move: Move,
 }
 
 impl SearchState {
     pub fn new(tt_mb: usize) -> Self {
         SearchState {
             tt: TranspositionTable::new(tt_mb),
+            nodes: 0,
+            seldepth: 0,
+            generation: 0,
+            total_nodes: 0,
+            max_nodes: 0,
+            killer_moves: [[EMPTY_MOVE; 2]; MAX_PLY],
+            history: [0; 4096],
+            counter_moves: [[EMPTY_MOVE; 64]; 64],
+            last_move: EMPTY_MOVE,
+        }
+    }
+
+    pub fn new_search(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.nodes = 0;
+        self.seldepth = 0;
+        self.total_nodes = 0;
+        self.last_move = EMPTY_MOVE;
+    }
+
+    pub fn set_max_nodes(&mut self, max_nodes: u64) {
+        self.max_nodes = max_nodes;
+    }
+
+    pub fn hashfull_per_mille(&self) -> u32 {
+        self.tt.hashfull_per_mille()
+    }
+
+    fn record_killer(&mut self, ply: usize, mv: Move) {
+        if ply >= MAX_PLY {
+            return;
+        }
+        if self.killer_moves[ply][0] != mv {
+            self.killer_moves[ply][1] = self.killer_moves[ply][0];
+            self.killer_moves[ply][0] = mv;
+        }
+    }
+
+    fn is_killer(&self, ply: usize, mv: Move) -> bool {
+        if ply >= MAX_PLY {
+            return false;
+        }
+        self.killer_moves[ply][0] == mv || self.killer_moves[ply][1] == mv
+    }
+
+    fn add_history(&mut self, mv: Move, depth: u32) {
+        let idx = move_history_index(mv);
+        if idx < self.history.len() {
+            self.history[idx] = self.history[idx].saturating_add((depth * depth) as i32);
+        }
+    }
+
+    fn history_score(&self, mv: Move) -> i32 {
+        let idx = move_history_index(mv);
+        if idx < self.history.len() {
+            self.history[idx]
+        } else {
+            0
+        }
+    }
+
+    fn set_counter_move(&mut self, prev: Move, reply: Move) {
+        let from = square_index(prev.from).0 as usize;
+        let to = square_index(prev.to).0 as usize;
+        self.counter_moves[from][to] = reply;
+    }
+
+    fn get_counter_move(&self, prev: Move) -> Option<Move> {
+        let from = square_index(prev.from).0 as usize;
+        let to = square_index(prev.to).0 as usize;
+        let mv = self.counter_moves[from][to];
+        if mv == EMPTY_MOVE {
+            None
+        } else {
+            Some(mv)
         }
     }
 }
 
 pub struct SearchLimits {
-    pub max_time: Duration,
-    pub start_time: Instant,
+    pub soft_time_ms: std::sync::Arc<AtomicU64>,
+    pub hard_time_ms: std::sync::Arc<AtomicU64>,
+    pub start_time: std::sync::Arc<Mutex<Instant>>,
+    pub stop: std::sync::Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug)]
@@ -215,6 +307,12 @@ fn mvv_lva_score(m: &Move, board: &Board) -> i32 {
     }
 }
 
+fn move_history_index(m: Move) -> usize {
+    let from = square_index(m.from).0 as usize;
+    let to = square_index(m.to).0 as usize;
+    from * 64 + to
+}
+
 #[derive(Clone, Debug)]
 pub struct Board {
     pieces: [[Bitboard; 6]; 2],
@@ -229,6 +327,167 @@ pub struct Board {
 }
 
 impl Board {
+    fn score_move(
+        &self,
+        state: &SearchState,
+        m: &Move,
+        ply: u32,
+        hash_move: Option<Move>,
+        counter_move: Option<Move>,
+        pv_move: Option<Move>,
+    ) -> i32 {
+        const HASH_SCORE: i32 = 1_000_000;
+        const PV_SCORE: i32 = 900_000;
+        const CAPTURE_BASE: i32 = 500_000;
+        const KILLER_SCORE: i32 = 400_000;
+        const COUNTER_SCORE: i32 = 300_000;
+
+        if let Some(hm) = hash_move {
+            if *m == hm {
+                return HASH_SCORE;
+            }
+        }
+
+        if let Some(pv) = pv_move {
+            if *m == pv {
+                return PV_SCORE;
+            }
+        }
+
+        if m.captured_piece.is_some() || m.is_en_passant {
+            let see = self.see_capture(m);
+            let mut score = CAPTURE_BASE + mvv_lva_score(m, self);
+            if see < 0 {
+                score -= 10_000;
+            } else {
+                score += see;
+            }
+            return score;
+        }
+
+        if state.is_killer(ply as usize, *m) {
+            return KILLER_SCORE;
+        }
+
+        if let Some(cm) = counter_move {
+            if *m == cm {
+                return COUNTER_SCORE;
+            }
+        }
+
+        state.history_score(*m)
+    }
+
+    fn is_bad_capture(&self, m: &Move) -> bool {
+        if m.captured_piece.is_none() {
+            return false;
+        }
+        self.see_capture(m) < 0
+    }
+
+    fn see_capture(&self, m: &Move) -> i32 {
+        let captured = match m.captured_piece {
+            Some(p) => p,
+            None => return 0,
+        };
+        if m.is_en_passant {
+            return 0;
+        }
+        let (moving_color, moving_piece) = match self.piece_at(m.from) {
+            Some(info) => info,
+            None => return 0,
+        };
+        let promotion_piece = m.promotion.unwrap_or(moving_piece);
+
+        let mut pieces = self.pieces;
+        let from_bb = 1u64 << square_index(m.from).0;
+        let to_bb = 1u64 << square_index(m.to).0;
+        let mover_idx = color_index(moving_color);
+        let opp_idx = color_index(self.opponent_color(moving_color));
+
+        pieces[opp_idx][piece_index(captured)].0 &= !to_bb;
+        pieces[mover_idx][piece_index(moving_piece)].0 &= !from_bb;
+        pieces[mover_idx][piece_index(promotion_piece)].0 |= to_bb;
+
+        let mut occ = self.all_occupied.0;
+        occ &= !from_bb;
+        occ &= !to_bb;
+        occ |= to_bb;
+
+        let attackers_to = |color: Color, occ: u64, pieces: &[[Bitboard; 6]; 2]| -> u64 {
+            let sq_idx = square_index(m.to).0 as usize;
+            let c_idx = color_index(color);
+            let pawns = if color == Color::White {
+                pieces[c_idx][piece_index(Piece::Pawn)].0 & PAWN_ATTACKS[1][sq_idx]
+            } else {
+                pieces[c_idx][piece_index(Piece::Pawn)].0 & PAWN_ATTACKS[0][sq_idx]
+            };
+            let knights = pieces[c_idx][piece_index(Piece::Knight)].0 & KNIGHT_ATTACKS[sq_idx];
+            let bishops = pieces[c_idx][piece_index(Piece::Bishop)].0
+                & slider_attacks(sq_idx, occ, true);
+            let rooks = pieces[c_idx][piece_index(Piece::Rook)].0
+                & slider_attacks(sq_idx, occ, false);
+            let queens = pieces[c_idx][piece_index(Piece::Queen)].0
+                & (slider_attacks(sq_idx, occ, true) | slider_attacks(sq_idx, occ, false));
+            let kings = pieces[c_idx][piece_index(Piece::King)].0 & KING_ATTACKS[sq_idx];
+            pawns | knights | bishops | rooks | queens | kings
+        };
+
+        let mut gains = [0i32; 32];
+        gains[0] = piece_value(captured);
+        let mut depth = 0usize;
+        let mut side = self.opponent_color(moving_color);
+
+        loop {
+            let attackers = attackers_to(side, occ, &pieces);
+            if attackers == 0 {
+                break;
+            }
+
+            let side_idx = color_index(side);
+            let mut attacker_piece = None;
+            let mut attacker_sq = 0u64;
+            for piece in [
+                Piece::Pawn,
+                Piece::Knight,
+                Piece::Bishop,
+                Piece::Rook,
+                Piece::Queen,
+                Piece::King,
+            ] {
+                let bb = pieces[side_idx][piece_index(piece)].0 & attackers;
+                if bb != 0 {
+                    attacker_piece = Some(piece);
+                    attacker_sq = bb & (!bb + 1);
+                    break;
+                }
+            }
+            let attacker_piece = match attacker_piece {
+                Some(p) => p,
+                None => break,
+            };
+
+            depth += 1;
+            gains[depth] = piece_value(attacker_piece) - gains[depth - 1];
+            if gains[depth].max(-gains[depth - 1]) < 0 {
+                break;
+            }
+
+            pieces[side_idx][piece_index(attacker_piece)].0 &= !attacker_sq;
+            pieces[side_idx][piece_index(attacker_piece)].0 |= to_bb;
+            occ &= !attacker_sq;
+
+            side = self.opponent_color(side);
+        }
+
+        while depth > 0 {
+            let d = depth;
+            gains[d - 1] = -std::cmp::max(-gains[d - 1], gains[d]);
+            depth -= 1;
+        }
+
+        gains[0]
+    }
     pub fn new() -> Self {
         let mut board = Board::empty();
         let back_rank = [
@@ -362,6 +621,89 @@ impl Board {
         self.repetition_counts.get(&self.hash).copied().unwrap_or(0) >= 3
     }
 
+    pub fn is_theoretical_draw(&self) -> bool {
+        self.is_draw() || self.is_insufficient_material()
+    }
+
+    fn is_insufficient_material(&self) -> bool {
+        let white = color_index(Color::White);
+        let black = color_index(Color::Black);
+
+        let pawns = self.pieces[white][piece_index(Piece::Pawn)].0
+            | self.pieces[black][piece_index(Piece::Pawn)].0;
+        let rooks = self.pieces[white][piece_index(Piece::Rook)].0
+            | self.pieces[black][piece_index(Piece::Rook)].0;
+        let queens = self.pieces[white][piece_index(Piece::Queen)].0
+            | self.pieces[black][piece_index(Piece::Queen)].0;
+
+        if pawns != 0 || rooks != 0 || queens != 0 {
+            return false;
+        }
+
+        let white_knights =
+            self.pieces[white][piece_index(Piece::Knight)].0.count_ones();
+        let black_knights =
+            self.pieces[black][piece_index(Piece::Knight)].0.count_ones();
+        let white_bishops =
+            self.pieces[white][piece_index(Piece::Bishop)].0.count_ones();
+        let black_bishops =
+            self.pieces[black][piece_index(Piece::Bishop)].0.count_ones();
+
+        let total_minors = white_knights + black_knights + white_bishops + black_bishops;
+
+        if total_minors == 0 || total_minors == 1 {
+            return true;
+        }
+
+        let total_knights = white_knights + black_knights;
+        let total_bishops = white_bishops + black_bishops;
+
+        let bishops_all_same_color = |mut bishops: Bitboard| -> bool {
+            let mut bishop_color: Option<u8> = None;
+            while bishops.0 != 0 {
+                let sq = pop_lsb(&mut bishops);
+                let square = square_from_index(sq);
+                let color = ((square.0 + square.1) % 2) as u8;
+                match bishop_color {
+                    Some(existing) if existing != color => return false,
+                    Some(_) => {}
+                    None => bishop_color = Some(color),
+                }
+            }
+            true
+        };
+
+        if total_minors == 2 {
+            if total_bishops == 0 {
+                return true; // Knights only.
+            }
+            if total_knights == 0 {
+                if white_bishops == 1 && black_bishops == 1 {
+                    return true; // Bishop vs bishop is always insufficient.
+                }
+                let bishops = Bitboard(
+                    self.pieces[white][piece_index(Piece::Bishop)].0
+                        | self.pieces[black][piece_index(Piece::Bishop)].0,
+                );
+                return bishops_all_same_color(bishops);
+            }
+
+            let white_minors = white_knights + white_bishops;
+            let black_minors = black_knights + black_bishops;
+            return white_minors == 1 && black_minors == 1;
+        }
+
+        if total_knights == 0 {
+            let bishops = Bitboard(
+                self.pieces[white][piece_index(Piece::Bishop)].0
+                    | self.pieces[black][piece_index(Piece::Bishop)].0,
+            );
+            return bishops_all_same_color(bishops);
+        }
+
+        false
+    }
+
     pub fn print(&self) {
         println!("  +---+---+---+---+---+---+---+---+");
         for rank in (0..8).rev() {
@@ -448,9 +790,38 @@ impl Board {
         &mut self,
         state: &mut SearchState,
         depth: u32,
+        ply: u32,
+        stop: &AtomicBool,
         mut alpha: i32,
         mut beta: i32,
     ) -> i32 {
+        const NULL_REDUCTION: u32 = 2;
+        const NULL_MIN_DEPTH: u32 = 3;
+        const NULL_VERIFICATION_DEPTH: u32 = 6;
+        const FUTILITY_MARGIN: i32 = 150;
+        const RAZOR_MARGIN: i32 = 250;
+        const LMR_MIN_DEPTH: u32 = 3;
+        const LMR_MIN_MOVE: usize = 3;
+        const LMR_REDUCTION: u32 = 1;
+        const LMP_MIN_DEPTH: u32 = 3;
+        const LMP_MOVE_LIMIT: usize = 8;
+        const IIR_MIN_DEPTH: u32 = 6;
+        const SINGULAR_MARGIN: i32 = 50;
+        const RFP_MARGIN: i32 = 100;
+        const STATIC_NULL_MARGIN: i32 = 120;
+
+        if stop.load(Ordering::Relaxed) {
+            return 0;
+        }
+        state.nodes += 1;
+        state.total_nodes += 1;
+        if state.max_nodes > 0 && state.total_nodes >= state.max_nodes {
+            stop.store(true, Ordering::Relaxed);
+            return 0;
+        }
+        if ply > state.seldepth {
+            state.seldepth = ply;
+        }
         if self.is_draw() {
             return 0;
         }
@@ -459,26 +830,67 @@ impl Board {
         let current_hash = self.hash;
 
         let mut hash_move: Option<Move> = None;
+        let mut tt_eval: Option<i32> = None;
         if let Some(entry) = state.tt.probe(current_hash) {
             if entry.depth >= depth {
+                let score = adjust_mate_score_for_retrieve(entry.score, ply);
                 match entry.bound_type {
-                    BoundType::Exact => return entry.score,
-                    BoundType::LowerBound => alpha = alpha.max(entry.score),
-                    BoundType::UpperBound => beta = beta.min(entry.score),
+                    BoundType::Exact => return score,
+                    BoundType::LowerBound => alpha = alpha.max(score),
+                    BoundType::UpperBound => beta = beta.min(score),
                 }
                 if alpha >= beta {
-                    return entry.score;
+                    return score;
                 }
             }
             hash_move = entry.best_move.clone();
+            tt_eval = Some(entry.eval);
+        }
+
+        let in_check = self.is_in_check(self.current_color());
+
+        let mut depth = depth;
+        if depth >= IIR_MIN_DEPTH {
+            depth = depth.saturating_sub(1);
+        }
+        if in_check {
+            depth = depth.saturating_add(1);
         }
 
         if depth == 0 {
-            return self.quiesce(state, alpha, beta);
+            return self.quiesce(state, ply, stop, alpha, beta);
+        }
+
+        if !in_check && depth >= NULL_MIN_DEPTH && !self.is_theoretical_draw() {
+            self.white_to_move = !self.white_to_move;
+            let score =
+                -self.negamax(state, depth - 1 - NULL_REDUCTION, ply + 1, stop, -beta, -beta + 1);
+            self.white_to_move = !self.white_to_move;
+            if score >= beta {
+                if depth >= NULL_VERIFICATION_DEPTH {
+                    let verify =
+                        self.negamax(state, depth - 1, ply + 1, stop, beta - 1, beta);
+                    if verify >= beta {
+                        return score;
+                    }
+                } else {
+                    return score;
+                }
+            }
+        }
+
+        if !in_check && depth <= 2 {
+            let stand_pat = self.evaluate();
+            if stand_pat + RAZOR_MARGIN < alpha {
+                return self.quiesce(state, ply, stop, alpha, beta);
+            }
         }
 
         let mut legal_moves = self.generate_moves();
-        legal_moves.as_mut_slice().sort_by_key(|m| -mvv_lva_score(m, self));
+        let counter_move = state.get_counter_move(state.last_move);
+        legal_moves.as_mut_slice().sort_by_key(|m| {
+            -self.score_move(state, m, ply, hash_move, counter_move, None)
+        });
 
         if legal_moves.is_empty() {
             let current_color = self.current_color();
@@ -497,18 +909,85 @@ impl Board {
 
         let mut best_score = -MATE_SCORE * 2;
         let mut best_move_found: Option<Move> = None;
+        let singular_target = if let Some(hm) = &hash_move {
+            Some((*hm, alpha + SINGULAR_MARGIN))
+        } else {
+            None
+        };
+
+        let eval_at_node = self.evaluate();
+        let stand_pat = if in_check {
+            alpha
+        } else {
+            tt_eval.unwrap_or(eval_at_node)
+        };
+
+        if !in_check && depth <= 4 && stand_pat - RFP_MARGIN * depth as i32 >= beta {
+            return stand_pat;
+        }
+
+        if !in_check && depth <= 3 && stand_pat + STATIC_NULL_MARGIN * depth as i32 <= alpha {
+            return stand_pat;
+        }
 
         for (i, m) in legal_moves.iter().enumerate() {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if depth >= LMP_MIN_DEPTH
+                && i >= LMP_MOVE_LIMIT
+                && m.captured_piece.is_none()
+                && m.promotion.is_none()
+                && !in_check
+            {
+                break;
+            }
+            if !in_check
+                && depth <= 2
+                && m.captured_piece.is_none()
+                && m.promotion.is_none()
+                && stand_pat + FUTILITY_MARGIN <= alpha
+            {
+                continue;
+            }
             let info = self.make_move(&m);
+            let prev_last = state.last_move;
+            state.last_move = *m;
+            let mut new_depth = depth - 1;
+            if !in_check
+                && depth >= LMR_MIN_DEPTH
+                && i >= LMR_MIN_MOVE
+                && m.captured_piece.is_none()
+                && m.promotion.is_none()
+            {
+                new_depth = new_depth.saturating_sub(LMR_REDUCTION);
+            }
+
             let score = if i == 0 {
-                -self.negamax(state, depth - 1, -beta, -alpha)
+                if let Some((hm, target)) = singular_target {
+                    if *m == hm && depth >= 6 {
+                        let mut reduced = new_depth.saturating_sub(2);
+                        let sing_score =
+                            -self.negamax(state, reduced, ply + 1, stop, -target, -alpha);
+                        if sing_score > -target {
+                            reduced = new_depth;
+                        }
+                        -self.negamax(state, reduced, ply + 1, stop, -beta, -alpha)
+                    } else {
+                        -self.negamax(state, new_depth, ply + 1, stop, -beta, -alpha)
+                    }
+                } else {
+                    -self.negamax(state, new_depth, ply + 1, stop, -beta, -alpha)
+                }
             } else {
-                let mut score = -self.negamax(state, depth - 1, -alpha - 1, -alpha);
+                let mut score =
+                    -self.negamax(state, new_depth, ply + 1, stop, -alpha - 1, -alpha);
                 if score > alpha && score < beta {
-                    score = -self.negamax(state, depth - 1, -beta, -alpha);
+                    score = -self.negamax(state, new_depth, ply + 1, stop, -beta, -alpha);
                 }
                 score
             };
+            state.last_move = prev_last;
             self.unmake_move(&m, info);
 
             if score > best_score {
@@ -519,6 +998,13 @@ impl Board {
             alpha = alpha.max(best_score);
 
             if alpha >= beta {
+                let is_quiet =
+                    m.captured_piece.is_none() && m.promotion.is_none() && !m.is_en_passant;
+                if is_quiet {
+                    state.record_killer(ply as usize, *m);
+                    state.add_history(*m, depth);
+                    state.set_counter_move(state.last_move, *m);
+                }
                 break;
             }
         }
@@ -531,14 +1017,40 @@ impl Board {
             BoundType::Exact
         };
 
-        state
-            .tt
-            .store(current_hash, depth, best_score, bound_type, best_move_found);
+        state.tt.store(
+            current_hash,
+            depth,
+            adjust_mate_score_for_store(best_score, ply),
+            bound_type,
+            best_move_found,
+            state.generation,
+            eval_at_node,
+        );
 
         best_score
     }
 
-    fn quiesce(&mut self, state: &mut SearchState, mut alpha: i32, beta: i32) -> i32 {
+    fn quiesce(
+        &mut self,
+        state: &mut SearchState,
+        ply: u32,
+        stop: &AtomicBool,
+        mut alpha: i32,
+        beta: i32,
+    ) -> i32 {
+        const DELTA_MARGIN: i32 = 200;
+        if stop.load(Ordering::Relaxed) {
+            return 0;
+        }
+        state.nodes += 1;
+        state.total_nodes += 1;
+        if state.max_nodes > 0 && state.total_nodes >= state.max_nodes {
+            stop.store(true, Ordering::Relaxed);
+            return 0;
+        }
+        if ply > state.seldepth {
+            state.seldepth = ply;
+        }
         if self.is_draw() {
             return 0;
         }
@@ -551,13 +1063,38 @@ impl Board {
         alpha = alpha.max(stand_pat_score);
 
         let mut tactical_moves = self.generate_tactical_moves();
-        tactical_moves.as_mut_slice().sort_by_key(|m| -mvv_lva_score(m, self));
+        let checking_moves = self.generate_checking_moves();
+        for m in checking_moves.iter() {
+            if m.captured_piece.is_none() && !m.is_en_passant {
+                tactical_moves.push(*m);
+            }
+        }
+        tactical_moves
+            .as_mut_slice()
+            .sort_by_key(|m| -mvv_lva_score(m, self));
 
         let mut best_score = stand_pat_score;
 
         for m in tactical_moves.iter() {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let bad_capture = self.is_bad_capture(m);
+            let capture_value = m.captured_piece.map(piece_value).unwrap_or(0);
             let info = self.make_move(m);
-            let score = -self.quiesce(state, -beta, -alpha);
+            let gives_check = self.is_in_check(self.current_color());
+            if !gives_check
+                && stand_pat_score + capture_value + DELTA_MARGIN < alpha
+                && !m.is_en_passant
+            {
+                self.unmake_move(m, info);
+                continue;
+            }
+            if bad_capture && !gives_check {
+                self.unmake_move(m, info);
+                continue;
+            }
+            let score = -self.quiesce(state, ply + 1, stop, -beta, -alpha);
             self.unmake_move(m, info);
 
             best_score = best_score.max(score);
@@ -576,12 +1113,109 @@ pub fn format_square(sq: Square) -> String {
     format!("{}{}", (sq.1 as u8 + b'a') as char, sq.0 + 1)
 }
 
+fn format_uci_move_for_info(mv: &Move) -> String {
+    let mut s = format!("{}{}", format_square(mv.from), format_square(mv.to));
+    if let Some(promo) = mv.promotion {
+        s.push(match promo {
+            Piece::Queen => 'q',
+            Piece::Rook => 'r',
+            Piece::Bishop => 'b',
+            Piece::Knight => 'n',
+            _ => '?',
+        });
+    }
+    s
+}
+
+fn format_score_for_info(score: i32) -> String {
+    if score.abs() >= MATE_SCORE - 100 {
+        let mate_plies = (MATE_SCORE - score.abs()).max(0) as u32;
+        let mate_moves = (mate_plies + 1) / 2;
+        let signed = if score > 0 {
+            mate_moves as i32
+        } else {
+            -(mate_moves as i32)
+        };
+        format!("mate {}", signed)
+    } else {
+        format!("cp {}", score)
+    }
+}
+
+fn adjust_mate_score_for_store(score: i32, ply: u32) -> i32 {
+    if score.abs() >= MATE_SCORE - 100 {
+        if score > 0 {
+            score + ply as i32
+        } else {
+            score - ply as i32
+        }
+    } else {
+        score
+    }
+}
+
+fn adjust_mate_score_for_retrieve(score: i32, ply: u32) -> i32 {
+    if score.abs() >= MATE_SCORE - 100 {
+        if score > 0 {
+            score - ply as i32
+        } else {
+            score + ply as i32
+        }
+    } else {
+        score
+    }
+}
+
+fn format_pv(moves: &[Move]) -> String {
+    moves
+        .iter()
+        .map(format_uci_move_for_info)
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+fn build_pv(board: &mut Board, state: &SearchState, max_len: usize) -> Vec<Move> {
+    let mut pv = Vec::new();
+    let mut history: Vec<(Move, UnmakeInfo)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for _ in 0..max_len {
+        let hash = board.hash();
+        if !seen.insert(hash) {
+            break;
+        }
+        let entry = match state.tt.probe(hash) {
+            Some(e) => e,
+            None => break,
+        };
+        let mv = match entry.best_move {
+            Some(m) => m,
+            None => break,
+        };
+        let legal_moves = board.generate_moves();
+        if !legal_moves.as_slice().iter().any(|m| *m == mv) {
+            break;
+        }
+        let info = board.make_move(&mv);
+        history.push((mv, info));
+        pv.push(mv);
+    }
+
+    while let Some((mv, info)) = history.pop() {
+        board.unmake_move(&mv, info);
+    }
+
+    pv
+}
+
 pub fn find_best_move(
     board: &mut Board,
     state: &mut SearchState,
     max_depth: u32,
+    stop: &AtomicBool,
 ) -> Option<Move> {
     let mut best_move: Option<Move> = None;
+    let mut last_score = 0;
 
     let legal_moves = board.generate_moves();
     if legal_moves.is_empty() {
@@ -593,34 +1227,28 @@ pub fn find_best_move(
     let mut root_moves = legal_moves.clone();
 
     for depth in 1..=max_depth {
-        let mut alpha = -MATE_SCORE * 2;
-        let beta = MATE_SCORE * 2;
-        let mut current_best_score = -MATE_SCORE * 2;
-        let mut current_best_move: Option<Move> = None;
-
-        if let Some(entry) = state.tt.probe(board.hash()) {
-            if let Some(hm) = &entry.best_move {
-                if let Some(pos) = root_moves.as_slice().iter().position(|m| m == hm) {
-                    root_moves.as_mut_slice().swap(0, pos);
-                }
-            }
+        if stop.load(Ordering::Relaxed) {
+            break;
         }
+        let window = if depth <= 2 { MATE_SCORE } else { 50 };
+        let mut alpha = last_score - window;
+        let mut beta = last_score + window;
 
-        for m in root_moves.iter() {
-            let info = board.make_move(m);
-            let score = -board.negamax(state, depth - 1, -beta, -alpha);
-            board.unmake_move(m, info);
+        let (mut current_best_score, mut current_best_move) =
+            root_search(board, state, depth, alpha, beta, stop, &mut root_moves, best_move);
 
-            if score > current_best_score {
-                current_best_score = score;
-                current_best_move = Some(*m);
-            }
-
-            alpha = alpha.max(current_best_score);
+        if current_best_score <= alpha || current_best_score >= beta {
+            alpha = -MATE_SCORE * 2;
+            beta = MATE_SCORE * 2;
+            let result =
+                root_search(board, state, depth, alpha, beta, stop, &mut root_moves, best_move);
+            current_best_score = result.0;
+            current_best_move = result.1;
         }
 
         if let Some(mv) = current_best_move {
             best_move = Some(mv);
+            last_score = current_best_score;
 
             if let Some(pos) = root_moves.as_slice().iter().position(|m| *m == mv) {
                 root_moves.as_mut_slice().swap(0, pos);
@@ -639,24 +1267,33 @@ pub fn find_best_move_with_time(
     let mut best_move: Option<Move> = None;
     let mut depth = 1;
     let mut last_depth_time = Duration::from_millis(1);
+    let mut last_score = 0;
 
     const SAFETY_MARGIN: Duration = Duration::from_millis(5);
     const TIME_GROWTH_FACTOR: f32 = 2.0;
 
-    while limits.start_time.elapsed() + SAFETY_MARGIN < limits.max_time {
-        let elapsed = limits.start_time.elapsed();
-        let time_remaining = limits.max_time.checked_sub(elapsed).unwrap_or_default();
+    while !limits.stop.load(Ordering::Relaxed) {
+        let soft_time_ms = limits.soft_time_ms.load(Ordering::Relaxed);
+        let hard_time_ms = limits.hard_time_ms.load(Ordering::Relaxed);
+        let infinite = hard_time_ms == u64::MAX;
+        let soft_time = Duration::from_millis(soft_time_ms);
+        let hard_time = Duration::from_millis(hard_time_ms);
+        let start_time = *limits.start_time.lock().unwrap();
+        let elapsed = start_time.elapsed();
+        if !infinite && elapsed + SAFETY_MARGIN >= hard_time {
+            break;
+        }
+        let time_remaining = soft_time.checked_sub(elapsed).unwrap_or_default();
 
         let estimated_next_time = last_depth_time.mul_f32(TIME_GROWTH_FACTOR);
-        if estimated_next_time + SAFETY_MARGIN > time_remaining {
+        if !infinite && estimated_next_time + SAFETY_MARGIN > time_remaining {
             break;
         }
 
         let depth_start = Instant::now();
+        state.nodes = 0;
+        state.seldepth = 0;
 
-        let mut alpha = -MATE_SCORE * 2;
-        let beta = MATE_SCORE * 2;
-        let mut best_score = -MATE_SCORE * 2;
         let mut legal_moves = board.generate_moves();
 
         if legal_moves.is_empty() {
@@ -667,44 +1304,120 @@ pub fn find_best_move_with_time(
             return Some(legal_moves.as_slice()[0]);
         }
 
-        legal_moves.as_mut_slice().sort_by_key(|m| -mvv_lva_score(m, board));
-        if let Some(entry) = state.tt.probe(board.hash()) {
-            if let Some(hm) = &entry.best_move {
-                if let Some(pos) = legal_moves.as_slice().iter().position(|m| m == hm) {
-                    legal_moves.as_mut_slice().swap(0, pos);
-                }
-            }
+        let window = if depth <= 2 { MATE_SCORE } else { 50 };
+        let mut alpha = last_score - window;
+        let mut beta = last_score + window;
+
+        let (mut best_score, mut new_best_move) =
+            root_search(board, state, depth, alpha, beta, &limits.stop, &mut legal_moves, best_move);
+
+        if best_score <= alpha || best_score >= beta {
+            alpha = -MATE_SCORE * 2;
+            beta = MATE_SCORE * 2;
+            let result =
+                root_search(board, state, depth, alpha, beta, &limits.stop, &mut legal_moves, best_move);
+            best_score = result.0;
+            new_best_move = result.1;
         }
 
-        let mut new_best_move = None;
-
-        for m in legal_moves.iter() {
-            if limits.start_time.elapsed() + SAFETY_MARGIN >= limits.max_time {
-                break;
-            }
-
-            let info = board.make_move(m);
-            let score = -board.negamax(state, depth - 1, -beta, -alpha);
-            board.unmake_move(m, info);
-
-            if score > best_score {
-                best_score = score;
-                new_best_move = Some(*m);
-            }
-
-            alpha = alpha.max(best_score);
-        }
-
-        if limits.start_time.elapsed() + SAFETY_MARGIN < limits.max_time {
+        if !limits.stop.load(Ordering::Relaxed) {
             best_move = new_best_move;
             last_depth_time = depth_start.elapsed();
+            last_score = best_score;
+            if let Some(mv) = best_move {
+                let start_time = *limits.start_time.lock().unwrap();
+                let elapsed = start_time.elapsed();
+                let time_ms = elapsed.as_millis().max(1) as u64;
+                let nps = (state.nodes * 1000) / time_ms;
+                let pv_moves = build_pv(board, state, 16);
+                let pv = if pv_moves.is_empty() {
+                    format_uci_move_for_info(&mv)
+                } else {
+                    format_pv(&pv_moves)
+                };
+                let score = format_score_for_info(best_score);
+                println!(
+                    "info depth {} seldepth {} score {} nodes {} nps {} hashfull {} time {} pv {}",
+                    depth,
+                    state.seldepth,
+                    score,
+                    state.nodes,
+                    nps,
+                    state.hashfull_per_mille(),
+                    time_ms,
+                    pv
+                );
+                if !infinite && elapsed + SAFETY_MARGIN >= soft_time {
+                    break;
+                }
+            }
             depth += 1;
-        } else {
-            break;
+        }
+    }
+
+    if best_move.is_none() {
+        let legal_moves = board.generate_moves();
+        if !legal_moves.is_empty() {
+            return Some(legal_moves.as_slice()[0]);
         }
     }
 
     best_move
+}
+
+fn root_search(
+    board: &mut Board,
+    state: &mut SearchState,
+    depth: u32,
+    mut alpha: i32,
+    beta: i32,
+    stop: &AtomicBool,
+    root_moves: &mut MoveList,
+    pv_move: Option<Move>,
+) -> (i32, Option<Move>) {
+    if stop.load(Ordering::Relaxed) {
+        return (0, None);
+    }
+
+    let hash_move = state.tt.probe(board.hash()).and_then(|e| e.best_move);
+    root_moves
+        .as_mut_slice()
+        .sort_by_key(|m| -board.score_move(state, m, 0, hash_move, None, pv_move));
+    if let Some(entry) = state.tt.probe(board.hash()) {
+        if let Some(hm) = &entry.best_move {
+            if let Some(pos) = root_moves.as_slice().iter().position(|m| m == hm) {
+                root_moves.as_mut_slice().swap(0, pos);
+            }
+        }
+    }
+
+    let mut best_score = -MATE_SCORE * 2;
+    let mut best_move = if root_moves.is_empty() {
+        None
+    } else {
+        Some(root_moves.as_slice()[0])
+    };
+
+    for m in root_moves.iter() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let info = board.make_move(m);
+        let score = -board.negamax(state, depth - 1, 1, stop, -beta, -alpha);
+        board.unmake_move(m, info);
+
+        if score > best_score {
+            best_score = score;
+            best_move = Some(*m);
+        }
+
+        alpha = alpha.max(best_score);
+        if alpha >= beta {
+            break;
+        }
+    }
+
+    (best_score, best_move)
 }
 
 #[cfg(test)]
@@ -826,6 +1539,7 @@ mod draw_tests {
     fn test_fifty_move_rule_draw() {
         let board = Board::from_fen("8/8/8/8/8/8/8/K1k5 w - - 100 1");
         assert!(board.is_draw());
+        assert!(board.is_theoretical_draw());
     }
 
     #[test]
@@ -835,6 +1549,7 @@ mod draw_tests {
         board.make_move(&mv);
         assert_eq!(board.halfmove_clock(), 0);
         assert!(!board.is_draw());
+        assert!(!board.is_theoretical_draw());
     }
 
     #[test]
@@ -847,6 +1562,14 @@ mod draw_tests {
             apply_uci(&mut board, "f6g8");
         }
         assert!(board.is_draw());
+        assert!(board.is_theoretical_draw());
+    }
+
+    #[test]
+    fn test_insufficient_material_draw() {
+        let board = Board::from_fen("8/8/8/8/8/8/6N1/K1k5 w - - 0 1");
+        assert!(!board.is_draw());
+        assert!(board.is_theoretical_draw());
     }
 
     #[test]
@@ -880,7 +1603,8 @@ mod draw_tests {
     fn test_draw_in_search() {
         let mut board = Board::from_fen("8/8/8/8/8/8/8/K1k5 w - - 100 1");
         let mut state = SearchState::new(1);
-        let score = board.negamax(&mut state, 1, -1000, 1000);
+        let stop = AtomicBool::new(false);
+        let score = board.negamax(&mut state, 1, 0, &stop, -1000, 1000);
         assert_eq!(score, 0);
     }
 }

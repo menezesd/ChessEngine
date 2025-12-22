@@ -7,6 +7,38 @@ use super::{
 };
 
 impl Board {
+    pub(crate) fn mobility_counts(&self) -> (i32, i32) {
+        let mut white = 0;
+        let mut black = 0;
+
+        let pieces = [
+            Piece::Knight,
+            Piece::Bishop,
+            Piece::Rook,
+            Piece::Queen,
+        ];
+
+        for &color in &[Color::White, Color::Black] {
+            let c_idx = color_index(color);
+            let mut count = 0;
+            for &piece in &pieces {
+                let mut bb = self.pieces[c_idx][piece_index(piece)];
+                while bb.0 != 0 {
+                    let from = square_from_index(pop_lsb(&mut bb));
+                    let moves = self.generate_piece_moves(from, piece);
+                    count += moves.len as i32;
+                }
+            }
+            if color == Color::White {
+                white = count;
+            } else {
+                black = count;
+            }
+        }
+
+        (white, black)
+    }
+
     fn generate_pseudo_moves(&self) -> MoveList {
         let mut moves = MoveList::new();
         let color = if self.white_to_move {
@@ -290,7 +322,7 @@ impl Board {
         moves
     }
 
-    fn find_king(&self, color: Color) -> Option<Square> {
+    pub(crate) fn find_king(&self, color: Color) -> Option<Square> {
         for r in 0..8 {
             for f in 0..8 {
                 let sq = Square(r, f);
@@ -302,7 +334,7 @@ impl Board {
         None
     }
 
-    fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
+    pub(crate) fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
         let target_idx = square_index(square).as_usize();
         let c_idx = color_index(attacker_color);
 
@@ -375,8 +407,7 @@ impl Board {
         legal_moves
     }
 
-    #[allow(dead_code)]
-    fn is_checkmate(&mut self) -> bool {
+    pub fn is_checkmate(&mut self) -> bool {
         let color = self.current_color();
         self.is_in_check(color) && self.generate_moves().is_empty()
     }
@@ -470,6 +501,26 @@ impl Board {
         legal_tactical_moves
     }
 
+    pub(crate) fn generate_checking_moves(&mut self) -> MoveList {
+        let current_color = self.current_color();
+        let pseudo_moves = self.generate_pseudo_moves();
+        let mut checking_moves = MoveList::new();
+
+        for m in pseudo_moves.iter() {
+            if m.is_castling {
+                continue;
+            }
+            let info = self.make_move(m);
+            let gives_check = self.is_in_check(self.opponent_color(current_color));
+            if gives_check {
+                checking_moves.push(*m);
+            }
+            self.unmake_move(m, info);
+        }
+
+        checking_moves
+    }
+
     fn generate_pawn_tactical_moves(&self, from: Square, moves: &mut MoveList) {
         let color = self.current_color();
         let dir: isize = if color == Color::White { 1 } else { -1 };
@@ -521,7 +572,7 @@ impl Board {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn perft(&mut self, depth: usize) -> u64 {
+    pub fn perft(&mut self, depth: usize) -> u64 {
         if depth == 0 {
             return 1;
         }
