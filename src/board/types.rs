@@ -133,7 +133,7 @@ impl MoveList {
         self.len
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
@@ -147,6 +147,36 @@ impl MoveList {
 
     pub fn iter(&self) -> std::slice::Iter<'_, Move> {
         self.as_slice().iter()
+    }
+
+    pub fn get(&self, idx: usize) -> Option<Move> {
+        if idx < self.len {
+            Some(self.moves[idx])
+        } else {
+            None
+        }
+    }
+
+    pub fn first(&self) -> Option<Move> {
+        self.get(0)
+    }
+}
+
+impl<'a> IntoIterator for &'a MoveList {
+    type Item = &'a Move;
+    type IntoIter = std::slice::Iter<'a, Move>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut MoveList {
+    type Item = &'a mut Move;
+    type IntoIter = std::slice::IterMut<'a, Move>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_mut_slice().iter_mut()
     }
 }
 

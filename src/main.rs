@@ -11,11 +11,12 @@ use chess_engine::board::{
     find_best_move, find_best_move_with_time, Board, SearchClock, SearchLimits, SearchState,
     DEFAULT_TT_MB,
 };
-use chess_engine::uci::command::{parse_uci_command, UciCommand};
+use chess_engine::uci::command::{parse_go_params, parse_uci_command, GoParams, UciCommand};
 use chess_engine::uci::options::{parse_setoption, UciOptionAction, UciOptions};
 use chess_engine::uci::print::{print_perft_info, print_time_info};
-use chess_engine::uci::time::{compute_time_limits, DEFAULT_MOVES_TO_GO};
-use chess_engine::uci::{format_uci_move, parse_position_command};
+use chess_engine::uci::report::{print_bestmove, print_ready};
+use chess_engine::uci::time::compute_time_limits;
+use chess_engine::uci::parse_position_command;
 
 struct SearchJob {
     stop: Arc<AtomicBool>,
@@ -37,6 +38,35 @@ fn parts_as_strs(parts: &[String]) -> Vec<&str> {
     parts.iter().map(|p| p.as_str()).collect()
 }
 
+fn apply_go_params(
+    params: &GoParams,
+    board: &Board,
+    time_left: &mut Duration,
+    inc: &mut Duration,
+    movetime: &mut Option<Duration>,
+) {
+    if board.white_to_move() {
+        if let Some(wtime) = params.wtime {
+            *time_left = Duration::from_millis(wtime);
+        }
+        if let Some(winc) = params.winc {
+            *inc = Duration::from_millis(winc);
+        }
+    } else {
+        if let Some(btime) = params.btime {
+            *time_left = Duration::from_millis(btime);
+        }
+        if let Some(binc) = params.binc {
+            *inc = Duration::from_millis(binc);
+        }
+    }
+
+    if let Some(mt) = params.movetime {
+        *movetime = Some(Duration::from_millis(mt));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_command(
     cmd: UciCommand,
     board: &mut Board,
@@ -55,7 +85,7 @@ fn handle_command(
             }
         }
         UciCommand::IsReady => {
-            println!("readyok");
+            print_ready();
         }
         UciCommand::UciNewGame => {
             stop_search(current_job);
@@ -75,66 +105,15 @@ fn handle_command(
         }
         UciCommand::Go(parts) => {
             let parts_ref = parts_as_strs(&parts);
-            let mut i = 1;
-            let mut movestogo: Option<u64> = None;
-            let mut depth: Option<u32> = None;
-            let mut nodes: Option<u64> = None;
-            let mut mate: Option<u32> = None;
-            let mut go_ponder = false;
-            let mut go_infinite = false;
-            while i < parts_ref.len() {
-                match parts_ref[i] {
-                    "wtime" if board.white_to_move() => {
-                        *time_left =
-                            Duration::from_millis(parts_ref[i + 1].parse().unwrap_or(1000));
-                        i += 2;
-                    }
-                    "btime" if !board.white_to_move() => {
-                        *time_left =
-                            Duration::from_millis(parts_ref[i + 1].parse().unwrap_or(1000));
-                        i += 2;
-                    }
-                    "winc" if board.white_to_move() => {
-                        *inc = Duration::from_millis(parts_ref[i + 1].parse().unwrap_or(0));
-                        i += 2;
-                    }
-                    "binc" if !board.white_to_move() => {
-                        *inc = Duration::from_millis(parts_ref[i + 1].parse().unwrap_or(0));
-                        i += 2;
-                    }
-                    "movetime" => {
-                        *movetime =
-                            Some(Duration::from_millis(parts_ref[i + 1].parse().unwrap_or(100)));
-                        i += 2;
-                    }
-                    "movestogo" => {
-                        movestogo =
-                            Some(parts_ref[i + 1].parse().unwrap_or(DEFAULT_MOVES_TO_GO));
-                        i += 2;
-                    }
-                    "depth" => {
-                        depth = Some(parts_ref[i + 1].parse().unwrap_or(1));
-                        i += 2;
-                    }
-                    "nodes" => {
-                        nodes = Some(parts_ref[i + 1].parse().unwrap_or(0));
-                        i += 2;
-                    }
-                    "mate" => {
-                        mate = Some(parts_ref[i + 1].parse().unwrap_or(0));
-                        i += 2;
-                    }
-                    "ponder" => {
-                        go_ponder = true;
-                        i += 1;
-                    }
-                    "infinite" => {
-                        go_infinite = true;
-                        i += 1;
-                    }
-                    _ => i += 1,
-                }
-            }
+            let params = parse_go_params(&parts_ref);
+
+            apply_go_params(&params, board, time_left, inc, movetime);
+            let movestogo = params.movestogo;
+            let mut depth = params.depth;
+            let nodes = params.nodes;
+            let mate = params.mate;
+            let go_ponder = params.ponder;
+            let go_infinite = params.infinite;
 
             stop_search(current_job);
             {
@@ -216,25 +195,20 @@ fn handle_command(
                 .spawn(move || {
                     let mut guard = search_clone.lock().unwrap();
                     let best_move = if let Some(d) = depth {
-                        find_best_move(&mut search_board, &mut *guard, d, &stop_clone)
+                        find_best_move(&mut search_board, &mut guard, d, &stop_clone)
                     } else {
                         let limits = SearchLimits {
                             clock: clock_clone,
                             stop: stop_clone,
                         };
-                        find_best_move_with_time(&mut search_board, &mut *guard, limits)
+                        find_best_move_with_time(&mut search_board, &mut guard, limits)
                     };
 
                     if pondering_clone.load(Ordering::Relaxed) {
                         return;
                     }
 
-                    if let Some(best_move) = best_move {
-                        let uci_move = format_uci_move(&best_move);
-                        println!("bestmove {}", uci_move);
-                    } else {
-                        println!("bestmove 0000");
-                    }
+                    print_bestmove(best_move);
                 })
                 .expect("failed to spawn search thread");
 
@@ -272,7 +246,7 @@ fn handle_command(
             if let Some((name, value)) = parse_setoption(&parts_ref) {
                 if let Ok(mut guard) = search.lock() {
                     if let Some(action) =
-                        options.apply_setoption(&name, value.as_deref(), &mut *guard)
+                        options.apply_setoption(&name, value.as_deref(), &mut guard)
                     {
                         match action {
                             UciOptionAction::ReinitHash(new_mb) => {

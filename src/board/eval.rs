@@ -335,7 +335,7 @@ impl Board {
                 if let Some((color, Piece::Pawn)) = self.piece_at(Square(rank, file)) {
                     let forward = if color == Color::White { 1i32 } else { -1i32 };
                     let next_rank = rank as i32 + forward;
-                    if next_rank < 0 || next_rank > 7 {
+                    if !(0..=7).contains(&next_rank) {
                         continue;
                     }
                     let same_file_ahead = Square(next_rank as usize, file);
@@ -386,7 +386,7 @@ impl Board {
                 for df in -1i32..=1 {
                     let rr = sq.0 as i32 + dr;
                     let ff = sq.1 as i32 + df;
-                    if rr < 0 || rr > 7 || ff < 0 || ff > 7 {
+                    if !(0..=7).contains(&rr) || !(0..=7).contains(&ff) {
                         continue;
                     }
                     let target = Square(rr as usize, ff as usize);
@@ -503,7 +503,7 @@ impl Board {
             let forward = if color == Color::White { -1i32 } else { 1i32 };
             let defend_rank = rank as i32 + forward;
             let mut supported = false;
-            if defend_rank >= 0 && defend_rank <= 7 {
+            if (0..=7).contains(&defend_rank) {
                 if file > 0 {
                     if let Some((c, Piece::Pawn)) = self.piece_at(Square(defend_rank as usize, file - 1)) {
                         supported |= c == color;
@@ -610,13 +610,13 @@ impl Board {
             let king_sq = square_from_index(pop_lsb(&mut bb));
             let forward = if color == Color::White { 1i32 } else { -1i32 };
             let target_rank = king_sq.0 as i32 + forward;
-            if target_rank < 0 || target_rank > 7 {
+            if !(0..=7).contains(&target_rank) {
                 return 0;
             }
             let mut shield = 0;
             for df in -1i32..=1 {
                 let file = king_sq.1 as i32 + df;
-                if file < 0 || file > 7 {
+                if !(0..=7).contains(&file) {
                     continue;
                 }
                 let sq = Square(target_rank as usize, file as usize);

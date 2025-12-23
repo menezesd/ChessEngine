@@ -16,7 +16,7 @@ impl Board {
         let f = from.1 as isize;
 
         let forward_r = r + dir;
-        if forward_r >= 0 && forward_r < 8 {
+        if (0..8).contains(&forward_r) {
             let forward_sq = Square(forward_r as usize, f as usize);
             if self.is_empty(forward_sq) {
                 if forward_sq.0 == promotion_rank {
@@ -42,10 +42,10 @@ impl Board {
             }
         }
 
-        if forward_r >= 0 && forward_r < 8 {
+        if (0..8).contains(&forward_r) {
             for df in [-1, 1] {
                 let capture_f = f + df;
-                if capture_f >= 0 && capture_f < 8 {
+                if (0..8).contains(&capture_f) {
                     let target_sq = Square(forward_r as usize, capture_f as usize);
                     if let Some((target_color, _)) = self.piece_at(target_sq) {
                         if target_color != color {
@@ -84,7 +84,7 @@ impl Board {
 
         let forward_r = r + dir;
 
-        if forward_r >= 0 && forward_r < 8 {
+        if (0..8).contains(&forward_r) {
             let forward_sq = Square(forward_r as usize, f as usize);
             if forward_sq.0 == promotion_rank && self.is_empty(forward_sq) {
                 for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
@@ -93,10 +93,10 @@ impl Board {
             }
         }
 
-        if forward_r >= 0 && forward_r < 8 {
+        if (0..8).contains(&forward_r) {
             for df in [-1, 1] {
                 let capture_f = f + df;
-                if capture_f >= 0 && capture_f < 8 {
+                if (0..8).contains(&capture_f) {
                     let target_sq = Square(forward_r as usize, capture_f as usize);
 
                     if let Some((target_color, _)) = self.piece_at(target_sq) {

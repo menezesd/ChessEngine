@@ -21,30 +21,24 @@ impl ZobristKeys {
         let mut castling_keys = [[0; 2]; 2];
         let mut en_passant_keys = [0; 8];
 
-        for p_idx in 0..6 {
-            // Piece type
-            for c_idx in 0..2 {
-                // Color
-                for sq_idx in 0..64 {
-                    // Square
-                    piece_keys[p_idx][c_idx][sq_idx] = rng.gen();
+        for piece in piece_keys.iter_mut() {
+            for color in piece.iter_mut() {
+                for key in color.iter_mut() {
+                    *key = rng.gen();
                 }
             }
         }
 
         let black_to_move_key = rng.gen();
 
-        for c_idx in 0..2 {
-            // Color
-            for side_idx in 0..2 {
-                // Side (K=0, Q=1)
-                castling_keys[c_idx][side_idx] = rng.gen();
+        for color in castling_keys.iter_mut() {
+            for key in color.iter_mut() {
+                *key = rng.gen();
             }
         }
 
-        for f_idx in 0..8 {
-            // File
-            en_passant_keys[f_idx] = rng.gen();
+        for key in en_passant_keys.iter_mut() {
+            *key = rng.gen();
         }
 
         ZobristKeys {

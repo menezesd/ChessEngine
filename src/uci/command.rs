@@ -14,6 +14,76 @@ pub enum UciCommand {
     Unknown(String),
 }
 
+#[derive(Default, Debug, Clone)]
+pub struct GoParams {
+    pub wtime: Option<u64>,
+    pub btime: Option<u64>,
+    pub winc: Option<u64>,
+    pub binc: Option<u64>,
+    pub movetime: Option<u64>,
+    pub movestogo: Option<u64>,
+    pub depth: Option<u32>,
+    pub nodes: Option<u64>,
+    pub mate: Option<u32>,
+    pub ponder: bool,
+    pub infinite: bool,
+}
+
+pub fn parse_go_params(parts: &[&str]) -> GoParams {
+    let mut params = GoParams::default();
+    let mut i = 1;
+    while i < parts.len() {
+        match parts[i] {
+            "wtime" => {
+                params.wtime = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                i += 2;
+            }
+            "btime" => {
+                params.btime = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                i += 2;
+            }
+            "winc" => {
+                params.winc = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                i += 2;
+            }
+            "binc" => {
+                params.binc = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                i += 2;
+            }
+            "movetime" => {
+                params.movetime = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                i += 2;
+            }
+            "movestogo" => {
+                params.movestogo = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                i += 2;
+            }
+            "depth" => {
+                params.depth = parts.get(i + 1).and_then(|v| v.parse::<u32>().ok());
+                i += 2;
+            }
+            "nodes" => {
+                params.nodes = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                i += 2;
+            }
+            "mate" => {
+                params.mate = parts.get(i + 1).and_then(|v| v.parse::<u32>().ok());
+                i += 2;
+            }
+            "ponder" => {
+                params.ponder = true;
+                i += 1;
+            }
+            "infinite" => {
+                params.infinite = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    params
+}
+
 pub fn parse_uci_command(line: &str) -> Option<UciCommand> {
     let trimmed = line.trim();
     if trimmed.is_empty() {

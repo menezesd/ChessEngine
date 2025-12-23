@@ -4,6 +4,7 @@ pub mod options;
 pub mod print;
 pub mod command;
 pub mod time;
+pub mod report;
 
 // Parses a move in UCI format (e.g., "e2e4", "e7e8q")
 // Needs the current board state to find the matching legal move object.

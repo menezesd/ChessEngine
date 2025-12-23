@@ -22,6 +22,19 @@ pub struct SearchStats {
     pub max_nodes: u64,
 }
 
+impl SearchStats {
+    pub fn reset_search(&mut self) {
+        self.nodes = 0;
+        self.seldepth = 0;
+        self.total_nodes = 0;
+    }
+
+    pub fn reset_iteration(&mut self) {
+        self.nodes = 0;
+        self.seldepth = 0;
+    }
+}
+
 pub struct SearchTables {
     pub tt: TranspositionTable,
     pub killer_moves: [[Move; 2]; MAX_PLY],
@@ -66,9 +79,7 @@ impl SearchState {
 
     pub fn new_search(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        self.stats.nodes = 0;
-        self.stats.seldepth = 0;
-        self.stats.total_nodes = 0;
+        self.stats.reset_search();
         self.last_move = super::EMPTY_MOVE;
         self.hard_stop_at = None;
     }
@@ -107,9 +118,7 @@ impl SearchState {
 
     pub fn reset_tables(&mut self, tt_mb: usize) {
         self.tables.tt = TranspositionTable::new(tt_mb);
-        self.stats.nodes = 0;
-        self.stats.seldepth = 0;
-        self.stats.total_nodes = 0;
+        self.stats.reset_search();
     }
 
     pub fn hashfull_per_mille(&self) -> u32 {
@@ -308,6 +317,7 @@ const KING_VALUE: i32 = 20000;
 const MATE_SCORE: i32 = KING_VALUE * 10;
 
 impl Board {
+    #[allow(clippy::too_many_arguments)]
     fn try_null_move(
         &mut self,
         state: &mut SearchState,
@@ -394,7 +404,7 @@ impl Board {
                     return score;
                 }
             }
-            hash_move = entry.best_move.clone();
+            hash_move = entry.best_move;
             tt_eval = Some(entry.eval);
         }
 
@@ -440,11 +450,8 @@ impl Board {
 
         let mut best_score = -MATE_SCORE * 2;
         let mut best_move_found: Option<Move> = None;
-        let singular_target = if let Some(hm) = &hash_move {
-            Some((*hm, alpha + params.singular_margin))
-        } else {
-            None
-        };
+        let singular_target =
+            hash_move.map(|hm| (hm, alpha + params.singular_margin));
 
         let eval_at_node = self.eval_for_side();
         let stand_pat = if in_check {
@@ -482,7 +489,7 @@ impl Board {
             {
                 continue;
             }
-            let info = self.make_move(&m);
+            let info = self.make_move(m);
             let prev_last = state.last_move;
             state.last_move = *m;
             let mut new_depth = depth - 1;
@@ -520,11 +527,11 @@ impl Board {
                 score
             };
             state.last_move = prev_last;
-            self.unmake_move(&m, info);
+            self.unmake_move(m, info);
 
             if score > best_score {
                 best_score = score;
-                best_move_found = Some(m.clone());
+                best_move_found = Some(*m);
             }
 
             alpha = alpha.max(best_score);
@@ -760,7 +767,7 @@ pub fn find_best_move(
         return None;
     }
     if legal_moves.len() == 1 {
-        return Some(legal_moves.as_slice()[0]);
+        return legal_moves.first();
     }
     let mut root_moves = legal_moves.clone();
 
@@ -823,7 +830,13 @@ pub fn find_best_move_with_time(
             stop: &limits.stop,
             start_time,
         };
-        ctx.state.set_hard_stop_at(hard_deadline);
+        let stop_at = match (soft_deadline, hard_deadline) {
+            (Some(soft), Some(hard)) => Some(soft.min(hard)),
+            (Some(soft), None) => Some(soft),
+            (None, Some(hard)) => Some(hard),
+            (None, None) => None,
+        };
+        ctx.state.set_hard_stop_at(stop_at);
         if let Some(hard_deadline) = hard_deadline {
             if now + SAFETY_MARGIN >= hard_deadline {
                 break;
@@ -843,8 +856,7 @@ pub fn find_best_move_with_time(
         }
 
         let depth_start = Instant::now();
-        ctx.state.stats.nodes = 0;
-        ctx.state.stats.seldepth = 0;
+        ctx.state.stats.reset_iteration();
 
         let mut legal_moves = ctx.board.generate_moves();
 
@@ -853,7 +865,7 @@ pub fn find_best_move_with_time(
         }
 
         if legal_moves.len() == 1 {
-            return Some(legal_moves.as_slice()[0]);
+            return legal_moves.first();
         }
 
         let window = if depth <= 2 { MATE_SCORE } else { 50 };
@@ -909,13 +921,14 @@ pub fn find_best_move_with_time(
     if best_move.is_none() {
         let legal_moves = board.generate_moves();
         if !legal_moves.is_empty() {
-            return Some(legal_moves.as_slice()[0]);
+            return legal_moves.first();
         }
     }
 
     best_move
 }
 
+#[allow(clippy::too_many_arguments)]
 fn root_search(
     board: &mut Board,
     state: &mut SearchState,
@@ -944,7 +957,7 @@ fn root_search(
     let mut best_move = if root_moves.is_empty() {
         None
     } else {
-        Some(root_moves.as_slice()[0])
+        root_moves.first()
     };
 
     for m in root_moves.iter() {

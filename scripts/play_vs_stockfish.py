@@ -58,27 +58,18 @@ class UCIEngine:
                 return True
         raise RuntimeError(f"{self.name}: timeout waiting for {token}")
 
-    def bestmove(self, moves, movetime_ms=None, time_control=None):
+    def bestmove(self, moves, movetime_ms=None, time_control=None, timeout=10.0):
         position = "position startpos"
         if moves:
             position += " moves " + " ".join(moves)
         self._send(position)
         if time_control:
-            parts = [
-                "go",
-                f"wtime {time_control['wtime_ms']}",
-                f"btime {time_control['btime_ms']}",
-                f"winc {time_control['winc_ms']}",
-                f"binc {time_control['binc_ms']}",
-            ]
-            if time_control.get("movestogo") is not None:
-                parts.append(f"movestogo {time_control['movestogo']}")
-            self._send(" ".join(parts))
+            self._send(time_control.go_command())
         elif movetime_ms is not None:
             self._send(f"go movetime {movetime_ms}")
         else:
             self._send("go")
-        return self._read_bestmove(timeout=10.0)
+        return self._read_bestmove(timeout=timeout)
 
     def _read_bestmove(self, timeout):
         deadline = time.time() + timeout
@@ -110,35 +101,67 @@ class UCIEngine:
                 self.proc.kill()
 
 
+class TimeControl:
+    def __init__(self, wtime_ms, btime_ms, winc_ms=0, binc_ms=0, movestogo=None):
+        self.wtime_ms = int(wtime_ms)
+        self.btime_ms = int(btime_ms)
+        self.winc_ms = int(winc_ms)
+        self.binc_ms = int(binc_ms)
+        self.movestogo = movestogo
+
+    @classmethod
+    def from_env(cls, movetime_ms):
+        wtime_env = os.environ.get("WTIME_MS")
+        btime_env = os.environ.get("BTIME_MS")
+        if wtime_env is None and btime_env is None:
+            return None
+        wtime_ms = int(wtime_env or btime_env or movetime_ms * 40)
+        btime_ms = int(btime_env or wtime_ms)
+        winc_ms = int(os.environ.get("WINC_MS", "0"))
+        binc_ms = int(os.environ.get("BINC_MS", "0"))
+        movestogo = os.environ.get("MOVESTOGO")
+        movestogo_val = int(movestogo) if movestogo is not None else None
+        return cls(wtime_ms, btime_ms, winc_ms, binc_ms, movestogo_val)
+
+    def go_command(self):
+        parts = [
+            "go",
+            f"wtime {self.wtime_ms}",
+            f"btime {self.btime_ms}",
+            f"winc {self.winc_ms}",
+            f"binc {self.binc_ms}",
+        ]
+        if self.movestogo is not None:
+            parts.append(f"movestogo {self.movestogo}")
+        return " ".join(parts)
+
+    def apply_move(self, is_white, elapsed_ms):
+        if is_white:
+            self.wtime_ms = max(0, self.wtime_ms - elapsed_ms + self.winc_ms)
+        else:
+            self.btime_ms = max(0, self.btime_ms - elapsed_ms + self.binc_ms)
+
+    def summary(self):
+        return (
+            f"wtime_ms: {self.wtime_ms}, btime_ms: {self.btime_ms}, "
+            f"winc_ms: {self.winc_ms}, binc_ms: {self.binc_ms}, movestogo: {self.movestogo}"
+        )
+
+
 def main():
     stockfish = os.environ.get("STOCKFISH", "stockfish")
     engine = os.environ.get("ENGINE", "./target/debug/chess_engine")
     plies = int(os.environ.get("PLIES", "6"))
     movetime_ms = int(os.environ.get("MOVETIME_MS", "100"))
-    wtime_ms = os.environ.get("WTIME_MS")
-    btime_ms = os.environ.get("BTIME_MS")
-    winc_ms = int(os.environ.get("WINC_MS", "0"))
-    binc_ms = int(os.environ.get("BINC_MS", "0"))
-    movestogo = os.environ.get("MOVESTOGO")
+    bestmove_timeout = float(os.environ.get("BESTMOVE_TIMEOUT", "10"))
     engine_opts = os.environ.get("ENGINE_OPTS", "")
     stockfish_opts = os.environ.get("STOCKFISH_OPTS", "")
 
     print(f"engine: {engine}")
     print(f"stockfish: {stockfish}")
-    if wtime_ms is not None or btime_ms is not None:
-        wtime_ms = int(wtime_ms or btime_ms or movetime_ms * 40)
-        btime_ms = int(btime_ms or wtime_ms)
-        movestogo_val = int(movestogo) if movestogo is not None else None
-        print(
-            "plies: {}, wtime_ms: {}, btime_ms: {}, winc_ms: {}, binc_ms: {}, movestogo: {}".format(
-                plies,
-                wtime_ms,
-                btime_ms,
-                winc_ms,
-                binc_ms,
-                movestogo_val,
-            )
-        )
+    time_control = TimeControl.from_env(movetime_ms)
+    if time_control is not None:
+        print(f"plies: {plies}, {time_control.summary()}")
     else:
         print(f"plies: {plies}, movetime_ms: {movetime_ms}")
 
@@ -164,28 +187,37 @@ def main():
         sf._drain_until("readyok", timeout=5.0)
 
     moves = []
-    use_time_control = wtime_ms is not None and btime_ms is not None
+    use_time_control = time_control is not None
     try:
         for ply in range(plies):
             side = chess if ply % 2 == 0 else sf
             if use_time_control:
-                tc = {
-                    "wtime_ms": wtime_ms,
-                    "btime_ms": btime_ms,
-                    "winc_ms": winc_ms,
-                    "binc_ms": binc_ms,
-                    "movestogo": movestogo_val,
-                }
                 start = time.time()
-                move = side.bestmove(moves, time_control=tc)
+                move = side.bestmove(moves, time_control=time_control, timeout=bestmove_timeout)
                 elapsed_ms = int((time.time() - start) * 1000)
-                if ply % 2 == 0:
-                    wtime_ms = max(0, wtime_ms - elapsed_ms + winc_ms)
-                else:
-                    btime_ms = max(0, btime_ms - elapsed_ms + binc_ms)
+                time_control.apply_move(ply % 2 == 0, elapsed_ms)
+                print(
+                    "ply {}: {} -> {} (elapsed_ms={}, wtime_ms={}, btime_ms={})".format(
+                        ply + 1,
+                        side.name,
+                        move,
+                        elapsed_ms,
+                        time_control.wtime_ms,
+                        time_control.btime_ms,
+                    )
+                )
             else:
-                move = side.bestmove(moves, movetime_ms=movetime_ms)
-            print(f"ply {ply + 1}: {side.name} -> {move}")
+                start = time.time()
+                move = side.bestmove(moves, movetime_ms=movetime_ms, timeout=bestmove_timeout)
+                elapsed_ms = int((time.time() - start) * 1000)
+                print(
+                    "ply {}: {} -> {} (elapsed_ms={})".format(
+                        ply + 1,
+                        side.name,
+                        move,
+                        elapsed_ms,
+                    )
+                )
             if move in ("0000", "(none)"):
                 print("engine returned null move; stopping")
                 break

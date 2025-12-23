@@ -11,7 +11,7 @@ impl Board {
         for (rank_idx, rank_str) in parts[0].split('/').enumerate() {
             let mut file = 0;
             for c in rank_str.chars() {
-                if c.is_digit(10) {
+                if c.is_ascii_digit() {
                     file += c.to_digit(10).unwrap() as usize;
                 } else {
                     let color = if c.is_uppercase() {

@@ -56,17 +56,14 @@ impl TranspositionTable {
     pub(crate) fn probe(&self, hash: u64) -> Option<&TTEntry> {
         let index = self.index(hash);
         let bucket = &self.table[index];
-        for slot in bucket.iter() {
-            if let Some(entry) = slot {
-                if entry.hash == hash {
-                    return Some(entry);
-                }
-            }
-        }
-        None
+        bucket
+            .iter()
+            .flatten()
+            .find(|entry| entry.hash == hash)
     }
 
     // Store an entry in the table
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn store(
         &mut self,
         hash: u64,

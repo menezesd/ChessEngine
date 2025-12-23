@@ -18,19 +18,19 @@ pub(crate) static KNIGHT_ATTACKS: Lazy<[u64; 64]> = Lazy::new(|| {
         (1, -2),
         (2, -1),
     ];
-    for sq in 0..64 {
+    for (sq, slot) in attacks.iter_mut().enumerate() {
         let r = (sq / 8) as isize;
         let f = (sq % 8) as isize;
         let mut mask = 0u64;
         for (dr, df) in deltas {
             let nr = r + dr;
             let nf = f + df;
-            if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            if (0..8).contains(&nr) && (0..8).contains(&nf) {
                 let idx = (nr as usize) * 8 + (nf as usize);
                 mask |= 1u64 << idx;
             }
         }
-        attacks[sq] = mask;
+        *slot = mask;
     }
     attacks
 });
@@ -47,50 +47,57 @@ pub(crate) static KING_ATTACKS: Lazy<[u64; 64]> = Lazy::new(|| {
         (-1, 1),
         (-1, -1),
     ];
-    for sq in 0..64 {
+    for (sq, slot) in attacks.iter_mut().enumerate() {
         let r = (sq / 8) as isize;
         let f = (sq % 8) as isize;
         let mut mask = 0u64;
         for (dr, df) in deltas {
             let nr = r + dr;
             let nf = f + df;
-            if nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            if (0..8).contains(&nr) && (0..8).contains(&nf) {
                 let idx = (nr as usize) * 8 + (nf as usize);
                 mask |= 1u64 << idx;
             }
         }
-        attacks[sq] = mask;
+        *slot = mask;
     }
     attacks
 });
 
 pub(crate) static PAWN_ATTACKS: Lazy<[[u64; 64]; 2]> = Lazy::new(|| {
     let mut attacks = [[0u64; 64]; 2];
-    for sq in 0..64 {
+    let (white_attacks, black_attacks) = attacks.split_at_mut(1);
+    let white_attacks = &mut white_attacks[0];
+    let black_attacks = &mut black_attacks[0];
+    for (sq, (white_slot, black_slot)) in white_attacks
+        .iter_mut()
+        .zip(black_attacks.iter_mut())
+        .enumerate()
+    {
         let r = (sq / 8) as isize;
         let f = (sq % 8) as isize;
         let mut white = 0u64;
         let wr = r + 1;
-        if wr >= 0 && wr < 8 {
+        if (0..8).contains(&wr) {
             for df in [-1, 1] {
                 let wf = f + df;
-                if wf >= 0 && wf < 8 {
+                if (0..8).contains(&wf) {
                     white |= 1u64 << ((wr as usize) * 8 + (wf as usize));
                 }
             }
         }
-        attacks[0][sq] = white;
+        *white_slot = white;
         let mut black = 0u64;
         let br = r - 1;
-        if br >= 0 && br < 8 {
+        if (0..8).contains(&br) {
             for df in [-1, 1] {
                 let bf = f + df;
-                if bf >= 0 && bf < 8 {
+                if (0..8).contains(&bf) {
                     black |= 1u64 << ((br as usize) * 8 + (bf as usize));
                 }
             }
         }
-        attacks[1][sq] = black;
+        *black_slot = black;
     }
     attacks
 });
@@ -123,7 +130,7 @@ static RAYS: Lazy<[[u64; 64]; 8]> = Lazy::new(|| {
             let mut mask = 0u64;
             let mut nr = r + dr;
             let mut nf = f + df;
-            while nr >= 0 && nr < 8 && nf >= 0 && nf < 8 {
+            while (0..8).contains(&nr) && (0..8).contains(&nf) {
                 let idx = (nr as usize) * 8 + (nf as usize);
                 mask |= 1u64 << idx;
                 nr += dr;
@@ -137,7 +144,7 @@ static RAYS: Lazy<[[u64; 64]; 8]> = Lazy::new(|| {
 
 pub(crate) static ROOK_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
     let mut masks = [0u64; 64];
-    for sq in 0..64 {
+    for (sq, slot) in masks.iter_mut().enumerate() {
         let mut mask = 0u64;
         for &dir in &[DIR_N, DIR_S, DIR_E, DIR_W] {
             let ray = RAYS[dir][sq];
@@ -150,14 +157,14 @@ pub(crate) static ROOK_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
             };
             mask |= trimmed;
         }
-        masks[sq] = mask;
+        *slot = mask;
     }
     masks
 });
 
 pub(crate) static BISHOP_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
     let mut masks = [0u64; 64];
-    for sq in 0..64 {
+    for (sq, slot) in masks.iter_mut().enumerate() {
         let mut mask = 0u64;
         for &dir in &[DIR_NE, DIR_NW, DIR_SE, DIR_SW] {
             let ray = RAYS[dir][sq];
@@ -170,7 +177,7 @@ pub(crate) static BISHOP_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
             };
             mask |= trimmed;
         }
-        masks[sq] = mask;
+        *slot = mask;
     }
     masks
 });
@@ -182,9 +189,9 @@ pub(crate) static ROOK_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
         let bits = mask.count_ones() as usize;
         let size = 1usize << bits;
         let mut table = vec![0u64; size];
-        for index in 0..size {
+        for (index, entry) in table.iter_mut().enumerate().take(size) {
             let occ = occupancy_from_index(index, mask);
-            table[index] = gen_slider_attacks(sq, occ, false);
+            *entry = gen_slider_attacks(sq, occ, false);
         }
         tables.push(table);
     }
@@ -198,9 +205,9 @@ pub(crate) static BISHOP_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
         let bits = mask.count_ones() as usize;
         let size = 1usize << bits;
         let mut table = vec![0u64; size];
-        for index in 0..size {
+        for (index, entry) in table.iter_mut().enumerate().take(size) {
             let occ = occupancy_from_index(index, mask);
-            table[index] = gen_slider_attacks(sq, occ, true);
+            *entry = gen_slider_attacks(sq, occ, true);
         }
         tables.push(table);
     }
