@@ -4,7 +4,7 @@ use crate::zobrist::{
 
 use super::{
     bit_for_square, castle_bit, color_index, piece_index, Board, Color, Move, Piece, Square,
-    UnmakeInfo,
+    NullMoveInfo, UnmakeInfo,
 };
 
 impl Board {
@@ -269,6 +269,25 @@ impl Board {
         }
     }
 
+    pub(crate) fn make_null_move(&mut self) -> NullMoveInfo {
+        let previous_hash = self.hash;
+        let previous_en_passant_target = self.en_passant_target;
+        let mut current_hash = self.hash;
+
+        current_hash ^= ZOBRIST.black_to_move_key;
+        if let Some(old_ep) = self.en_passant_target {
+            current_hash ^= ZOBRIST.en_passant_keys[old_ep.1];
+        }
+        self.en_passant_target = None;
+        self.white_to_move = !self.white_to_move;
+        self.hash = current_hash;
+
+        NullMoveInfo {
+            previous_en_passant_target,
+            previous_hash,
+        }
+    }
+
     pub(crate) fn unmake_move(&mut self, m: &Move, info: UnmakeInfo) {
         if info.previous_repetition_count == 0 {
             self.repetition_counts.remove(&info.made_hash);
@@ -325,5 +344,11 @@ impl Board {
                 self.set_piece(m.to, cap_col, cap_piece);
             }
         }
+    }
+
+    pub(crate) fn unmake_null_move(&mut self, info: NullMoveInfo) {
+        self.white_to_move = !self.white_to_move;
+        self.en_passant_target = info.previous_en_passant_target;
+        self.hash = info.previous_hash;
     }
 }

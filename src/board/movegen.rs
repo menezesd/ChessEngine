@@ -26,7 +26,7 @@ impl Board {
                 while bb.0 != 0 {
                     let from = square_from_index(pop_lsb(&mut bb));
                     let moves = self.generate_piece_moves(from, piece);
-                    count += moves.len as i32;
+                    count += moves.len() as i32;
                 }
             }
             if color == Color::White {
@@ -412,8 +412,7 @@ impl Board {
         self.is_in_check(color) && self.generate_moves().is_empty()
     }
 
-    #[allow(dead_code)]
-    fn is_stalemate(&mut self) -> bool {
+    pub fn is_stalemate(&mut self) -> bool {
         let color = self.current_color();
         !self.is_in_check(color) && self.generate_moves().is_empty()
     }

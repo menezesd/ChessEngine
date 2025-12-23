@@ -1,5 +1,8 @@
 use crate::board::{file_to_index, format_square, rank_to_index, Board, Move, Piece, Square};
 
+pub mod options;
+pub mod print;
+
 // Parses a move in UCI format (e.g., "e2e4", "e7e8q")
 // Needs the current board state to find the matching legal move object.
 pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {

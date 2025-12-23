@@ -1,6 +1,6 @@
 use once_cell::sync::Lazy;
 
-fn pop_lsb_u64(bb: &mut u64) -> usize {
+pub(crate) fn pop_lsb_u64(bb: &mut u64) -> usize {
     let idx = bb.trailing_zeros() as usize;
     *bb &= *bb - 1;
     idx
@@ -135,7 +135,7 @@ static RAYS: Lazy<[[u64; 64]; 8]> = Lazy::new(|| {
     rays
 });
 
-static ROOK_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
+pub(crate) static ROOK_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
     let mut masks = [0u64; 64];
     for sq in 0..64 {
         let mut mask = 0u64;
@@ -155,7 +155,7 @@ static ROOK_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
     masks
 });
 
-static BISHOP_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
+pub(crate) static BISHOP_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
     let mut masks = [0u64; 64];
     for sq in 0..64 {
         let mut mask = 0u64;
@@ -175,7 +175,7 @@ static BISHOP_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
     masks
 });
 
-static ROOK_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
+pub(crate) static ROOK_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
     let mut tables = Vec::with_capacity(64);
     for sq in 0..64 {
         let mask = ROOK_MASKS[sq];
@@ -191,7 +191,7 @@ static ROOK_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
     tables
 });
 
-static BISHOP_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
+pub(crate) static BISHOP_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
     let mut tables = Vec::with_capacity(64);
     for sq in 0..64 {
         let mask = BISHOP_MASKS[sq];
@@ -242,20 +242,6 @@ fn occupancy_from_index(mut index: usize, mask: u64) -> u64 {
     result
 }
 
-fn index_from_occupancy(occ: u64, mask: u64) -> usize {
-    let mut index = 0usize;
-    let mut bit = 0usize;
-    let mut m = mask;
-    while m != 0 {
-        let sq = pop_lsb_u64(&mut m);
-        if occ & (1u64 << sq) != 0 {
-            index |= 1usize << bit;
-        }
-        bit += 1;
-    }
-    index
-}
-
 fn gen_slider_attacks(from_idx: usize, occupancy: u64, bishop: bool) -> u64 {
     let mut attacks = 0u64;
     let dirs: &[usize] = if bishop {
@@ -269,16 +255,4 @@ fn gen_slider_attacks(from_idx: usize, occupancy: u64, bishop: bool) -> u64 {
         attacks |= ray;
     }
     attacks
-}
-
-pub(crate) fn slider_attacks(from_idx: usize, occupancy: u64, bishop: bool) -> u64 {
-    if bishop {
-        let mask = BISHOP_MASKS[from_idx];
-        let index = index_from_occupancy(occupancy, mask);
-        BISHOP_ATTACKS[from_idx][index]
-    } else {
-        let mask = ROOK_MASKS[from_idx];
-        let index = index_from_occupancy(occupancy, mask);
-        ROOK_ATTACKS[from_idx][index]
-    }
 }

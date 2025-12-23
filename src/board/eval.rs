@@ -643,10 +643,14 @@ impl Board {
             score = (score as f32 * 0.5) as i32;
         }
 
+        score
+    }
+
+    pub(crate) fn eval_for_side(&self) -> i32 {
         if self.white_to_move {
-            score
+            self.evaluate()
         } else {
-            -score
+            -self.evaluate()
         }
     }
 }
