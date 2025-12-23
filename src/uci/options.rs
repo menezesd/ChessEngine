@@ -1,4 +1,4 @@
-use crate::board::{SearchParams, SearchState};
+use crate::board::{SearchParams, SearchState, DEFAULT_TT_MB};
 
 pub enum UciOptionAction {
     ReinitHash(usize),
@@ -6,108 +6,65 @@ pub enum UciOptionAction {
 
 pub struct UciOptions {
     pub hash_mb: usize,
+    pub default_max_nodes: u64,
     pub move_overhead_ms: u64,
     pub soft_time_percent: u64,
     pub hard_time_percent: u64,
-    pub default_max_nodes: u64,
+    pub multi_pv: u32,
     pub ponder: bool,
-    pub multipv: u32,
 }
 
 impl UciOptions {
     pub fn new(hash_mb: usize) -> Self {
         UciOptions {
             hash_mb,
-            move_overhead_ms: 50,
-            soft_time_percent: 80,
-            hard_time_percent: 95,
             default_max_nodes: 0,
+            move_overhead_ms: 50,
+            soft_time_percent: 70,
+            hard_time_percent: 90,
+            multi_pv: 1,
             ponder: false,
-            multipv: 1,
         }
     }
 
-    pub fn print(&self, params: &SearchParams) {
-        println!("id name MyRustEngine");
-        println!("id author Dean Menezes");
-        println!("option name Hash type spin default {} min 1 max 32768", self.hash_mb);
-        println!("option name Clear Hash type button");
+    pub fn print(&self, _params: &SearchParams) {
+        println!("id name chess_engine");
+        println!("id author unknown");
         println!(
-            "option name Move Overhead type spin default {} min 0 max 500",
+            "option name Hash type spin default {} min 1 max 65536",
+            self.hash_mb
+        );
+        println!(
+            "option name Move Overhead type spin default {} min 0 max 1000",
             self.move_overhead_ms
         );
         println!(
-            "option name SoftTime type spin default {} min 10 max 100",
+            "option name Soft Time Percent type spin default {} min 1 max 100",
             self.soft_time_percent
         );
         println!(
-            "option name HardTime type spin default {} min 10 max 100",
+            "option name Hard Time Percent type spin default {} min 1 max 100",
             self.hard_time_percent
         );
         println!(
-            "option name Nodes type spin default {} min 0 max 1000000000",
+            "option name Max Nodes type spin default {} min 0 max 18446744073709551615",
             self.default_max_nodes
         );
         println!(
-            "option name MultiPV type spin default {} min 1 max 4",
-            self.multipv
-        );
-        println!("option name Null Reduction type spin default {} min 0 max 6", params.null_reduction);
-        println!(
-            "option name Null Min Depth type spin default {} min 0 max 10",
-            params.null_min_depth
+            "option name SoftTime type spin default {} min 1 max 100",
+            self.soft_time_percent
         );
         println!(
-            "option name Null Verify Depth type spin default {} min 0 max 12",
-            params.null_verification_depth
+            "option name HardTime type spin default {} min 1 max 100",
+            self.hard_time_percent
         );
         println!(
-            "option name LMR Reduction type spin default {} min 0 max 3",
-            params.lmr_reduction
+            "option name Nodes type spin default {} min 0 max 18446744073709551615",
+            self.default_max_nodes
         );
         println!(
-            "option name LMR Min Depth type spin default {} min 1 max 10",
-            params.lmr_min_depth
-        );
-        println!(
-            "option name LMR Min Move type spin default {} min 1 max 20",
-            params.lmr_min_move
-        );
-        println!(
-            "option name LMP Min Depth type spin default {} min 1 max 10",
-            params.lmp_min_depth
-        );
-        println!(
-            "option name LMP Move Limit type spin default {} min 1 max 32",
-            params.lmp_move_limit
-        );
-        println!(
-            "option name Futility Margin type spin default {} min 0 max 1000",
-            params.futility_margin
-        );
-        println!(
-            "option name Razor Margin type spin default {} min 0 max 1000",
-            params.razor_margin
-        );
-        println!(
-            "option name RFP Margin type spin default {} min 0 max 1000",
-            params.rfp_margin
-        );
-        println!(
-            "option name Static Null Margin type spin default {} min 0 max 1000",
-            params.static_null_margin
-        );
-        println!(
-            "option name Delta Margin type spin default {} min 0 max 1000",
-            params.delta_margin
-        );
-        println!(
-            "option name IIR Min Depth type spin default {} min 1 max 12",
-            params.iir_min_depth
-        );
-        println!(
-            "option name Singular Margin type spin default {} min 0 max 200",
-            params.singular_margin
+            "option name MultiPV type spin default {} min 1 max 64",
+            self.multi_pv
         );
         println!(
             "option name Ponder type check default {}",
@@ -120,156 +77,102 @@ impl UciOptions {
         &mut self,
         name: &str,
         value: Option<&str>,
-        search: &mut SearchState,
+        _state: &mut SearchState,
     ) -> Option<UciOptionAction> {
-        match name {
-            "Hash" => {
-                if let Some(v) = value.and_then(|v| v.parse::<usize>().ok()) {
-                    if v > 0 {
-                        self.hash_mb = v;
-                        return Some(UciOptionAction::ReinitHash(v));
-                    }
+        let normalized = name.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "hash" => {
+                let mb = value
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(DEFAULT_TT_MB)
+                    .max(1);
+                if mb != self.hash_mb {
+                    self.hash_mb = mb;
+                    return Some(UciOptionAction::ReinitHash(mb));
                 }
             }
-            "Clear Hash" => return Some(UciOptionAction::ReinitHash(self.hash_mb)),
-            "Move Overhead" => {
+            "move overhead" => {
                 if let Some(v) = value.and_then(|v| v.parse::<u64>().ok()) {
                     self.move_overhead_ms = v;
                 }
             }
-            "SoftTime" => {
+            "soft time percent" => {
                 if let Some(v) = value.and_then(|v| v.parse::<u64>().ok()) {
-                    self.soft_time_percent = v.clamp(10, 100);
+                    self.soft_time_percent = v.clamp(1, 100);
                 }
             }
-            "HardTime" => {
+            "hard time percent" => {
                 if let Some(v) = value.and_then(|v| v.parse::<u64>().ok()) {
-                    self.hard_time_percent = v.clamp(10, 100);
+                    self.hard_time_percent = v.clamp(1, 100);
                 }
             }
-            "Nodes" => {
+            "max nodes" => {
                 if let Some(v) = value.and_then(|v| v.parse::<u64>().ok()) {
                     self.default_max_nodes = v;
                 }
             }
-            "Ponder" => {
-                if let Some(v) = value {
-                    self.ponder = v == "true";
+            "softtime" => {
+                if let Some(v) = value.and_then(|v| v.parse::<u64>().ok()) {
+                    self.soft_time_percent = v.clamp(1, 100);
                 }
             }
-            "MultiPV" => {
+            "hardtime" => {
+                if let Some(v) = value.and_then(|v| v.parse::<u64>().ok()) {
+                    self.hard_time_percent = v.clamp(1, 100);
+                }
+            }
+            "nodes" => {
+                if let Some(v) = value.and_then(|v| v.parse::<u64>().ok()) {
+                    self.default_max_nodes = v;
+                }
+            }
+            "multipv" => {
                 if let Some(v) = value.and_then(|v| v.parse::<u32>().ok()) {
-                    self.multipv = v.max(1);
+                    self.multi_pv = v.clamp(1, 64);
                 }
             }
-            _ => {
+            "ponder" => {
                 if let Some(v) = value {
-                    if update_search_params(name, v, search.params_mut()) {
-                        return None;
-                    }
+                    self.ponder = matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1");
                 }
             }
+            _ => {}
         }
         None
     }
 }
 
 pub fn parse_setoption(parts: &[&str]) -> Option<(String, Option<String>)> {
-    let name_idx = parts.iter().position(|p| *p == "name")?;
-    let value_idx = parts.iter().position(|p| *p == "value");
-    let name = match value_idx {
-        Some(v_idx) if v_idx > name_idx + 1 => parts[name_idx + 1..v_idx].join(" "),
-        None if name_idx + 1 < parts.len() => parts[name_idx + 1..].join(" "),
-        _ => return None,
-    };
-    let value = value_idx.and_then(|v_idx| {
-        if v_idx + 1 < parts.len() {
-            Some(parts[v_idx + 1..].join(" "))
-        } else {
-            None
-        }
-    });
-    Some((name, value))
-}
-
-fn update_search_params(name: &str, value: &str, params: &mut SearchParams) -> bool {
-    match name {
-        "Null Reduction" => {
-            if let Ok(v) = value.parse::<u32>() {
-                params.null_reduction = v.min(6);
-            }
-        }
-        "Null Min Depth" => {
-            if let Ok(v) = value.parse::<u32>() {
-                params.null_min_depth = v.min(10);
-            }
-        }
-        "Null Verify Depth" => {
-            if let Ok(v) = value.parse::<u32>() {
-                params.null_verification_depth = v.min(12);
-            }
-        }
-        "LMR Reduction" => {
-            if let Ok(v) = value.parse::<u32>() {
-                params.lmr_reduction = v.min(3);
-            }
-        }
-        "LMR Min Depth" => {
-            if let Ok(v) = value.parse::<u32>() {
-                params.lmr_min_depth = v.max(1).min(10);
-            }
-        }
-        "LMR Min Move" => {
-            if let Ok(v) = value.parse::<usize>() {
-                params.lmr_min_move = v.max(1).min(20);
-            }
-        }
-        "LMP Min Depth" => {
-            if let Ok(v) = value.parse::<u32>() {
-                params.lmp_min_depth = v.max(1).min(10);
-            }
-        }
-        "LMP Move Limit" => {
-            if let Ok(v) = value.parse::<usize>() {
-                params.lmp_move_limit = v.max(1).min(32);
-            }
-        }
-        "Futility Margin" => {
-            if let Ok(v) = value.parse::<i32>() {
-                params.futility_margin = v.clamp(0, 1000);
-            }
-        }
-        "Razor Margin" => {
-            if let Ok(v) = value.parse::<i32>() {
-                params.razor_margin = v.clamp(0, 1000);
-            }
-        }
-        "RFP Margin" => {
-            if let Ok(v) = value.parse::<i32>() {
-                params.rfp_margin = v.clamp(0, 1000);
-            }
-        }
-        "Static Null Margin" => {
-            if let Ok(v) = value.parse::<i32>() {
-                params.static_null_margin = v.clamp(0, 1000);
-            }
-        }
-        "Delta Margin" => {
-            if let Ok(v) = value.parse::<i32>() {
-                params.delta_margin = v.clamp(0, 1000);
-            }
-        }
-        "IIR Min Depth" => {
-            if let Ok(v) = value.parse::<u32>() {
-                params.iir_min_depth = v.max(1).min(12);
-            }
-        }
-        "Singular Margin" => {
-            if let Ok(v) = value.parse::<i32>() {
-                params.singular_margin = v.clamp(0, 200);
-            }
-        }
-        _ => return false,
+    if parts.is_empty() || parts[0] != "setoption" {
+        return None;
     }
-    true
+
+    let mut name_parts: Vec<&str> = Vec::new();
+    let mut value_parts: Vec<&str> = Vec::new();
+    let mut mode = "";
+
+    for part in parts.iter().skip(1) {
+        match *part {
+            "name" => mode = "name",
+            "value" => mode = "value",
+            _ => match mode {
+                "name" => name_parts.push(part),
+                "value" => value_parts.push(part),
+                _ => {}
+            },
+        }
+    }
+
+    if name_parts.is_empty() {
+        return None;
+    }
+
+    let name = name_parts.join(" ");
+    let value = if value_parts.is_empty() {
+        None
+    } else {
+        Some(value_parts.join(" "))
+    };
+
+    Some((name, value))
 }

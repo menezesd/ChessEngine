@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use crate::tt::{BoundType, TranspositionTable};
 
-use super::{Board, Move, MoveList, UnmakeInfo, Color, Piece};
-use super::{MAX_PLY, format_square};
-pub use params::SearchParams;
+use super::{format_square, MAX_PLY};
+use super::{Board, Color, Move, MoveList, Piece, UnmakeInfo};
 use log::{SearchInfo, SearchLogger, StdoutLogger};
+pub use params::SearchParams;
 
 pub const DEFAULT_TT_MB: usize = 1024;
 
@@ -145,7 +145,8 @@ impl SearchState {
     fn add_history(&mut self, mv: Move, depth: u32) {
         let idx = move_history_index(mv);
         if idx < self.tables.history.len() {
-            self.tables.history[idx] = self.tables.history[idx].saturating_add((depth * depth) as i32);
+            self.tables.history[idx] =
+                self.tables.history[idx].saturating_add((depth * depth) as i32);
         }
     }
 
@@ -334,20 +335,19 @@ impl Board {
 
         let null_info = self.make_null_move();
         let reduced_depth = depth.saturating_sub(1 + params.null_reduction);
-        let score = -self.negamax(
-            state,
-            reduced_depth,
-            ply + 1,
-            stop,
-            -beta,
-            -beta + 1,
-        );
+        let score = -self.negamax(state, reduced_depth, ply + 1, stop, -beta, -beta + 1);
         self.unmake_null_move(null_info);
 
         if score >= beta {
             if depth >= params.null_verification_depth {
-                let verify =
-                    self.negamax(state, depth.saturating_sub(1), ply + 1, stop, beta - 1, beta);
+                let verify = self.negamax(
+                    state,
+                    depth.saturating_sub(1),
+                    ply + 1,
+                    stop,
+                    beta - 1,
+                    beta,
+                );
                 if verify >= beta {
                     return Some(score);
                 }
@@ -450,8 +450,7 @@ impl Board {
 
         let mut best_score = -MATE_SCORE * 2;
         let mut best_move_found: Option<Move> = None;
-        let singular_target =
-            hash_move.map(|hm| (hm, alpha + params.singular_margin));
+        let singular_target = hash_move.map(|hm| (hm, alpha + params.singular_margin));
 
         let eval_at_node = self.eval_for_side();
         let stand_pat = if in_check {
@@ -519,8 +518,7 @@ impl Board {
                     -self.negamax(state, new_depth, ply + 1, stop, -beta, -alpha)
                 }
             } else {
-                let mut score =
-                    -self.negamax(state, new_depth, ply + 1, stop, -alpha - 1, -alpha);
+                let mut score = -self.negamax(state, new_depth, ply + 1, stop, -alpha - 1, -alpha);
                 if score > alpha && score < beta {
                     score = -self.negamax(state, new_depth, ply + 1, stop, -beta, -alpha);
                 }
@@ -597,6 +595,35 @@ impl Board {
             return 0;
         }
 
+        let in_check = self.is_in_check(self.current_color());
+        if in_check {
+            let mut legal_moves = self.generate_moves();
+            if legal_moves.is_empty() {
+                let position = Position::new(self);
+                return position.terminal_score(true, 0);
+            }
+            legal_moves
+                .as_mut_slice()
+                .sort_by_key(|m| -move_order::mvv_lva_score(m, self));
+
+            let mut best_score = -MATE_SCORE * 2;
+            for m in legal_moves.iter() {
+                if state.should_stop(stop) {
+                    break;
+                }
+                let info = self.make_move(m);
+                let score = -self.quiesce(state, ply + 1, stop, -beta, -alpha);
+                self.unmake_move(m, info);
+
+                best_score = best_score.max(score);
+                alpha = alpha.max(best_score);
+                if alpha >= beta {
+                    break;
+                }
+            }
+            return alpha;
+        }
+
         let stand_pat_score = self.eval_for_side();
 
         if stand_pat_score >= beta {
@@ -622,10 +649,7 @@ impl Board {
                 break;
             }
             let bad_capture = move_order::is_bad_capture(self, m);
-            let capture_value = m
-                .captured_piece
-                .map(move_order::piece_value)
-                .unwrap_or(0);
+            let capture_value = m.captured_piece.map(move_order::piece_value).unwrap_or(0);
             let info = self.make_move(m);
             let gives_check = self.is_in_check(self.current_color());
             if !gives_check
@@ -671,7 +695,7 @@ fn format_uci_move_for_info(mv: &Move) -> String {
 fn format_score_for_info(score: i32) -> String {
     if score.abs() >= MATE_SCORE - 100 {
         let mate_plies = (MATE_SCORE - score.abs()).max(0) as u32;
-        let mate_moves = (mate_plies + 1) / 2;
+        let mate_moves = mate_plies.div_ceil(2);
         let signed = if score > 0 {
             mate_moves as i32
         } else {
@@ -730,7 +754,7 @@ fn build_pv(board: &mut Board, state: &SearchState, max_len: usize) -> Vec<Move>
             None => break,
         };
         let legal_moves = board.generate_moves();
-        if !legal_moves.as_slice().iter().any(|m| *m == mv) {
+        if !legal_moves.as_slice().contains(&mv) {
             break;
         }
         let info = board.make_move(&mv);
@@ -779,14 +803,30 @@ pub fn find_best_move(
         let mut alpha = last_score - window;
         let mut beta = last_score + window;
 
-        let (mut current_best_score, mut current_best_move) =
-            root_search(ctx.board, ctx.state, depth, alpha, beta, ctx.stop, &mut root_moves, best_move);
+        let (mut current_best_score, mut current_best_move) = root_search(
+            ctx.board,
+            ctx.state,
+            depth,
+            alpha,
+            beta,
+            ctx.stop,
+            &mut root_moves,
+            best_move,
+        );
 
         if current_best_score <= alpha || current_best_score >= beta {
             alpha = -MATE_SCORE * 2;
             beta = MATE_SCORE * 2;
-            let result =
-                root_search(ctx.board, ctx.state, depth, alpha, beta, ctx.stop, &mut root_moves, best_move);
+            let result = root_search(
+                ctx.board,
+                ctx.state,
+                depth,
+                alpha,
+                beta,
+                ctx.stop,
+                &mut root_moves,
+                best_move,
+            );
             current_best_score = result.0;
             current_best_move = result.1;
         }
@@ -886,17 +926,16 @@ pub fn find_best_move_with_time(
         if best_score <= alpha || best_score >= beta {
             alpha = -MATE_SCORE * 2;
             beta = MATE_SCORE * 2;
-            let result =
-                root_search(
-                    ctx.board,
-                    ctx.state,
-                    depth,
-                    alpha,
-                    beta,
-                    &limits.stop,
-                    &mut legal_moves,
-                    best_move,
-                );
+            let result = root_search(
+                ctx.board,
+                ctx.state,
+                depth,
+                alpha,
+                beta,
+                &limits.stop,
+                &mut legal_moves,
+                best_move,
+            );
             best_score = result.0;
             new_best_move = result.1;
         }
@@ -943,7 +982,11 @@ fn root_search(
         return (0, None);
     }
 
-    let hash_move = state.tables.tt.probe(board.hash()).and_then(|e| e.best_move);
+    let hash_move = state
+        .tables
+        .tt
+        .probe(board.hash())
+        .and_then(|e| e.best_move);
     move_order::order_root_moves(board, state, root_moves, hash_move, pv_move);
     if let Some(entry) = state.tables.tt.probe(board.hash()) {
         if let Some(hm) = &entry.best_move {

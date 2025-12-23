@@ -13,13 +13,7 @@ mod perft_tests {
         TestPosition {
             name: "Initial Position",
             fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            depths: &[
-                (1, 20),
-                (2, 400),
-                (3, 8902),
-                (4, 197281),
-                (5, 4865609),
-            ],
+            depths: &[(1, 20), (2, 400), (3, 8902), (4, 197281), (5, 4865609)],
         },
         TestPosition {
             name: "Kiwipete",
@@ -165,10 +159,7 @@ mod draw_tests {
         assert_eq!(board.castling_rights, original_castling);
         assert_eq!(board.en_passant_target, original_ep);
         assert_eq!(board.halfmove_clock(), original_halfmove);
-        assert_eq!(
-            board.repetition_counts.get(original_hash),
-            original_rep
-        );
+        assert_eq!(board.repetition_counts.get(original_hash), original_rep);
     }
 
     #[test]
@@ -178,6 +169,15 @@ mod draw_tests {
         let stop = AtomicBool::new(false);
         let score = board.negamax(&mut state, 1, 0, &stop, -1000, 1000);
         assert_eq!(score, 0);
+    }
+
+    #[test]
+    fn test_quiesce_in_checkmate_returns_mate_score() {
+        let mut board = Board::from_fen("7k/7Q/7K/8/8/8/8/8 b - - 0 1");
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let score = board.negamax(&mut state, 0, 0, &stop, -200000, 200000);
+        assert!(score < -100000, "expected mate score, got {}", score);
     }
 
     #[test]
@@ -208,9 +208,8 @@ mod engine_tests {
 
     #[test]
     fn test_en_passant_make_unmake() {
-        let mut board = Board::from_fen(
-            "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3",
-        );
+        let mut board =
+            Board::from_fen("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3");
         let original_hash = board.hash();
         let original_ep = board.en_passant_target;
         let mv = find_move(&mut board, Square(4, 4), Square(5, 5), None);
@@ -228,14 +227,16 @@ mod engine_tests {
         let info = board.make_move(&mv);
         board.unmake_move(&mv, info);
         assert_eq!(board.hash(), original_hash);
-        assert_eq!(board.piece_at(Square(6, 0)), Some((Color::White, Piece::Pawn)));
+        assert_eq!(
+            board.piece_at(Square(6, 0)),
+            Some((Color::White, Piece::Pawn))
+        );
     }
 
     #[test]
     fn test_null_move_make_unmake_restores_hash_and_ep() {
-        let mut board = Board::from_fen(
-            "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3",
-        );
+        let mut board =
+            Board::from_fen("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3");
         let original_hash = board.hash();
         let original_ep = board.en_passant_target;
         let original_side = board.white_to_move;
@@ -253,9 +254,7 @@ mod engine_tests {
 
     #[test]
     fn test_null_move_preserves_castling_rights() {
-        let mut board = Board::from_fen(
-            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
-        );
+        let mut board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
         let original_castling = board.castling_rights;
         let info = board.make_null_move();
         assert_eq!(board.castling_rights, original_castling);
@@ -267,10 +266,8 @@ mod engine_tests {
     fn test_legal_moves_stable_after_make_unmake() {
         let mut board = Board::new();
         let initial_moves = board.generate_moves();
-        let mut initial_list: Vec<String> = initial_moves
-            .iter()
-            .map(|m| format_uci_move(m))
-            .collect();
+        let mut initial_list: Vec<String> =
+            initial_moves.iter().map(|m| format_uci_move(m)).collect();
         initial_list.sort();
 
         for mv in initial_moves.iter() {
@@ -345,9 +342,6 @@ mod engine_tests {
         assert_eq!(board.halfmove_clock(), initial_halfmove);
         assert_eq!(board.castling_rights, initial_castling);
         assert_eq!(board.en_passant_target, initial_ep);
-        assert_eq!(
-            board.repetition_counts.get(initial_hash),
-            initial_rep
-        );
+        assert_eq!(board.repetition_counts.get(initial_hash), initial_rep);
     }
 }
