@@ -13,6 +13,8 @@ use super::{MAX_PLY, format_square};
 pub use params::SearchParams;
 use log::{SearchInfo, SearchLogger, StdoutLogger};
 
+pub const DEFAULT_TT_MB: usize = 1024;
+
 pub struct SearchStats {
     pub nodes: u64,
     pub seldepth: u32,
@@ -178,6 +180,12 @@ impl SearchState {
     }
 }
 
+impl Default for SearchState {
+    fn default() -> Self {
+        SearchState::new(DEFAULT_TT_MB)
+    }
+}
+
 fn move_history_index(m: Move) -> usize {
     let from = super::square_index(m.from).0 as usize;
     let to = super::square_index(m.to).0 as usize;
@@ -185,10 +193,52 @@ fn move_history_index(m: Move) -> usize {
 }
 
 pub struct SearchLimits {
-    pub start_time: std::sync::Arc<Mutex<Instant>>,
-    pub soft_deadline: std::sync::Arc<Mutex<Option<Instant>>>,
-    pub hard_deadline: std::sync::Arc<Mutex<Option<Instant>>>,
+    pub clock: std::sync::Arc<SearchClock>,
     pub stop: std::sync::Arc<AtomicBool>,
+}
+
+pub struct SearchClock {
+    start_time: Mutex<Instant>,
+    soft_deadline: Mutex<Option<Instant>>,
+    hard_deadline: Mutex<Option<Instant>>,
+}
+
+impl SearchClock {
+    pub fn new(
+        start_time: Instant,
+        soft_deadline: Option<Instant>,
+        hard_deadline: Option<Instant>,
+    ) -> Self {
+        SearchClock {
+            start_time: Mutex::new(start_time),
+            soft_deadline: Mutex::new(soft_deadline),
+            hard_deadline: Mutex::new(hard_deadline),
+        }
+    }
+
+    pub fn reset(
+        &self,
+        start_time: Instant,
+        soft_deadline: Option<Instant>,
+        hard_deadline: Option<Instant>,
+    ) {
+        if let Ok(mut start) = self.start_time.lock() {
+            *start = start_time;
+        }
+        if let Ok(mut soft) = self.soft_deadline.lock() {
+            *soft = soft_deadline;
+        }
+        if let Ok(mut hard) = self.hard_deadline.lock() {
+            *hard = hard_deadline;
+        }
+    }
+
+    pub fn snapshot(&self) -> (Instant, Option<Instant>, Option<Instant>) {
+        let start_time = *self.start_time.lock().unwrap();
+        let soft_deadline = *self.soft_deadline.lock().unwrap();
+        let hard_deadline = *self.hard_deadline.lock().unwrap();
+        (start_time, soft_deadline, hard_deadline)
+    }
 }
 
 pub struct SearchContext<'a> {
@@ -764,9 +814,7 @@ pub fn find_best_move_with_time(
     const TIME_GROWTH_FACTOR: f32 = 2.0;
 
     while !limits.stop.load(Ordering::Relaxed) {
-        let start_time = *limits.start_time.lock().unwrap();
-        let soft_deadline = *limits.soft_deadline.lock().unwrap();
-        let hard_deadline = *limits.hard_deadline.lock().unwrap();
+        let (start_time, soft_deadline, hard_deadline) = limits.clock.snapshot();
         let now = Instant::now();
         let infinite = hard_deadline.is_none();
         let mut ctx = SearchContext {

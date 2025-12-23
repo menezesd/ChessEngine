@@ -2,6 +2,8 @@ use crate::board::{file_to_index, format_square, rank_to_index, Board, Move, Pie
 
 pub mod options;
 pub mod print;
+pub mod command;
+pub mod time;
 
 // Parses a move in UCI format (e.g., "e2e4", "e7e8q")
 // Needs the current board state to find the matching legal move object.

@@ -254,9 +254,8 @@ impl Board {
         self.hash = current_hash;
 
         let made_hash = current_hash;
-        let previous_repetition_count = self.repetition_counts.get(&made_hash).copied().unwrap_or(0);
-        self.repetition_counts
-            .insert(made_hash, previous_repetition_count + 1);
+        let previous_repetition_count = self.repetition_counts.get(made_hash);
+        self.repetition_counts.increment(made_hash);
 
         UnmakeInfo {
             captured_piece_info,
@@ -289,12 +288,8 @@ impl Board {
     }
 
     pub(crate) fn unmake_move(&mut self, m: &Move, info: UnmakeInfo) {
-        if info.previous_repetition_count == 0 {
-            self.repetition_counts.remove(&info.made_hash);
-        } else {
-            self.repetition_counts
-                .insert(info.made_hash, info.previous_repetition_count);
-        }
+        self.repetition_counts
+            .set(info.made_hash, info.previous_repetition_count);
 
         self.white_to_move = !self.white_to_move;
         self.en_passant_target = info.previous_en_passant_target;

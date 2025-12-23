@@ -6,13 +6,15 @@ mod movegen;
 mod search;
 mod state;
 mod types;
+#[cfg(debug_assertions)]
+mod debug;
 
 #[cfg(test)]
 mod tests;
 
 pub use search::{
-    find_best_move, find_best_move_with_time, Position, SearchContext, SearchLimits, SearchParams,
-    SearchState, SearchStats, SearchTables, TerminalState,
+    find_best_move, find_best_move_with_time, Position, SearchClock, SearchContext, SearchLimits,
+    SearchParams, SearchState, SearchStats, SearchTables, TerminalState, DEFAULT_TT_MB,
 };
 pub use state::{Board, NullMoveInfo, UnmakeInfo};
 pub use types::{Bitboard, Color, Move, MoveList, Piece, Square, SquareIdx};

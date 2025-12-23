@@ -58,12 +58,26 @@ class UCIEngine:
                 return True
         raise RuntimeError(f"{self.name}: timeout waiting for {token}")
 
-    def bestmove(self, moves, movetime_ms=100):
+    def bestmove(self, moves, movetime_ms=None, time_control=None):
         position = "position startpos"
         if moves:
             position += " moves " + " ".join(moves)
         self._send(position)
-        self._send(f"go movetime {movetime_ms}")
+        if time_control:
+            parts = [
+                "go",
+                f"wtime {time_control['wtime_ms']}",
+                f"btime {time_control['btime_ms']}",
+                f"winc {time_control['winc_ms']}",
+                f"binc {time_control['binc_ms']}",
+            ]
+            if time_control.get("movestogo") is not None:
+                parts.append(f"movestogo {time_control['movestogo']}")
+            self._send(" ".join(parts))
+        elif movetime_ms is not None:
+            self._send(f"go movetime {movetime_ms}")
+        else:
+            self._send("go")
         return self._read_bestmove(timeout=10.0)
 
     def _read_bestmove(self, timeout):
@@ -101,12 +115,32 @@ def main():
     engine = os.environ.get("ENGINE", "./target/debug/chess_engine")
     plies = int(os.environ.get("PLIES", "6"))
     movetime_ms = int(os.environ.get("MOVETIME_MS", "100"))
+    wtime_ms = os.environ.get("WTIME_MS")
+    btime_ms = os.environ.get("BTIME_MS")
+    winc_ms = int(os.environ.get("WINC_MS", "0"))
+    binc_ms = int(os.environ.get("BINC_MS", "0"))
+    movestogo = os.environ.get("MOVESTOGO")
     engine_opts = os.environ.get("ENGINE_OPTS", "")
     stockfish_opts = os.environ.get("STOCKFISH_OPTS", "")
 
     print(f"engine: {engine}")
     print(f"stockfish: {stockfish}")
-    print(f"plies: {plies}, movetime_ms: {movetime_ms}")
+    if wtime_ms is not None or btime_ms is not None:
+        wtime_ms = int(wtime_ms or btime_ms or movetime_ms * 40)
+        btime_ms = int(btime_ms or wtime_ms)
+        movestogo_val = int(movestogo) if movestogo is not None else None
+        print(
+            "plies: {}, wtime_ms: {}, btime_ms: {}, winc_ms: {}, binc_ms: {}, movestogo: {}".format(
+                plies,
+                wtime_ms,
+                btime_ms,
+                winc_ms,
+                binc_ms,
+                movestogo_val,
+            )
+        )
+    else:
+        print(f"plies: {plies}, movetime_ms: {movetime_ms}")
 
     chess = UCIEngine(engine, "engine")
     sf = UCIEngine(stockfish, "stockfish")
@@ -130,10 +164,27 @@ def main():
         sf._drain_until("readyok", timeout=5.0)
 
     moves = []
+    use_time_control = wtime_ms is not None and btime_ms is not None
     try:
         for ply in range(plies):
             side = chess if ply % 2 == 0 else sf
-            move = side.bestmove(moves, movetime_ms=movetime_ms)
+            if use_time_control:
+                tc = {
+                    "wtime_ms": wtime_ms,
+                    "btime_ms": btime_ms,
+                    "winc_ms": winc_ms,
+                    "binc_ms": binc_ms,
+                    "movestogo": movestogo_val,
+                }
+                start = time.time()
+                move = side.bestmove(moves, time_control=tc)
+                elapsed_ms = int((time.time() - start) * 1000)
+                if ply % 2 == 0:
+                    wtime_ms = max(0, wtime_ms - elapsed_ms + winc_ms)
+                else:
+                    btime_ms = max(0, btime_ms - elapsed_ms + binc_ms)
+            else:
+                move = side.bestmove(moves, movetime_ms=movetime_ms)
             print(f"ply {ply + 1}: {side.name} -> {move}")
             if move in ("0000", "(none)"):
                 print("engine returned null move; stopping")

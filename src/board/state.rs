@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{color_index, format_square, piece_index, Bitboard, Color, Piece, Square, CASTLE_BLACK_K,
+use super::{color_index, piece_index, Bitboard, Color, Piece, Square, CASTLE_BLACK_K,
     CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q};
 
 #[derive(Clone, Debug)]
@@ -20,6 +20,38 @@ pub struct NullMoveInfo {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct RepetitionTable {
+    counts: HashMap<u64, u32>,
+}
+
+impl RepetitionTable {
+    pub(crate) fn new() -> Self {
+        RepetitionTable {
+            counts: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn get(&self, hash: u64) -> u32 {
+        self.counts.get(&hash).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn set(&mut self, hash: u64, count: u32) {
+        if count == 0 {
+            self.counts.remove(&hash);
+        } else {
+            self.counts.insert(hash, count);
+        }
+    }
+
+    pub(crate) fn increment(&mut self, hash: u64) -> u32 {
+        let next = self.get(hash).saturating_add(1);
+        self.set(hash, next);
+        next
+    }
+
+}
+
+#[derive(Clone, Debug)]
 pub struct Board {
     pub(crate) pieces: [[Bitboard; 6]; 2],
     pub(crate) occupied: [Bitboard; 2],
@@ -29,90 +61,10 @@ pub struct Board {
     pub(crate) castling_rights: u8, // bitmask
     pub(crate) hash: u64,           // Zobrist hash
     pub(crate) halfmove_clock: u32,
-    pub(crate) repetition_counts: HashMap<u64, u32>,
+    pub(crate) repetition_counts: RepetitionTable,
 }
 
 impl Board {
-    pub fn print(&self) {
-        println!("  +---+---+---+---+---+---+---+---+");
-        for rank in (0..8).rev() {
-            print!("{} |", rank + 1);
-            for file in 0..8 {
-                let piece_char = match self.piece_at(Square(rank, file)) {
-                    Some((Color::White, Piece::Pawn)) => 'P',
-                    Some((Color::White, Piece::Knight)) => 'N',
-                    Some((Color::White, Piece::Bishop)) => 'B',
-                    Some((Color::White, Piece::Rook)) => 'R',
-                    Some((Color::White, Piece::Queen)) => 'Q',
-                    Some((Color::White, Piece::King)) => 'K',
-                    Some((Color::Black, Piece::Pawn)) => 'p',
-                    Some((Color::Black, Piece::Knight)) => 'n',
-                    Some((Color::Black, Piece::Bishop)) => 'b',
-                    Some((Color::Black, Piece::Rook)) => 'r',
-                    Some((Color::Black, Piece::Queen)) => 'q',
-                    Some((Color::Black, Piece::King)) => 'k',
-                    None => ' ',
-                };
-                print!(" {} |", piece_char);
-            }
-            println!("\n  +---+---+---+---+---+---+---+---+");
-        }
-        println!("    a   b   c   d   e   f   g   h");
-        println!("Turn: {}", if self.white_to_move { "White" } else { "Black" });
-        if let Some(ep_target) = self.en_passant_target {
-            println!("EP Target: {}", format_square(ep_target));
-        }
-        println!("Castling mask: {:#06b}", self.castling_rights);
-        println!("------------------------------------");
-    }
-
-    pub fn debug_bitboards(&self) {
-        let colors = [Color::White, Color::Black];
-        let pieces = [
-            (Piece::Pawn, "P"),
-            (Piece::Knight, "N"),
-            (Piece::Bishop, "B"),
-            (Piece::Rook, "R"),
-            (Piece::Queen, "Q"),
-            (Piece::King, "K"),
-        ];
-
-        println!(
-            "Side to move: {}",
-            if self.white_to_move { "White" } else { "Black" }
-        );
-        println!("Castling mask: {:#06b}", self.castling_rights);
-        if let Some(ep_target) = self.en_passant_target {
-            println!("EP Target: {}", format_square(ep_target));
-        }
-        println!("All occupied: {:#018x}", self.all_occupied.0);
-
-        for color in colors {
-            let label = if color == Color::White { "White" } else { "Black" };
-            for (piece, name) in pieces {
-                let bb = self.pieces[color_index(color)][piece_index(piece)].0;
-                println!("{} {}: {:#018x}", label, name, bb);
-            }
-        }
-        println!("------------------------------------");
-    }
-
-    pub fn print_bitboard_grid(&self, label: &str, bb: Bitboard) {
-        println!("{} {:#018x}", label, bb.0);
-        println!("  +---+---+---+---+---+---+---+---+");
-        for rank in (0..8).rev() {
-            print!("{} |", rank + 1);
-            for file in 0..8 {
-                let idx = (rank * 8 + file) as u8;
-                let ch = if (bb.0 >> idx) & 1 == 1 { '1' } else { '.' };
-                print!(" {} |", ch);
-            }
-            println!("\n  +---+---+---+---+---+---+---+---+");
-        }
-        println!("    a   b   c   d   e   f   g   h");
-        println!("------------------------------------");
-    }
-
     pub fn new() -> Self {
         let mut board = Board::empty();
         let back_rank = [
@@ -136,7 +88,7 @@ impl Board {
             CASTLE_WHITE_K | CASTLE_WHITE_Q | CASTLE_BLACK_K | CASTLE_BLACK_Q;
         board.white_to_move = true;
         board.hash = board.calculate_initial_hash();
-        board.repetition_counts.insert(board.hash, 1);
+        board.repetition_counts.set(board.hash, 1);
         board
     }
 
@@ -150,7 +102,7 @@ impl Board {
             castling_rights: 0,
             hash: 0,
             halfmove_clock: 0,
-            repetition_counts: HashMap::new(),
+            repetition_counts: RepetitionTable::new(),
         }
     }
 
@@ -170,7 +122,7 @@ impl Board {
         if self.halfmove_clock >= 100 {
             return true;
         }
-        self.repetition_counts.get(&self.hash).copied().unwrap_or(0) >= 3
+        self.repetition_counts.get(self.hash) >= 3
     }
 
     pub fn is_theoretical_draw(&self) -> bool {
@@ -216,6 +168,12 @@ impl Board {
         }
 
         false
+    }
+}
+
+impl Default for Board {
+    fn default() -> Self {
+        Board::new()
     }
 }
 

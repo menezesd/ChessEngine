@@ -155,11 +155,7 @@ mod draw_tests {
         let original_castling = board.castling_rights;
         let original_ep = board.en_passant_target;
         let original_halfmove = board.halfmove_clock();
-        let original_rep = board
-            .repetition_counts
-            .get(&original_hash)
-            .copied()
-            .unwrap_or(0);
+        let original_rep = board.repetition_counts.get(original_hash);
 
         let mv = find_move(&mut board, Square(1, 4), Square(3, 4), None);
         let info = board.make_move(&mv);
@@ -170,7 +166,7 @@ mod draw_tests {
         assert_eq!(board.en_passant_target, original_ep);
         assert_eq!(board.halfmove_clock(), original_halfmove);
         assert_eq!(
-            board.repetition_counts.get(&original_hash).copied().unwrap_or(0),
+            board.repetition_counts.get(original_hash),
             original_rep
         );
     }
@@ -323,11 +319,7 @@ mod engine_tests {
         let initial_halfmove = board.halfmove_clock();
         let initial_castling = board.castling_rights;
         let initial_ep = board.en_passant_target;
-        let initial_rep = board
-            .repetition_counts
-            .get(&initial_hash)
-            .copied()
-            .unwrap_or(0);
+        let initial_rep = board.repetition_counts.get(initial_hash);
 
         let mut rng = StdRng::seed_from_u64(0x5EED);
         let mut history: Vec<(Move, UnmakeInfo)> = Vec::new();
@@ -354,7 +346,7 @@ mod engine_tests {
         assert_eq!(board.castling_rights, initial_castling);
         assert_eq!(board.en_passant_target, initial_ep);
         assert_eq!(
-            board.repetition_counts.get(&initial_hash).copied().unwrap_or(0),
+            board.repetition_counts.get(initial_hash),
             initial_rep
         );
     }
