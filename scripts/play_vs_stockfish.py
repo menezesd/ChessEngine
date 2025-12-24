@@ -219,7 +219,8 @@ def main():
                     )
                 )
             if move in ("0000", "(none)"):
-                print("engine returned null move; stopping")
+                tag = "null move" if move == "0000" else "game over"
+                print(f"engine returned {tag}; stopping")
                 break
             moves.append(move)
     finally:

@@ -1,13 +1,14 @@
 mod attack_tables;
+#[cfg(debug_assertions)]
+mod debug;
 mod eval;
+mod eval_baseline;
 mod fen;
 mod make_unmake;
 mod movegen;
 mod search;
 mod state;
 mod types;
-#[cfg(debug_assertions)]
-mod debug;
 
 #[cfg(test)]
 mod tests;
@@ -17,8 +18,8 @@ pub use search::{
     SearchParams, SearchState, SearchStats, SearchTables, TerminalState, DEFAULT_TT_MB,
 };
 pub use state::{Board, NullMoveInfo, UnmakeInfo};
-pub use types::{Bitboard, Color, Move, MoveList, Piece, Square, SquareIdx};
 pub use types::format_square;
+pub use types::{Bitboard, Color, Move, MoveList, Piece, Square, SquareIdx};
 
 pub(crate) use types::{
     bit_for_square, castle_bit, color_index, file_to_index, piece_index, pop_lsb, rank_to_index,

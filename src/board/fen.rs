@@ -62,9 +62,9 @@ impl Board {
         }
 
         board.hash = board.calculate_initial_hash();
-    board.repetition_counts.set(board.hash, 1);
-    board
-}
+        board.repetition_counts.set(board.hash, 1);
+        board
+    }
 
     pub fn to_fen(&self) -> String {
         let mut rows: Vec<String> = Vec::new();

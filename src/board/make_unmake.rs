@@ -3,8 +3,8 @@ use crate::zobrist::{
 };
 
 use super::{
-    bit_for_square, castle_bit, color_index, piece_index, Board, Color, Move, Piece, Square,
-    NullMoveInfo, UnmakeInfo,
+    bit_for_square, castle_bit, color_index, piece_index, Board, Color, Move, NullMoveInfo, Piece,
+    Square, UnmakeInfo,
 };
 
 impl Board {
@@ -304,7 +304,8 @@ impl Board {
         } else if m.is_castling {
             (color, Piece::King)
         } else {
-            self.piece_at(m.to).expect("Unmake move: 'to' square empty?")
+            self.piece_at(m.to)
+                .expect("Unmake move: 'to' square empty?")
         };
 
         if m.is_castling {
@@ -313,11 +314,15 @@ impl Board {
 
             let (rook_orig_f, rook_moved_f) = if m.to.1 == 6 { (7, 5) } else { (0, 3) };
             let rook_sq = Square(m.to.0, rook_moved_f);
-            let rook_info = self.piece_at(rook_sq).expect("Unmake castling: rook missing");
+            let rook_info = self
+                .piece_at(rook_sq)
+                .expect("Unmake castling: rook missing");
             self.remove_piece(rook_sq, rook_info.0, rook_info.1);
             self.set_piece(Square(m.to.0, rook_orig_f), rook_info.0, rook_info.1);
         } else {
-            let moved_piece_at_to = self.piece_at(m.to).expect("Unmake move: 'to' square empty?");
+            let moved_piece_at_to = self
+                .piece_at(m.to)
+                .expect("Unmake move: 'to' square empty?");
             self.remove_piece(m.to, moved_piece_at_to.0, moved_piece_at_to.1);
             let piece_on_from = if m.promotion.is_some() {
                 (color, Piece::Pawn)

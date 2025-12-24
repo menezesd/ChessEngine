@@ -113,7 +113,10 @@ fn mate_search_suite() {
                 }
             } else {
                 failures += 1;
-                eprintln!("Mismatch: type={} fen={} no move", problem.kind, problem.fen);
+                eprintln!(
+                    "Mismatch: type={} fen={} no move",
+                    problem.kind, problem.fen
+                );
             }
         } else {
             let expected = first_uci_from_line(&problem.moves);

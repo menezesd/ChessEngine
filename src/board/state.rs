@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use super::{color_index, piece_index, Bitboard, Color, Piece, Square, CASTLE_BLACK_K,
-    CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q};
+use super::{
+    color_index, piece_index, Bitboard, Color, Piece, Square, CASTLE_BLACK_K, CASTLE_BLACK_Q,
+    CASTLE_WHITE_K, CASTLE_WHITE_Q,
+};
 
 #[derive(Clone, Debug)]
 pub struct UnmakeInfo {
@@ -48,7 +50,6 @@ impl RepetitionTable {
         self.set(hash, next);
         next
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -84,8 +85,7 @@ impl Board {
             board.set_piece(Square(6, i), Color::Black, Piece::Pawn);
         }
 
-        board.castling_rights =
-            CASTLE_WHITE_K | CASTLE_WHITE_Q | CASTLE_BLACK_K | CASTLE_BLACK_Q;
+        board.castling_rights = CASTLE_WHITE_K | CASTLE_WHITE_Q | CASTLE_BLACK_K | CASTLE_BLACK_Q;
         board.white_to_move = true;
         board.hash = board.calculate_initial_hash();
         board.repetition_counts.set(board.hash, 1);
@@ -144,14 +144,18 @@ impl Board {
             return false;
         }
 
-        let white_knights =
-            self.pieces[white][piece_index(Piece::Knight)].0.count_ones();
-        let black_knights =
-            self.pieces[black][piece_index(Piece::Knight)].0.count_ones();
-        let white_bishops =
-            self.pieces[white][piece_index(Piece::Bishop)].0.count_ones();
-        let black_bishops =
-            self.pieces[black][piece_index(Piece::Bishop)].0.count_ones();
+        let white_knights = self.pieces[white][piece_index(Piece::Knight)]
+            .0
+            .count_ones();
+        let black_knights = self.pieces[black][piece_index(Piece::Knight)]
+            .0
+            .count_ones();
+        let white_bishops = self.pieces[white][piece_index(Piece::Bishop)]
+            .0
+            .count_ones();
+        let black_bishops = self.pieces[black][piece_index(Piece::Bishop)]
+            .0
+            .count_ones();
 
         let total_minors = white_knights + black_knights + white_bishops + black_bishops;
 
@@ -163,8 +167,10 @@ impl Board {
         let total_bishops = white_bishops + black_bishops;
 
         if total_knights == 0 && total_bishops == 2 {
-            return bishops_all_same_color(self.pieces[white][piece_index(Piece::Bishop)].0
-                | self.pieces[black][piece_index(Piece::Bishop)].0);
+            return bishops_all_same_color(
+                self.pieces[white][piece_index(Piece::Bishop)].0
+                    | self.pieces[black][piece_index(Piece::Bishop)].0,
+            );
         }
 
         false

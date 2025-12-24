@@ -13,12 +13,7 @@ impl Board {
         let mut white = 0;
         let mut black = 0;
 
-        let pieces = [
-            Piece::Knight,
-            Piece::Bishop,
-            Piece::Rook,
-            Piece::Queen,
-        ];
+        let pieces = [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen];
 
         for &color in &[Color::White, Color::Black] {
             let c_idx = color_index(color);
@@ -71,10 +66,8 @@ impl Board {
         let mut bishops = self.pieces[c_idx][piece_index(Piece::Bishop)];
         while bishops.0 != 0 {
             let from = square_from_index(pop_lsb(&mut bishops));
-            let bishop_moves = self.generate_sliding_moves(
-                from,
-                &[(1, 1), (1, -1), (-1, 1), (-1, -1)],
-            );
+            let bishop_moves =
+                self.generate_sliding_moves(from, &[(1, 1), (1, -1), (-1, 1), (-1, -1)]);
             for m in bishop_moves.iter() {
                 moves.push(*m);
             }
@@ -83,8 +76,7 @@ impl Board {
         let mut rooks = self.pieces[c_idx][piece_index(Piece::Rook)];
         while rooks.0 != 0 {
             let from = square_from_index(pop_lsb(&mut rooks));
-            let rook_moves =
-                self.generate_sliding_moves(from, &[(1, 0), (-1, 0), (0, 1), (0, -1)]);
+            let rook_moves = self.generate_sliding_moves(from, &[(1, 0), (-1, 0), (0, 1), (0, -1)]);
             for m in rook_moves.iter() {
                 moves.push(*m);
             }

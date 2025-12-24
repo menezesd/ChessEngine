@@ -11,6 +11,6 @@ pub fn print_bestmove(best_move: Option<Move>) {
         let uci_move = format_uci_move(&best_move);
         println!("bestmove {}", uci_move);
     } else {
-        println!("bestmove 0000");
+        println!("bestmove (none)");
     }
 }

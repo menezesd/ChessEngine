@@ -17,7 +17,11 @@ pub fn compute_time_limits(
 
     if let Some(mt) = movetime {
         let mt_ms = mt.as_millis() as u64;
-        let capped = if safe_ms > 0 { mt_ms.min(safe_ms) } else { mt_ms };
+        let capped = if safe_ms > 0 {
+            mt_ms.min(safe_ms)
+        } else {
+            mt_ms
+        };
         let capped = capped.max(1);
         return (capped, capped);
     }

@@ -116,6 +116,10 @@ impl SearchState {
         self.logger = logger;
     }
 
+    fn best_move_from_tt(&self, hash: u64) -> Option<Move> {
+        self.tables.tt.probe(hash).and_then(|entry| entry.best_move)
+    }
+
     pub fn reset_tables(&mut self, tt_mb: usize) {
         self.tables.tt = TranspositionTable::new(tt_mb);
         self.stats.reset_search();
@@ -318,6 +322,22 @@ const KING_VALUE: i32 = 20000;
 const MATE_SCORE: i32 = KING_VALUE * 10;
 
 impl Board {
+    fn draw_aware(&self, eval: i32) -> bool {
+        eval <= -150
+    }
+
+    fn null_move_safe_endgame(&self) -> bool {
+        let phase_table = [0i32, 1, 1, 2, 4, 0];
+        let mut phase_units = 0i32;
+        for color in 0..2 {
+            for piece_idx in 0..6 {
+                let count = self.pieces[color][piece_idx].0.count_ones() as i32;
+                phase_units += count * phase_table[piece_idx];
+            }
+        }
+        phase_units > 6
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn try_null_move(
         &mut self,
@@ -330,6 +350,9 @@ impl Board {
         in_check: bool,
     ) -> Option<i32> {
         if in_check || depth < params.null_min_depth || self.is_theoretical_draw() {
+            return None;
+        }
+        if !self.null_move_safe_endgame() {
             return None;
         }
 
@@ -422,12 +445,19 @@ impl Board {
             depth = depth.saturating_add(1);
         }
 
-        if let Some(score) = self.try_null_move(state, &params, depth, ply, stop, beta, in_check) {
-            return score;
+        let eval_at_node = if in_check { 0 } else { self.eval_for_side() };
+        let draw_aware = !in_check && self.draw_aware(eval_at_node);
+
+        if !draw_aware {
+            if let Some(score) =
+                self.try_null_move(state, &params, depth, ply, stop, beta, in_check)
+            {
+                return score;
+            }
         }
 
-        if !in_check && depth <= 2 {
-            let stand_pat = self.eval_for_side();
+        if !in_check && !draw_aware && depth <= 2 {
+            let stand_pat = eval_at_node;
             if stand_pat + params.razor_margin < alpha {
                 return self.quiesce(state, ply, stop, alpha, beta);
             }
@@ -452,18 +482,24 @@ impl Board {
         let mut best_move_found: Option<Move> = None;
         let singular_target = hash_move.map(|hm| (hm, alpha + params.singular_margin));
 
-        let eval_at_node = self.eval_for_side();
         let stand_pat = if in_check {
             alpha
         } else {
             tt_eval.unwrap_or(eval_at_node)
         };
 
-        if !in_check && depth <= 4 && stand_pat - params.rfp_margin * depth as i32 >= beta {
+        if !in_check
+            && !draw_aware
+            && depth <= 4
+            && stand_pat - params.rfp_margin * depth as i32 >= beta
+        {
             return stand_pat;
         }
 
-        if !in_check && depth <= 3 && stand_pat + params.static_null_margin * depth as i32 <= alpha
+        if !in_check
+            && !draw_aware
+            && depth <= 3
+            && stand_pat + params.static_null_margin * depth as i32 <= alpha
         {
             return stand_pat;
         }
@@ -472,7 +508,8 @@ impl Board {
             if state.should_stop(stop) {
                 break;
             }
-            if depth >= params.lmp_min_depth
+            if !draw_aware
+                && depth >= params.lmp_min_depth
                 && i >= params.lmp_move_limit
                 && m.captured_piece.is_none()
                 && m.promotion.is_none()
@@ -481,6 +518,7 @@ impl Board {
                 break;
             }
             if !in_check
+                && !draw_aware
                 && depth <= 2
                 && m.captured_piece.is_none()
                 && m.promotion.is_none()
@@ -632,12 +670,6 @@ impl Board {
         alpha = alpha.max(stand_pat_score);
 
         let mut tactical_moves = self.generate_tactical_moves();
-        let checking_moves = self.generate_checking_moves();
-        for m in checking_moves.iter() {
-            if m.captured_piece.is_none() && !m.is_en_passant {
-                tactical_moves.push(*m);
-            }
-        }
         tactical_moves
             .as_mut_slice()
             .sort_by_key(|m| -move_order::mvv_lva_score(m, self));
@@ -650,10 +682,23 @@ impl Board {
             }
             let bad_capture = move_order::is_bad_capture(self, m);
             let capture_value = m.captured_piece.map(move_order::piece_value).unwrap_or(0);
+            let mut extra_margin = 0;
+            if let Some(piece) = m.captured_piece {
+                extra_margin += match piece {
+                    Piece::Pawn => 0,
+                    Piece::Knight | Piece::Bishop => 50,
+                    Piece::Rook => 75,
+                    Piece::Queen => 100,
+                    _ => 0,
+                };
+            }
+            if m.promotion.is_some() {
+                extra_margin += 300;
+            }
             let info = self.make_move(m);
             let gives_check = self.is_in_check(self.current_color());
             if !gives_check
-                && stand_pat_score + capture_value + params.delta_margin < alpha
+                && stand_pat_score + capture_value + params.delta_margin + extra_margin < alpha
                 && !m.is_en_passant
             {
                 self.unmake_move(m, info);
@@ -723,6 +768,20 @@ fn emit_info(ctx: &mut SearchContext, depth: u32, score: i32, best_move: Move) {
         hashfull: ctx.state.hashfull_per_mille(),
         time_ms: ctx.start_time.elapsed().as_millis().max(1),
         pv,
+    };
+    ctx.state.logger.info(&info);
+}
+
+fn emit_root_move(ctx: &mut SearchContext, depth: u32, score: i32, mv: Move) {
+    let info = SearchInfo {
+        depth,
+        seldepth: ctx.state.stats.seldepth,
+        score: format_score_for_info(score),
+        nodes: ctx.state.stats.nodes,
+        nps: ctx.nps(),
+        hashfull: ctx.state.hashfull_per_mille(),
+        time_ms: ctx.start_time.elapsed().as_millis().max(1),
+        pv: format_uci_move_for_info(&mv),
     };
     ctx.state.logger.info(&info);
 }
@@ -1003,13 +1062,26 @@ fn root_search(
         root_moves.first()
     };
 
+    let mut ctx = SearchContext {
+        board,
+        state,
+        stop,
+        start_time: Instant::now(),
+    };
+
     for m in root_moves.iter() {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let info = board.make_move(m);
-        let score = -board.negamax(state, depth - 1, 1, stop, -beta, -alpha);
-        board.unmake_move(m, info);
+        let info = ctx.board.make_move(m);
+        let score = -ctx
+            .board
+            .negamax(ctx.state, depth - 1, 1, ctx.stop, -beta, -alpha);
+        ctx.board.unmake_move(m, info);
+
+        if ctx.state.trace() {
+            emit_root_move(&mut ctx, depth, score, *m);
+        }
 
         if score > best_score {
             best_score = score;

@@ -13,10 +13,10 @@ use chess_engine::board::{
 };
 use chess_engine::uci::command::{parse_go_params, parse_uci_command, GoParams, UciCommand};
 use chess_engine::uci::options::{parse_setoption, UciOptionAction, UciOptions};
+use chess_engine::uci::parse_position_command;
 use chess_engine::uci::print::{print_perft_info, print_time_info};
 use chess_engine::uci::report::{print_bestmove, print_ready};
 use chess_engine::uci::time::compute_time_limits;
-use chess_engine::uci::parse_position_command;
 
 struct SearchJob {
     stop: Arc<AtomicBool>,
@@ -115,6 +115,10 @@ fn handle_command(
             let go_ponder = params.ponder;
             let go_infinite = params.infinite;
 
+            if nodes.is_some() && depth.is_none() {
+                depth = Some(64);
+            }
+
             stop_search(current_job);
             {
                 let mut guard = search.lock().unwrap();
@@ -168,7 +172,7 @@ fn handle_command(
             let clock = Arc::new(SearchClock::new(start, soft_deadline, hard_deadline));
             let pondering = Arc::new(AtomicBool::new(go_ponder));
 
-            if !go_infinite && !go_ponder {
+            if !go_infinite && !go_ponder && depth.is_none() {
                 let stop_timer = Arc::clone(&stop);
                 let clock_timer = Arc::clone(&clock);
                 thread::spawn(move || {
@@ -206,6 +210,14 @@ fn handle_command(
 
                     if pondering_clone.load(Ordering::Relaxed) {
                         return;
+                    }
+
+                    if best_move.is_none() {
+                        if search_board.is_checkmate() {
+                            println!("info score mate -1");
+                        } else if search_board.is_stalemate() || search_board.is_draw() {
+                            println!("info score cp 0");
+                        }
                     }
 
                     print_bestmove(best_move);

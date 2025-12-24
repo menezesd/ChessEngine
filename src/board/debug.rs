@@ -27,7 +27,10 @@ impl Board {
             println!("\n  +---+---+---+---+---+---+---+---+");
         }
         println!("    a   b   c   d   e   f   g   h");
-        println!("Turn: {}", if self.white_to_move { "White" } else { "Black" });
+        println!(
+            "Turn: {}",
+            if self.white_to_move { "White" } else { "Black" }
+        );
         if let Some(ep_target) = self.en_passant_target {
             println!("EP Target: {}", format_square(ep_target));
         }
@@ -57,7 +60,11 @@ impl Board {
         println!("All occupied: {:#018x}", self.all_occupied.0);
 
         for color in colors {
-            let label = if color == Color::White { "White" } else { "Black" };
+            let label = if color == Color::White {
+                "White"
+            } else {
+                "Black"
+            };
             for (piece, name) in pieces {
                 let bb = self.pieces[color_index(color)][piece_index(piece)].0;
                 println!("{} {}: {:#018x}", label, name, bb);

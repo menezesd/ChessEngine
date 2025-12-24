@@ -50,7 +50,8 @@ impl Board {
                     if let Some((target_color, _)) = self.piece_at(target_sq) {
                         if target_color != color {
                             if target_sq.0 == promotion_rank {
-                                for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
+                                for promo in
+                                    [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
                                 {
                                     moves.push(self.create_move(
                                         from,
@@ -102,7 +103,8 @@ impl Board {
                     if let Some((target_color, _)) = self.piece_at(target_sq) {
                         if target_color != color {
                             if target_sq.0 == promotion_rank {
-                                for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
+                                for promo in
+                                    [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
                                 {
                                     moves.push(self.create_move(
                                         from,

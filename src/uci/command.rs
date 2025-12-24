@@ -94,7 +94,12 @@ pub fn parse_uci_command(line: &str) -> Option<UciCommand> {
         return None;
     }
 
-    let owned_parts = || parts.iter().map(|p| (*p).to_string()).collect::<Vec<String>>();
+    let owned_parts = || {
+        parts
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect::<Vec<String>>()
+    };
 
     let cmd = match parts[0] {
         "uci" => UciCommand::Uci,
@@ -103,7 +108,10 @@ pub fn parse_uci_command(line: &str) -> Option<UciCommand> {
         "position" => UciCommand::Position(owned_parts()),
         "go" => UciCommand::Go(owned_parts()),
         "perft" => {
-            let depth = parts.get(1).and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
+            let depth = parts
+                .get(1)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1);
             UciCommand::Perft(depth)
         }
         "setoption" => UciCommand::SetOption(owned_parts()),

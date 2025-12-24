@@ -9,14 +9,14 @@ pub struct SearchInfo {
     pub pv: String,
 }
 
-pub trait SearchLogger: Send {
-    fn info(&mut self, info: &SearchInfo);
+pub trait SearchLogger {
+    fn info(&self, info: &SearchInfo);
 }
 
 pub struct StdoutLogger;
 
 impl SearchLogger for StdoutLogger {
-    fn info(&mut self, info: &SearchInfo) {
+    fn info(&self, info: &SearchInfo) {
         println!(
             "info depth {} seldepth {} score {} nodes {} nps {} hashfull {} time {} pv {}",
             info.depth,

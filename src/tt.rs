@@ -56,10 +56,7 @@ impl TranspositionTable {
     pub(crate) fn probe(&self, hash: u64) -> Option<&TTEntry> {
         let index = self.index(hash);
         let bucket = &self.table[index];
-        bucket
-            .iter()
-            .flatten()
-            .find(|entry| entry.hash == hash)
+        bucket.iter().flatten().find(|entry| entry.hash == hash)
     }
 
     // Store an entry in the table
