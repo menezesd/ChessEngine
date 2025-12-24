@@ -3,37 +3,21 @@ mod knights;
 mod pawns;
 mod sliders;
 
-use super::{
-    color_index, piece_index, pop_lsb, square_from_index, Board, Color, Move, MoveList, Piece,
-    Square,
-};
+use super::{pop_lsb, Board, Color, Move, MoveList, Piece, Square};
 
 impl Board {
-    pub(crate) fn mobility_counts(&self) -> (i32, i32) {
-        let mut white = 0;
-        let mut black = 0;
 
-        let pieces = [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen];
 
-        for &color in &[Color::White, Color::Black] {
-            let c_idx = color_index(color);
-            let mut count = 0;
-            for &piece in &pieces {
-                let mut bb = self.pieces[c_idx][piece_index(piece)];
-                while bb.0 != 0 {
-                    let from = square_from_index(pop_lsb(&mut bb));
-                    let moves = self.generate_piece_moves(from, piece);
-                    count += moves.len() as i32;
-                }
-            }
-            if color == Color::White {
-                white = count;
-            } else {
-                black = count;
-            }
+    pub(crate) fn piece_mobility_count(&self, color: Color, piece: Piece) -> usize {
+        let mut count = 0usize;
+        let c_idx = color.index();
+        let mut bb = self.pieces[c_idx][piece.index()];
+        while bb.0 != 0 {
+            let from = Square::from_index(pop_lsb(&mut bb));
+            let moves = self.generate_piece_moves(from, piece);
+            count += moves.len();
         }
-
-        (white, black)
+        count
     }
 
     fn generate_pseudo_moves(&self) -> MoveList {
@@ -43,29 +27,29 @@ impl Board {
         } else {
             Color::Black
         };
-        let c_idx = color_index(color);
+        let c_idx = color.index();
 
-        let mut pawns = self.pieces[c_idx][piece_index(Piece::Pawn)];
+        let mut pawns = self.pieces[c_idx][Piece::Pawn.index()];
         while pawns.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut pawns));
+            let from = Square::from_index(pop_lsb(&mut pawns));
             let pawn_moves = self.generate_pawn_moves(from);
             for m in pawn_moves.iter() {
                 moves.push(*m);
             }
         }
 
-        let mut knights = self.pieces[c_idx][piece_index(Piece::Knight)];
+        let mut knights = self.pieces[c_idx][Piece::Knight.index()];
         while knights.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut knights));
+            let from = Square::from_index(pop_lsb(&mut knights));
             let knight_moves = self.generate_knight_moves(from);
             for m in knight_moves.iter() {
                 moves.push(*m);
             }
         }
 
-        let mut bishops = self.pieces[c_idx][piece_index(Piece::Bishop)];
+        let mut bishops = self.pieces[c_idx][Piece::Bishop.index()];
         while bishops.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut bishops));
+            let from = Square::from_index(pop_lsb(&mut bishops));
             let bishop_moves =
                 self.generate_sliding_moves(from, &[(1, 1), (1, -1), (-1, 1), (-1, -1)]);
             for m in bishop_moves.iter() {
@@ -73,18 +57,18 @@ impl Board {
             }
         }
 
-        let mut rooks = self.pieces[c_idx][piece_index(Piece::Rook)];
+        let mut rooks = self.pieces[c_idx][Piece::Rook.index()];
         while rooks.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut rooks));
+            let from = Square::from_index(pop_lsb(&mut rooks));
             let rook_moves = self.generate_sliding_moves(from, &[(1, 0), (-1, 0), (0, 1), (0, -1)]);
             for m in rook_moves.iter() {
                 moves.push(*m);
             }
         }
 
-        let mut queens = self.pieces[c_idx][piece_index(Piece::Queen)];
+        let mut queens = self.pieces[c_idx][Piece::Queen.index()];
         while queens.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut queens));
+            let from = Square::from_index(pop_lsb(&mut queens));
             let queen_moves = self.generate_sliding_moves(
                 from,
                 &[
@@ -103,9 +87,9 @@ impl Board {
             }
         }
 
-        let mut kings = self.pieces[c_idx][piece_index(Piece::King)];
+        let mut kings = self.pieces[c_idx][Piece::King.index()];
         while kings.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut kings));
+            let from = Square::from_index(pop_lsb(&mut kings));
             let king_moves = self.generate_king_moves(from);
             for m in king_moves.iter() {
                 moves.push(*m);
@@ -208,17 +192,17 @@ impl Board {
         let current_color = self.current_color();
 
         let mut pseudo_tactical_moves = MoveList::new();
-        let c_idx = color_index(current_color);
+        let c_idx = current_color.index();
 
-        let mut pawns = self.pieces[c_idx][piece_index(Piece::Pawn)];
+        let mut pawns = self.pieces[c_idx][Piece::Pawn.index()];
         while pawns.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut pawns));
+            let from = Square::from_index(pop_lsb(&mut pawns));
             self.generate_pawn_tactical_moves(from, &mut pseudo_tactical_moves);
         }
 
-        let mut knights = self.pieces[c_idx][piece_index(Piece::Knight)];
+        let mut knights = self.pieces[c_idx][Piece::Knight.index()];
         while knights.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut knights));
+            let from = Square::from_index(pop_lsb(&mut knights));
             let piece_moves = self.generate_piece_moves(from, Piece::Knight);
             for m in piece_moves.iter() {
                 if m.captured_piece.is_some() || m.is_en_passant {
@@ -227,9 +211,9 @@ impl Board {
             }
         }
 
-        let mut bishops = self.pieces[c_idx][piece_index(Piece::Bishop)];
+        let mut bishops = self.pieces[c_idx][Piece::Bishop.index()];
         while bishops.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut bishops));
+            let from = Square::from_index(pop_lsb(&mut bishops));
             let piece_moves = self.generate_piece_moves(from, Piece::Bishop);
             for m in piece_moves.iter() {
                 if m.captured_piece.is_some() || m.is_en_passant {
@@ -238,9 +222,9 @@ impl Board {
             }
         }
 
-        let mut rooks = self.pieces[c_idx][piece_index(Piece::Rook)];
+        let mut rooks = self.pieces[c_idx][Piece::Rook.index()];
         while rooks.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut rooks));
+            let from = Square::from_index(pop_lsb(&mut rooks));
             let piece_moves = self.generate_piece_moves(from, Piece::Rook);
             for m in piece_moves.iter() {
                 if m.captured_piece.is_some() || m.is_en_passant {
@@ -249,9 +233,9 @@ impl Board {
             }
         }
 
-        let mut queens = self.pieces[c_idx][piece_index(Piece::Queen)];
+        let mut queens = self.pieces[c_idx][Piece::Queen.index()];
         while queens.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut queens));
+            let from = Square::from_index(pop_lsb(&mut queens));
             let piece_moves = self.generate_piece_moves(from, Piece::Queen);
             for m in piece_moves.iter() {
                 if m.captured_piece.is_some() || m.is_en_passant {
@@ -260,9 +244,9 @@ impl Board {
             }
         }
 
-        let mut kings = self.pieces[c_idx][piece_index(Piece::King)];
+        let mut kings = self.pieces[c_idx][Piece::King.index()];
         while kings.0 != 0 {
-            let from = square_from_index(pop_lsb(&mut kings));
+            let from = Square::from_index(pop_lsb(&mut kings));
             let piece_moves = self.generate_piece_moves(from, Piece::King);
             for m in piece_moves.iter() {
                 if m.captured_piece.is_some() || m.is_en_passant {

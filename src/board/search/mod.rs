@@ -22,6 +22,8 @@ pub struct SearchStats {
     pub max_nodes: u64,
 }
 
+const SELDEPTH_CAP: u32 = 64;
+
 impl SearchStats {
     pub fn reset_search(&mut self) {
         self.nodes = 0;
@@ -165,14 +167,14 @@ impl SearchState {
     }
 
     fn set_counter_move(&mut self, prev: Move, reply: Move) {
-        let from = super::square_index(prev.from).0 as usize;
-        let to = super::square_index(prev.to).0 as usize;
+        let from = prev.from.index().0 as usize;
+        let to = prev.to.index().0 as usize;
         self.tables.counter_moves[from][to] = reply;
     }
 
     fn get_counter_move(&self, prev: Move) -> Option<Move> {
-        let from = super::square_index(prev.from).0 as usize;
-        let to = super::square_index(prev.to).0 as usize;
+        let from = prev.from.index().0 as usize;
+        let to = prev.to.index().0 as usize;
         let mv = self.tables.counter_moves[from][to];
         if mv == super::EMPTY_MOVE {
             None
@@ -202,8 +204,8 @@ impl Default for SearchState {
 }
 
 fn move_history_index(m: Move) -> usize {
-    let from = super::square_index(m.from).0 as usize;
-    let to = super::square_index(m.to).0 as usize;
+    let from = m.from.index().0 as usize;
+    let to = m.to.index().0 as usize;
     from * 64 + to
 }
 
@@ -301,11 +303,14 @@ impl<'a> Position<'a> {
         if self.board.is_draw() {
             return Some(TerminalState::Draw);
         }
-        if self.board.is_checkmate() {
-            return Some(TerminalState::Checkmate);
-        }
-        if self.board.is_stalemate() {
-            return Some(TerminalState::Stalemate);
+        let in_check = self.board.is_in_check(self.board.current_color());
+        let legal_moves = self.board.generate_moves();
+        if legal_moves.is_empty() {
+            return Some(if in_check {
+                TerminalState::Checkmate
+            } else {
+                TerminalState::Stalemate
+            });
         }
         None
     }
@@ -394,7 +399,7 @@ impl Board {
         if state.should_stop(stop) {
             return 0;
         }
-        let params = state.params.clone();
+        let params = state.params;
         if ply as usize >= MAX_PLY - 1 {
             return self.eval_for_side();
         }
@@ -404,7 +409,7 @@ impl Board {
             stop.store(true, Ordering::Relaxed);
             return 0;
         }
-        if ply > state.stats.seldepth {
+        if ply > state.stats.seldepth && ply <= SELDEPTH_CAP {
             state.stats.seldepth = ply;
         }
         if self.is_draw() {
@@ -617,7 +622,7 @@ impl Board {
         if state.should_stop(stop) {
             return 0;
         }
-        let params = state.params.clone();
+        let params = state.params;
         if ply as usize >= MAX_PLY - 1 {
             return self.eval_for_side();
         }
@@ -627,7 +632,7 @@ impl Board {
             stop.store(true, Ordering::Relaxed);
             return 0;
         }
-        if ply > state.stats.seldepth {
+        if ply > state.stats.seldepth && ply <= SELDEPTH_CAP {
             state.stats.seldepth = ply;
         }
         if self.is_draw() {
@@ -754,7 +759,11 @@ fn format_score_for_info(score: i32) -> String {
 }
 
 fn emit_info(ctx: &mut SearchContext, depth: u32, score: i32, best_move: Move) {
-    let pv_moves = build_pv(ctx.board, ctx.state, 16);
+    let pv_moves = if depth <= 2 || depth.is_multiple_of(2) {
+        build_pv(ctx.board, ctx.state, 10)
+    } else {
+        Vec::new()
+    };
     let pv = if pv_moves.is_empty() {
         format_uci_move_for_info(&best_move)
     } else {
@@ -799,6 +808,8 @@ fn build_pv(board: &mut Board, state: &SearchState, max_len: usize) -> Vec<Move>
     let mut pv = Vec::new();
     let mut history: Vec<(Move, UnmakeInfo)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    pv.reserve(max_len);
+    history.reserve(max_len);
 
     for _ in 0..max_len {
         let hash = board.hash();
