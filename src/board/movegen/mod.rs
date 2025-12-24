@@ -287,6 +287,7 @@ impl Board {
         legal_tactical_moves
     }
 
+    #[allow(dead_code)]
     pub(crate) fn generate_checking_moves(&mut self) -> MoveList {
         let current_color = self.current_color();
         let pseudo_moves = self.generate_pseudo_moves();

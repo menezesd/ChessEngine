@@ -116,6 +116,7 @@ impl SearchState {
         self.logger = logger;
     }
 
+    #[allow(dead_code)]
     fn best_move_from_tt(&self, hash: u64) -> Option<Move> {
         self.tables.tt.probe(hash).and_then(|entry| entry.best_move)
     }
@@ -330,9 +331,9 @@ impl Board {
         let phase_table = [0i32, 1, 1, 2, 4, 0];
         let mut phase_units = 0i32;
         for color in 0..2 {
-            for piece_idx in 0..6 {
+            for (piece_idx, phase_value) in phase_table.iter().enumerate() {
                 let count = self.pieces[color][piece_idx].0.count_ones() as i32;
-                phase_units += count * phase_table[piece_idx];
+                phase_units += count * *phase_value;
             }
         }
         phase_units > 6
