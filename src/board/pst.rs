@@ -1,21 +1,21 @@
 //! Piece-Square Tables (PST) and material values for evaluation.
 //!
-//! Uses PeSTO tuned values for middlegame and endgame evaluation.
+//! Uses `PeSTO` tuned values for middlegame and endgame evaluation.
 //! Tables are indexed by piece type and square, with values in centipawns.
 
-/// Material values for middlegame (indexed by Piece::index())
-pub const MATERIAL_MG: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
+/// Material values for middlegame (indexed by `Piece::index()`)
+pub(crate) const MATERIAL_MG: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
 
-/// Material values for endgame (indexed by Piece::index())
-pub const MATERIAL_EG: [i32; 6] = [94, 281, 297, 512, 936, 20000];
+/// Material values for endgame (indexed by `Piece::index()`)
+pub(crate) const MATERIAL_EG: [i32; 6] = [94, 281, 297, 512, 936, 20000];
 
 /// Phase contribution per piece type (for tapered eval)
-pub const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
+pub(crate) const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
 
 /// Middlegame piece-square tables (indexed by [piece][square])
 /// Square indexing: a1=0, b1=1, ..., h8=63
 /// Values are from white's perspective; flip for black.
-pub const PST_MG: [[i32; 64]; 6] = [
+pub(crate) const PST_MG: [[i32; 64]; 6] = [
     // Pawn
     [
         0, 0, 0, 0, 0, 0, 0, 0,
@@ -85,7 +85,7 @@ pub const PST_MG: [[i32; 64]; 6] = [
 ];
 
 /// Endgame piece-square tables (indexed by [piece][square])
-pub const PST_EG: [[i32; 64]; 6] = [
+pub(crate) const PST_EG: [[i32; 64]; 6] = [
     // Pawn
     [
         0, 0, 0, 0, 0, 0, 0, 0,

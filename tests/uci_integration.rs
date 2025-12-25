@@ -69,16 +69,16 @@ fn uci_reports_options_and_handles_setoption() {
         .spawn()
         .expect("failed to spawn engine binary");
 
-    let input = b"uci\nsetoption name Move Overhead value 0\nsetoption name SoftTime value 75\nsetoption name HardTime value 95\nsetoption name Nodes value 10000\nsetoption name MultiPV value 2\nsetoption name Ponder value true\nisready\nquit\n";
+    let input = b"uci\nsetoption name Move Overhead value 0\nsetoption name Soft Time Percent value 75\nsetoption name Hard Time Percent value 95\nsetoption name Max Nodes value 10000\nsetoption name MultiPV value 2\nsetoption name Ponder value true\nisready\nquit\n";
     child.stdin.as_mut().unwrap().write_all(input).unwrap();
 
     let output = child.wait_with_output().expect("failed to read output");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(stdout.contains("option name Move Overhead"));
-    assert!(stdout.contains("option name SoftTime"));
-    assert!(stdout.contains("option name HardTime"));
-    assert!(stdout.contains("option name Nodes"));
+    assert!(stdout.contains("option name Soft Time Percent"));
+    assert!(stdout.contains("option name Hard Time Percent"));
+    assert!(stdout.contains("option name Max Nodes"));
     assert!(stdout.contains("option name MultiPV"));
     assert!(stdout.contains("option name Ponder"));
     assert!(stdout.contains("readyok"));

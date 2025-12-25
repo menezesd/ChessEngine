@@ -1,1 +1,4 @@
 /target
+
+# Legacy C++ implementation
+chess.cpp

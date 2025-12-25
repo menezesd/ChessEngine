@@ -1,5 +1,5 @@
 use super::super::attack_tables::{slider_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS};
-use super::super::{pop_lsb, Bitboard, Board, Color, MoveList, Piece, Square};
+use super::super::{Bitboard, Board, Color, MoveList, Piece, Square};
 
 impl Board {
     pub(crate) fn generate_king_moves(&self, from: Square) -> MoveList {
@@ -8,10 +8,9 @@ impl Board {
         let back_rank = if color == Color::White { 0 } else { 7 };
         let from_idx = from.index().as_usize();
         let own_occ = self.occupied[color.index()].0;
-        let mut targets = Bitboard(KING_ATTACKS[from_idx] & !own_occ);
+        let targets = Bitboard(KING_ATTACKS[from_idx] & !own_occ);
 
-        while targets.0 != 0 {
-            let to_idx = pop_lsb(&mut targets);
+        for to_idx in targets.iter() {
             let to_sq = Square::from_index(to_idx);
             moves.push(self.create_move(from, to_sq, None, false, false));
         }
@@ -40,15 +39,10 @@ impl Board {
     }
 
     pub(crate) fn find_king(&self, color: Color) -> Option<Square> {
-        for r in 0..8 {
-            for f in 0..8 {
-                let sq = Square(r, f);
-                if self.piece_at(sq) == Some((color, Piece::King)) {
-                    return Some(sq);
-                }
-            }
-        }
-        None
+        self.pieces[color.index()][Piece::King.index()]
+            .iter()
+            .next()
+            .map(Square::from_index)
     }
 
     pub(crate) fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
@@ -89,7 +83,7 @@ impl Board {
 
     pub(crate) fn is_in_check(&self, color: Color) -> bool {
         if let Some(king_sq) = self.find_king(color) {
-            self.is_square_attacked(king_sq, self.opponent_color(color))
+            self.is_square_attacked(king_sq, color.opponent())
         } else {
             false
         }

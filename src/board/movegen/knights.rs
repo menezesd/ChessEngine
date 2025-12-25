@@ -1,7 +1,5 @@
 use super::super::attack_tables::KNIGHT_ATTACKS;
-use super::super::{
-    pop_lsb, Bitboard, Board, MoveList, Square,
-};
+use super::super::{Bitboard, Board, MoveList, Square};
 
 impl Board {
     pub(crate) fn generate_knight_moves(&self, from: Square) -> MoveList {
@@ -9,10 +7,9 @@ impl Board {
         let color = self.current_color();
         let from_idx = from.index().as_usize();
         let own_occ = self.occupied[color.index()].0;
-        let mut targets = Bitboard(KNIGHT_ATTACKS[from_idx] & !own_occ);
+        let targets = Bitboard(KNIGHT_ATTACKS[from_idx] & !own_occ);
 
-        while targets.0 != 0 {
-            let to_idx = pop_lsb(&mut targets);
+        for to_idx in targets.iter() {
             let to_sq = Square::from_index(to_idx);
             moves.push(self.create_move(from, to_sq, None, false, false));
         }

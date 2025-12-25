@@ -130,7 +130,7 @@ fn mate_search_suite() {
         }
 
         checked += 1;
-        if progress_every > 0 && checked % progress_every == 0 {
+        if progress_every > 0 && checked.is_multiple_of(progress_every) {
             eprintln!("checked {}", checked);
         }
     }

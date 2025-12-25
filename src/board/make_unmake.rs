@@ -23,13 +23,6 @@ impl Board {
         }
     }
 
-    pub(crate) fn opponent_color(&self, color: Color) -> Color {
-        match color {
-            Color::White => Color::Black,
-            Color::Black => Color::White,
-        }
-    }
-
     pub(crate) fn has_castling_right(&self, color: Color, side: char) -> bool {
         self.castling_rights & castle_bit(color, side) != 0
     }
@@ -86,6 +79,18 @@ impl Board {
         self.all_occupied.0 & bit_for_square(sq).0 == 0
     }
 
+    /// Get just the piece type on a square (without color)
+    #[must_use]
+    pub fn piece_on(&self, sq: Square) -> Option<Piece> {
+        self.piece_at(sq).map(|(_, piece)| piece)
+    }
+
+    /// Get just the color of the piece on a square
+    #[must_use]
+    pub fn color_on(&self, sq: Square) -> Option<Color> {
+        self.piece_at(sq).map(|(color, _)| color)
+    }
+
     pub(crate) fn calculate_initial_hash(&self) -> u64 {
         let mut hash: u64 = 0;
 
@@ -125,6 +130,7 @@ impl Board {
         hash
     }
 
+    #[allow(clippy::too_many_lines)] // Inherently complex: handles all move types + incremental eval
     pub(crate) fn make_move(&mut self, m: &Move) -> UnmakeInfo {
         let mut current_hash = self.hash;
         let previous_hash = self.hash;
@@ -158,7 +164,7 @@ impl Board {
             let capture_sq = Square(capture_row, m.to.1);
             captured_piece_info = self.piece_at(capture_sq);
             if let Some((cap_col, cap_piece)) = captured_piece_info {
-                let cap_sq_idx = capture_sq.index().0 as usize;
+                let cap_sq_idx = capture_sq.index().as_usize();
                 let cap_p_idx = cap_piece.index();
                 let cap_pst_sq = pst_sq(cap_sq_idx, cap_col == Color::White);
 
@@ -174,7 +180,7 @@ impl Board {
         } else if !m.is_castling {
             captured_piece_info = self.piece_at(m.to);
             if let Some((cap_col, cap_piece)) = captured_piece_info {
-                let cap_sq_idx = m.to.index().0 as usize;
+                let cap_sq_idx = m.to.index().as_usize();
                 let cap_p_idx = cap_piece.index();
                 let cap_pst_sq = pst_sq(cap_sq_idx, cap_col == Color::White);
 
@@ -193,8 +199,8 @@ impl Board {
         let (moving_color, moving_piece) = moving_piece_info;
         let from_sq_idx = square_to_zobrist_index(m.from);
         let to_sq_idx = square_to_zobrist_index(m.to);
-        let from_idx = m.from.index().0 as usize;
-        let to_idx = m.to.index().0 as usize;
+        let from_idx = m.from.index().as_usize();
+        let to_idx = m.to.index().as_usize();
         let piece_idx = moving_piece.index();
 
         current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(moving_piece)]
@@ -222,8 +228,8 @@ impl Board {
             let (rook_from_f, rook_to_f) = if m.to.1 == 6 { (7, 5) } else { (0, 3) };
             let rook_from_sq = Square(m.to.0, rook_from_f);
             let rook_to_sq = Square(m.to.0, rook_to_f);
-            let rook_from_idx = rook_from_sq.index().0 as usize;
-            let rook_to_idx = rook_to_sq.index().0 as usize;
+            let rook_from_idx = rook_from_sq.index().as_usize();
+            let rook_to_idx = rook_to_sq.index().as_usize();
             let rook_info = self.piece_at(rook_from_sq).expect("Castling without rook");
             self.remove_piece(rook_from_sq, rook_info.0, rook_info.1);
             self.set_piece(rook_to_sq, rook_info.0, rook_info.1);
@@ -261,7 +267,7 @@ impl Board {
 
         self.en_passant_target = None;
         if moving_piece == Piece::Pawn && (m.from.0 as isize - m.to.0 as isize).abs() == 2 {
-            let ep_row = (m.from.0 + m.to.0) / 2;
+            let ep_row = usize::midpoint(m.from.0, m.to.0);
             let ep_sq = Square(ep_row, m.from.1);
             self.en_passant_target = Some(ep_sq);
             current_hash ^= ZOBRIST.en_passant_keys[ep_sq.1];

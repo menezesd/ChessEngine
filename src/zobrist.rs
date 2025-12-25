@@ -1,9 +1,10 @@
-use once_cell::sync::Lazy;
+//! Zobrist hashing for chess positions.
+//!
+//! Provides incrementally-updatable 64-bit position hashes for transposition tables.
+
 use rand::prelude::*;
 
 use crate::board::{Color, Piece, Square};
-
-// Struct to hold all Zobrist keys
 pub(crate) struct ZobristKeys {
     // piece_keys[piece_type][color][square_index]
     pub(crate) piece_keys: [[[u64; 64]; 2]; 6], // PieceType(0-5), Color(0-1), Square(0-63)
@@ -21,7 +22,7 @@ impl ZobristKeys {
         let mut castling_keys = [[0; 2]; 2];
         let mut en_passant_keys = [0; 8];
 
-        for piece in piece_keys.iter_mut() {
+        for piece in &mut piece_keys {
             for color in piece.iter_mut() {
                 for key in color.iter_mut() {
                     *key = rng.gen();
@@ -31,13 +32,13 @@ impl ZobristKeys {
 
         let black_to_move_key = rng.gen();
 
-        for color in castling_keys.iter_mut() {
+        for color in &mut castling_keys {
             for key in color.iter_mut() {
                 *key = rng.gen();
             }
         }
 
-        for key in en_passant_keys.iter_mut() {
+        for key in &mut en_passant_keys {
             *key = rng.gen();
         }
 
@@ -51,29 +52,21 @@ impl ZobristKeys {
 }
 
 // Initialize Zobrist keys lazily and globally
-pub(crate) static ZOBRIST: Lazy<ZobristKeys> = Lazy::new(ZobristKeys::new);
+pub(crate) static ZOBRIST: std::sync::LazyLock<ZobristKeys> = std::sync::LazyLock::new(ZobristKeys::new);
 
-// Helper to map Piece enum to index
+// Re-export simple index accessors for Zobrist hashing
+// These use the existing index() methods on Piece, Color, and Square
+#[inline]
 pub(crate) fn piece_to_zobrist_index(piece: Piece) -> usize {
-    match piece {
-        Piece::Pawn => 0,
-        Piece::Knight => 1,
-        Piece::Bishop => 2,
-        Piece::Rook => 3,
-        Piece::Queen => 4,
-        Piece::King => 5,
-    }
+    piece.index()
 }
 
-// Helper to map Color enum to index
+#[inline]
 pub(crate) fn color_to_zobrist_index(color: Color) -> usize {
-    match color {
-        Color::White => 0,
-        Color::Black => 1,
-    }
+    color.index()
 }
 
-// Helper to map Square to index (0-63)
+#[inline]
 pub(crate) fn square_to_zobrist_index(sq: Square) -> usize {
-    sq.0 * 8 + sq.1
+    sq.index().as_usize()
 }

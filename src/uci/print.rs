@@ -18,7 +18,6 @@ pub fn print_time_info(
     depth: u32,
 ) {
     println!(
-        "info string time soft {} hard {} overhead {} nodes {} ponder {} depth {}",
-        soft_time_ms, hard_time_ms, move_overhead_ms, max_nodes, ponder, depth
+        "info string time soft {soft_time_ms} hard {hard_time_ms} overhead {move_overhead_ms} nodes {max_nodes} ponder {ponder} depth {depth}"
     );
 }

@@ -1,12 +1,10 @@
-use once_cell::sync::Lazy;
-
 pub(crate) fn pop_lsb_u64(bb: &mut u64) -> usize {
     let idx = bb.trailing_zeros() as usize;
     *bb &= *bb - 1;
     idx
 }
 
-pub(crate) static KNIGHT_ATTACKS: Lazy<[u64; 64]> = Lazy::new(|| {
+pub(crate) static KNIGHT_ATTACKS: std::sync::LazyLock<[u64; 64]> = std::sync::LazyLock::new(|| {
     let mut attacks = [0u64; 64];
     let deltas = [
         (2, 1),
@@ -35,7 +33,7 @@ pub(crate) static KNIGHT_ATTACKS: Lazy<[u64; 64]> = Lazy::new(|| {
     attacks
 });
 
-pub(crate) static KING_ATTACKS: Lazy<[u64; 64]> = Lazy::new(|| {
+pub(crate) static KING_ATTACKS: std::sync::LazyLock<[u64; 64]> = std::sync::LazyLock::new(|| {
     let mut attacks = [0u64; 64];
     let deltas = [
         (1, 0),
@@ -64,7 +62,7 @@ pub(crate) static KING_ATTACKS: Lazy<[u64; 64]> = Lazy::new(|| {
     attacks
 });
 
-pub(crate) static PAWN_ATTACKS: Lazy<[[u64; 64]; 2]> = Lazy::new(|| {
+pub(crate) static PAWN_ATTACKS: std::sync::LazyLock<[[u64; 64]; 2]> = std::sync::LazyLock::new(|| {
     let mut attacks = [[0u64; 64]; 2];
     let (white_attacks, black_attacks) = attacks.split_at_mut(1);
     let white_attacks = &mut white_attacks[0];
@@ -111,7 +109,7 @@ pub(crate) const DIR_NW: usize = 5;
 pub(crate) const DIR_SE: usize = 6;
 pub(crate) const DIR_SW: usize = 7;
 
-static RAYS: Lazy<[[u64; 64]; 8]> = Lazy::new(|| {
+static RAYS: std::sync::LazyLock<[[u64; 64]; 8]> = std::sync::LazyLock::new(|| {
     let mut rays = [[0u64; 64]; 8];
     let dirs = [
         (1, 0),   // N
@@ -142,7 +140,7 @@ static RAYS: Lazy<[[u64; 64]; 8]> = Lazy::new(|| {
     rays
 });
 
-pub(crate) static ROOK_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
+pub(crate) static ROOK_MASKS: std::sync::LazyLock<[u64; 64]> = std::sync::LazyLock::new(|| {
     let mut masks = [0u64; 64];
     for (sq, slot) in masks.iter_mut().enumerate() {
         let mut mask = 0u64;
@@ -162,7 +160,7 @@ pub(crate) static ROOK_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
     masks
 });
 
-pub(crate) static BISHOP_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
+pub(crate) static BISHOP_MASKS: std::sync::LazyLock<[u64; 64]> = std::sync::LazyLock::new(|| {
     let mut masks = [0u64; 64];
     for (sq, slot) in masks.iter_mut().enumerate() {
         let mut mask = 0u64;
@@ -182,7 +180,7 @@ pub(crate) static BISHOP_MASKS: Lazy<[u64; 64]> = Lazy::new(|| {
     masks
 });
 
-pub(crate) static ROOK_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
+pub(crate) static ROOK_ATTACKS: std::sync::LazyLock<Vec<Vec<u64>>> = std::sync::LazyLock::new(|| {
     let mut tables = Vec::with_capacity(64);
     for sq in 0..64 {
         let mask = ROOK_MASKS[sq];
@@ -198,7 +196,7 @@ pub(crate) static ROOK_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
     tables
 });
 
-pub(crate) static BISHOP_ATTACKS: Lazy<Vec<Vec<u64>>> = Lazy::new(|| {
+pub(crate) static BISHOP_ATTACKS: std::sync::LazyLock<Vec<Vec<u64>>> = std::sync::LazyLock::new(|| {
     let mut tables = Vec::with_capacity(64);
     for sq in 0..64 {
         let mask = BISHOP_MASKS[sq];

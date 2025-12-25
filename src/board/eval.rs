@@ -1,6 +1,6 @@
 //! Position evaluation using tapered eval.
 //!
-//! Uses incremental evaluation (eval_mg, eval_eg, game_phase) stored in Board.
+//! Uses incremental evaluation (`eval_mg`, `eval_eg`, `game_phase`) stored in Board.
 //! Implements tapered evaluation with bishop pair bonus and tempo.
 
 use super::{Board, Piece};
@@ -16,8 +16,9 @@ impl Board {
     ///
     /// Uses tapered evaluation to interpolate between middlegame and endgame scores
     /// based on the current game phase. Includes bishop pair bonus and tempo.
+    #[must_use]
     pub fn evaluate(&self) -> i32 {
-        let c_idx = if self.white_to_move { 0 } else { 1 };
+        let c_idx = usize::from(!self.white_to_move);
         let opp_idx = 1 - c_idx;
 
         // Calculate game phase (capped at 24)

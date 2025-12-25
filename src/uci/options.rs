@@ -15,6 +15,7 @@ pub struct UciOptions {
 }
 
 impl UciOptions {
+    #[must_use] 
     pub fn new(hash_mb: usize) -> Self {
         UciOptions {
             hash_mb,
@@ -29,7 +30,7 @@ impl UciOptions {
 
     pub fn print(&self, _params: &SearchParams) {
         println!("id name chess_engine");
-        println!("id author unknown");
+        println!("id author Dean Menezes");
         println!(
             "option name Hash type spin default {} min 1 max 65536",
             self.hash_mb
@@ -48,18 +49,6 @@ impl UciOptions {
         );
         println!(
             "option name Max Nodes type spin default {} min 0 max 18446744073709551615",
-            self.default_max_nodes
-        );
-        println!(
-            "option name SoftTime type spin default {} min 1 max 100",
-            self.soft_time_percent
-        );
-        println!(
-            "option name HardTime type spin default {} min 1 max 100",
-            self.hard_time_percent
-        );
-        println!(
-            "option name Nodes type spin default {} min 0 max 18446744073709551615",
             self.default_max_nodes
         );
         println!(
@@ -142,6 +131,7 @@ impl UciOptions {
     }
 }
 
+#[must_use] 
 pub fn parse_setoption(parts: &[&str]) -> Option<(String, Option<String>)> {
     if parts.is_empty() || parts[0] != "setoption" {
         return None;

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 
 use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
 use super::{Bitboard, Color, Piece, Square, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct UnmakeInfo {
     pub(crate) captured_piece_info: Option<(Color, Piece)>,
     pub(crate) previous_en_passant_target: Option<Square>,
@@ -18,6 +20,7 @@ pub struct UnmakeInfo {
     pub(crate) previous_game_phase: [i32; 2],
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct NullMoveInfo {
     pub(crate) previous_en_passant_target: Option<Square>,
     pub(crate) previous_hash: u64,
@@ -72,6 +75,7 @@ pub struct Board {
 }
 
 impl Board {
+    #[must_use]
     pub fn new() -> Self {
         let mut board = Board::empty();
         let back_rank = [
@@ -108,11 +112,8 @@ impl Board {
         for color in [Color::White, Color::Black] {
             let c_idx = color.index();
             for piece_type in 0..6 {
-                let mut bb = self.pieces[c_idx][piece_type].0;
-                while bb != 0 {
-                    let sq = bb.trailing_zeros() as usize;
-                    bb &= bb - 1;
-
+                for sq_idx in self.pieces[c_idx][piece_type].iter() {
+                    let sq = sq_idx.as_usize();
                     // PST square: flip for white (tables are from black's perspective)
                     let pst_sq = if color == Color::White { sq } else { sq ^ 56 };
 
@@ -141,18 +142,32 @@ impl Board {
         }
     }
 
+    #[must_use]
     pub fn hash(&self) -> u64 {
         self.hash
     }
 
+    #[must_use]
     pub fn white_to_move(&self) -> bool {
         self.white_to_move
     }
 
+    /// Get the side to move
+    #[must_use]
+    pub fn side_to_move(&self) -> Color {
+        if self.white_to_move {
+            Color::White
+        } else {
+            Color::Black
+        }
+    }
+
+    #[must_use]
     pub fn halfmove_clock(&self) -> u32 {
         self.halfmove_clock
     }
 
+    #[must_use]
     pub fn is_draw(&self) -> bool {
         if self.halfmove_clock >= 100 {
             return true;
@@ -160,52 +175,44 @@ impl Board {
         self.repetition_counts.get(self.hash) >= 3
     }
 
+    #[must_use]
     pub fn is_theoretical_draw(&self) -> bool {
         self.is_draw() || self.is_insufficient_material()
     }
 
+    /// Count pieces of a given type for a color
+    fn piece_count(&self, color: Color, piece: Piece) -> u32 {
+        self.pieces[color.index()][piece.index()].0.count_ones()
+    }
+
+    /// Count pieces of a given type for both colors combined
+    fn total_piece_count(&self, piece: Piece) -> u32 {
+        self.piece_count(Color::White, piece) + self.piece_count(Color::Black, piece)
+    }
+
     fn is_insufficient_material(&self) -> bool {
-        let white = Color::White.index();
-        let black = Color::Black.index();
-
-        let pawns = self.pieces[white][Piece::Pawn.index()].0
-            | self.pieces[black][Piece::Pawn.index()].0;
-        let rooks = self.pieces[white][Piece::Rook.index()].0
-            | self.pieces[black][Piece::Rook.index()].0;
-        let queens = self.pieces[white][Piece::Queen.index()].0
-            | self.pieces[black][Piece::Queen.index()].0;
-
-        if pawns != 0 || rooks != 0 || queens != 0 {
+        // Any pawns, rooks, or queens means sufficient material
+        if self.total_piece_count(Piece::Pawn) > 0
+            || self.total_piece_count(Piece::Rook) > 0
+            || self.total_piece_count(Piece::Queen) > 0
+        {
             return false;
         }
 
-        let white_knights = self.pieces[white][Piece::Knight.index()]
-            .0
-            .count_ones();
-        let black_knights = self.pieces[black][Piece::Knight.index()]
-            .0
-            .count_ones();
-        let white_bishops = self.pieces[white][Piece::Bishop.index()]
-            .0
-            .count_ones();
-        let black_bishops = self.pieces[black][Piece::Bishop.index()]
-            .0
-            .count_ones();
+        let total_knights = self.total_piece_count(Piece::Knight);
+        let total_bishops = self.total_piece_count(Piece::Bishop);
+        let total_minors = total_knights + total_bishops;
 
-        let total_minors = white_knights + black_knights + white_bishops + black_bishops;
-
-        if total_minors == 0 || total_minors == 1 {
+        // K vs K, or K+minor vs K
+        if total_minors <= 1 {
             return true;
         }
 
-        let total_knights = white_knights + black_knights;
-        let total_bishops = white_bishops + black_bishops;
-
+        // K+B vs K+B with same-colored bishops
         if total_knights == 0 && total_bishops == 2 {
-            return bishops_all_same_color(
-                self.pieces[white][Piece::Bishop.index()].0
-                    | self.pieces[black][Piece::Bishop.index()].0,
-            );
+            let all_bishops = self.pieces[Color::White.index()][Piece::Bishop.index()].0
+                | self.pieces[Color::Black.index()][Piece::Bishop.index()].0;
+            return bishops_all_same_color(all_bishops);
         }
 
         false
@@ -224,3 +231,43 @@ fn bishops_all_same_color(bishops: u64) -> bool {
 
     (bishops & light_squares == 0) || (bishops & dark_squares == 0)
 }
+
+impl fmt::Display for Board {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "  +---+---+---+---+---+---+---+---+")?;
+        for rank in (0..8).rev() {
+            write!(f, "{} |", rank + 1)?;
+            for file in 0..8 {
+                let sq = Square(rank, file);
+                let piece_char = match self.piece_at(sq) {
+                    Some((color, piece)) => piece.to_fen_char(color),
+                    None => ' ',
+                };
+                write!(f, " {piece_char} |")?;
+            }
+            writeln!(f)?;
+            writeln!(f, "  +---+---+---+---+---+---+---+---+")?;
+        }
+        writeln!(f, "    a   b   c   d   e   f   g   h")?;
+        writeln!(f)?;
+        write!(f, "Side to move: {}", if self.white_to_move { "White" } else { "Black" })?;
+        Ok(())
+    }
+}
+
+impl Hash for Board {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Use the precomputed Zobrist hash
+        self.hash.hash(state);
+    }
+}
+
+impl PartialEq for Board {
+    fn eq(&self, other: &Self) -> bool {
+        // Two positions are equal if they have the same Zobrist hash
+        // This is technically not 100% collision-free but practically sufficient
+        self.hash == other.hash
+    }
+}
+
+impl Eq for Board {}

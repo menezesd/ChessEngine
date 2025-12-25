@@ -2,6 +2,7 @@ use std::time::Duration;
 
 pub const DEFAULT_MOVES_TO_GO: u64 = 30;
 
+#[must_use] 
 pub fn compute_time_limits(
     time_left: Duration,
     inc: Duration,

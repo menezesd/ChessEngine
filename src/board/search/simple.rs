@@ -12,13 +12,22 @@ use std::time::Instant;
 use crate::tt::BoundType;
 
 use super::{SearchState, MATE_SCORE};
-use crate::board::{Board, Move, EMPTY_MOVE, MAX_PLY};
+use crate::board::{Board, Move, MoveList, EMPTY_MOVE, MAX_PLY};
 
 /// Maximum quiescence depth
 const MAX_QSEARCH_DEPTH: i32 = 3;
 
 /// Mate score threshold
 const MATE_THRESHOLD: i32 = 27000;
+
+/// TT move priority in move ordering
+const TT_MOVE_SCORE: i32 = 1 << 20;
+/// First killer move priority
+const KILLER1_SCORE: i32 = 20000;
+/// Second killer move priority
+const KILLER2_SCORE: i32 = 10000;
+/// Minimum score to avoid LMR
+const LMR_SCORE_THRESHOLD: i32 = 2500;
 
 /// Search context for a single search
 pub struct SimpleSearchContext<'a> {
@@ -32,7 +41,7 @@ pub struct SimpleSearchContext<'a> {
     pub initial_depth: u32,
 }
 
-impl<'a> SimpleSearchContext<'a> {
+impl SimpleSearchContext<'_> {
     /// Check if we should stop searching
     #[inline]
     fn should_stop(&self) -> bool {
@@ -61,6 +70,98 @@ impl<'a> SimpleSearchContext<'a> {
     #[inline]
     fn is_repetition(&self) -> bool {
         self.board.repetition_counts.get(self.board.hash) > 1
+    }
+
+    /// Order moves for better pruning (TT move > killers > captures > history)
+    fn order_moves(&self, moves: &MoveList, tt_move: Move, ply: usize) -> Vec<(Move, i32)> {
+        moves
+            .iter()
+            .map(|m| {
+                let score = if *m == tt_move {
+                    TT_MOVE_SCORE
+                } else if ply < MAX_PLY && *m == self.state.tables.killer_moves[ply][0] {
+                    KILLER1_SCORE
+                } else if ply < MAX_PLY && *m == self.state.tables.killer_moves[ply][1] {
+                    KILLER2_SCORE
+                } else if m.captured_piece.is_some() {
+                    self.state.tables.mvv_lva_score(m)
+                } else {
+                    self.state.tables.history_score(m)
+                };
+                (*m, score)
+            })
+            .collect()
+    }
+
+    /// Try null move pruning, returns Some(score) if cutoff achieved
+    fn try_null_move_pruning(&mut self, depth: u32, beta: i32, in_check: bool) -> Option<i32> {
+        let dominated_phase = if self.board.white_to_move {
+            self.board.game_phase[0]
+        } else {
+            self.board.game_phase[1]
+        };
+
+        if in_check || dominated_phase == 0 || depth <= 2 || depth >= self.initial_depth {
+            return None;
+        }
+
+        let r = 1 + (depth + 1) / 3;
+        let info = self.board.make_null_move();
+        let score = -self.alphabeta(depth.saturating_sub(r + 1), -beta, -beta + 1, false);
+        self.board.unmake_null_move(info);
+
+        if score >= beta {
+            Some(beta)
+        } else {
+            None
+        }
+    }
+
+    /// Handle beta cutoff: update killers, history, and TT
+    fn handle_beta_cutoff(&mut self, m: &Move, ply: usize, depth: u32, score: i32, best_move: Move) {
+        // Update killers for quiet moves
+        if m.captured_piece.is_none() && ply < MAX_PLY {
+            let killers = &mut self.state.tables.killer_moves[ply];
+            if killers[0] != *m {
+                killers[1] = killers[0];
+                killers[0] = *m;
+            }
+        }
+
+        // Update history
+        self.state.tables.update_history(m, depth);
+
+        // Store in TT
+        if !self.should_stop() && score.abs() < 29000 {
+            self.state.tables.tt.store(
+                self.board.hash,
+                depth,
+                score,
+                BoundType::LowerBound,
+                Some(best_move),
+                self.state.generation,
+            );
+        }
+    }
+
+    /// Store position in transposition table
+    fn store_tt(&mut self, depth: u32, score: i32, raised_alpha: bool, best_move: Move) {
+        if self.should_stop() || score.abs() >= 29000 || best_move == EMPTY_MOVE {
+            return;
+        }
+        let bound = if raised_alpha {
+            BoundType::Exact
+        } else {
+            BoundType::UpperBound
+        };
+        self.state.tables.tt.store(
+            self.board.hash,
+            depth,
+            score,
+            bound,
+            Some(best_move),
+            self.state.generation,
+        );
     }
 
     /// Quiescence search for tactical stability
@@ -97,8 +198,8 @@ impl<'a> SimpleSearchContext<'a> {
         let mut sorted_moves: Vec<(Move, i32)> = moves
             .into_iter()
             .map(|m| {
-                let score = self.state.tables.mvv_lva_score(m);
-                (*m, score)
+                let score = self.state.tables.mvv_lva_score(&m);
+                (m, score)
             })
             .collect();
         sorted_moves.sort_by(|a, b| b.1.cmp(&a.1));
@@ -187,25 +288,8 @@ impl<'a> SimpleSearchContext<'a> {
             };
         }
 
-        // Move ordering: TT move, killers, history
-        let mut scored_moves: Vec<(Move, i32)> = moves
-            .into_iter()
-            .map(|m| {
-                let score = if *m == tt_move {
-                    1 << 20
-                } else if ply < MAX_PLY && *m == self.state.tables.killer_moves[ply][0] {
-                    20000
-                } else if ply < MAX_PLY && *m == self.state.tables.killer_moves[ply][1] {
-                    10000
-                } else if m.captured_piece.is_some() {
-                    self.state.tables.mvv_lva_score(m)
-                } else {
-                    self.state.tables.history_score(m)
-                };
-                (*m, score)
-            })
-            .collect();
-
+        // Move ordering: TT move, killers, captures, history
+        let mut scored_moves = self.order_moves(&moves, tt_move, ply);
         if depth > 1 {
             scored_moves.sort_by(|a, b| b.1.cmp(&a.1));
         }
@@ -213,26 +297,9 @@ impl<'a> SimpleSearchContext<'a> {
         let move_count = scored_moves.len();
 
         // Null move pruning
-        // Conditions: not in check, has pieces, depth > 2, not at root, null allowed
-        let dominated_phase = if self.board.white_to_move {
-            self.board.game_phase[0]
-        } else {
-            self.board.game_phase[1]
-        };
-
-        if !in_check
-            && dominated_phase > 0
-            && depth > 2
-            && depth < self.initial_depth
-            && allow_null
-        {
-            let r = 1 + (depth + 1) / 3; // R = (depth+1)/3 + 1
-            let info = self.board.make_null_move();
-            let score = -self.alphabeta(depth.saturating_sub(r + 1), -beta, -beta + 1, false);
-            self.board.unmake_null_move(info);
-
-            if score >= beta {
-                return beta;
+        if allow_null {
+            if let Some(score) = self.try_null_move_pruning(depth, beta, in_check) {
+                return score;
             }
         }
 
@@ -250,7 +317,7 @@ impl<'a> SimpleSearchContext<'a> {
             let mut score: i32;
 
             // LMR: reduce late moves with low scores
-            let lmr_ok = i > 3 + move_count / 4 && *move_score < 2500 && depth > 1;
+            let lmr_ok = i > 3 + move_count / 4 && *move_score < LMR_SCORE_THRESHOLD && depth > 1;
             let reduction = if lmr_ok { 2 } else { 1 };
 
             if i > 0 {
@@ -271,31 +338,7 @@ impl<'a> SimpleSearchContext<'a> {
 
                 if score > alpha {
                     if score >= beta {
-                        // Beta cutoff
-                        // Update killers for quiet moves
-                        if m.captured_piece.is_none() && ply < MAX_PLY {
-                            let killers = &mut self.state.tables.killer_moves[ply];
-                            if killers[0] != *m {
-                                killers[1] = killers[0];
-                                killers[0] = *m;
-                            }
-                        }
-
-                        // Update history
-                        self.state.tables.update_history(m, depth);
-
-                        // Store in TT
-                        if !self.should_stop() && best_score.abs() < 29000 {
-                            self.state.tables.tt.store(
-                                self.board.hash,
-                                depth,
-                                score,
-                                BoundType::LowerBound,
-                                Some(best_move),
-                                self.state.generation,
-                            );
-                        }
-
+                        self.handle_beta_cutoff(m, ply, depth, score, best_move);
                         return score;
                     }
                     alpha = score;
@@ -304,23 +347,7 @@ impl<'a> SimpleSearchContext<'a> {
             }
         }
 
-        // Store in TT
-        if !self.should_stop() && best_score.abs() < 29000 && best_move != EMPTY_MOVE {
-            let bound = if raised_alpha {
-                BoundType::Exact
-            } else {
-                BoundType::UpperBound
-            };
-            self.state.tables.tt.store(
-                self.board.hash,
-                depth,
-                best_score,
-                bound,
-                Some(best_move),
-                self.state.generation,
-            );
-        }
-
+        self.store_tt(depth, best_score, raised_alpha, best_move);
         best_score
     }
 

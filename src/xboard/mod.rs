@@ -1,0 +1,501 @@
+//! XBoard/WinBoard protocol implementation.
+//!
+//! Handles communication with chess GUIs using the `XBoard` protocol.
+//! This is an alternative to UCI, commonly used by older interfaces.
+//!
+//! # Protocol Overview
+//!
+//! `XBoard` uses SAN (Standard Algebraic Notation) for moves, unlike UCI which
+//! uses long algebraic notation. Key differences:
+//!
+//! - Moves: "Nf3", "O-O", "exd5" (SAN) vs "g1f3", "e1g1", "e4d5" (UCI)
+//! - Time: centiseconds vs milliseconds
+//! - Thinking output: `<ply> <score> <time> <nodes> <pv>`
+
+pub mod command;
+pub mod output;
+
+use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use crate::board::{
+    find_best_move, find_best_move_with_ponder, find_best_move_with_time_and_ponder, Board, Color,
+    Move, SearchClock, SearchLimits, SearchResult, SearchState, DEFAULT_TT_MB,
+};
+
+use command::{parse_xboard_command, XBoardCommand};
+use output::{format_error, format_features, format_illegal_move, format_move, format_pong};
+
+/// Ponder state for background thinking
+struct PonderState {
+    /// The expected opponent move we're pondering on
+    expected_move: Move,
+    /// Stop flag for the ponder search
+    stop: Arc<AtomicBool>,
+    /// Handle to the ponder thread
+    handle: JoinHandle<Option<SearchResult>>,
+}
+
+/// `XBoard` protocol handler state
+pub struct XBoardHandler {
+    board: Board,
+    state: Arc<std::sync::Mutex<SearchState>>,
+    force_mode: bool,
+    engine_color: Option<Color>,
+    post_thinking: bool,
+    pondering_enabled: bool,
+    max_depth: u32,
+    time_per_move_cs: Option<u32>,
+    engine_time_cs: u64,
+    opponent_time_cs: u64,
+    moves_per_session: u32,
+    base_time_min: u32,
+    increment_sec: u32,
+    stop_flag: Arc<AtomicBool>,
+    move_history: Vec<(Move, crate::board::UnmakeInfo)>,
+    opponent_name: Option<String>,
+    /// Active ponder search state
+    ponder: Option<PonderState>,
+}
+
+impl Default for XBoardHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl XBoardHandler {
+    /// Create a new `XBoard` handler.
+    #[must_use]
+    pub fn new() -> Self {
+        XBoardHandler {
+            board: Board::new(),
+            state: Arc::new(std::sync::Mutex::new(SearchState::new(DEFAULT_TT_MB))),
+            force_mode: false,
+            engine_color: None,
+            post_thinking: false,
+            pondering_enabled: false,
+            max_depth: 64,
+            time_per_move_cs: None,
+            engine_time_cs: 0,
+            opponent_time_cs: 0,
+            moves_per_session: 40,
+            base_time_min: 5,
+            increment_sec: 0,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            move_history: Vec::new(),
+            opponent_name: None,
+            ponder: None,
+        }
+    }
+
+    /// Stop any active ponder search
+    fn stop_ponder(&mut self) {
+        if let Some(ponder) = self.ponder.take() {
+            ponder.stop.store(true, Ordering::Relaxed);
+            let _ = ponder.handle.join();
+        }
+    }
+
+    /// Start pondering on the expected opponent move
+    fn start_ponder(&mut self, ponder_move: Move) {
+        // Stop any existing ponder
+        self.stop_ponder();
+
+        // Create ponder position: make our move, then opponent's expected reply
+        let mut ponder_board = self.board.clone();
+        ponder_board.make_move(&ponder_move);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let state_clone = Arc::clone(&self.state);
+        let max_depth = self.max_depth;
+
+        let handle = thread::spawn(move || {
+            let mut guard = state_clone.lock().ok()?;
+            // Search with low depth for pondering (background thinking)
+            let result =
+                find_best_move_with_ponder(&mut ponder_board, &mut guard, max_depth, &stop_clone);
+            Some(result)
+        });
+
+        self.ponder = Some(PonderState {
+            expected_move: ponder_move,
+            stop,
+            handle,
+        });
+    }
+
+    /// Run the `XBoard` protocol main loop.
+    pub fn run(&mut self) {
+        let stdin = io::stdin();
+        let mut stdout = io::stdout();
+
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+
+            if let Some(cmd) = parse_xboard_command(&line) {
+                let response = self.handle_command(cmd);
+                if let Some(resp) = response {
+                    for line in resp.lines() {
+                        writeln!(stdout, "{line}").ok();
+                    }
+                    stdout.flush().ok();
+                }
+
+                // Check if we should think
+                if self.should_think() {
+                    if let Some(result) = self.think() {
+                        if let Some(mv) = result.best_move {
+                            let output = format_move(&self.board, &mv);
+                            writeln!(stdout, "{output}").ok();
+                            stdout.flush().ok();
+                            let info = self.board.make_move(&mv);
+                            self.move_history.push((mv, info));
+
+                            // Start pondering if enabled and we have a ponder move
+                            if self.pondering_enabled {
+                                if let Some(ponder_mv) = result.ponder_move {
+                                    self.start_ponder(ponder_mv);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle a single `XBoard` command.
+    pub fn handle_command(&mut self, cmd: XBoardCommand) -> Option<String> {
+        match cmd {
+            XBoardCommand::XBoard => {
+                // Acknowledge XBoard mode
+                None
+            }
+            XBoardCommand::Protover(version) => {
+                if version >= 2 {
+                    Some(format_features())
+                } else {
+                    None
+                }
+            }
+            XBoardCommand::Accepted(_) | XBoardCommand::Rejected(_) => None,
+            XBoardCommand::New => {
+                self.stop_ponder();
+                self.board = Board::new();
+                self.force_mode = false;
+                self.engine_color = Some(Color::Black);
+                self.move_history.clear();
+                if let Ok(mut state) = self.state.lock() {
+                    state.new_search();
+                }
+                None
+            }
+            XBoardCommand::SetBoard(fen) => {
+                self.stop_ponder();
+                match Board::try_from_fen(&fen) {
+                    Ok(board) => {
+                        self.board = board;
+                        self.move_history.clear();
+                        None
+                    }
+                    Err(e) => Some(format_error(&fen, &e.to_string())),
+                }
+            }
+            XBoardCommand::UserMove(mv_str) => {
+                self.handle_user_move(&mv_str)
+            }
+            XBoardCommand::Go => {
+                self.force_mode = false;
+                self.engine_color = Some(self.board.side_to_move());
+                None
+            }
+            XBoardCommand::Force => {
+                self.force_mode = true;
+                self.engine_color = None;
+                None
+            }
+            XBoardCommand::PlayOther => {
+                self.engine_color = Some(self.board.side_to_move().opponent());
+                None
+            }
+            XBoardCommand::White => {
+                self.engine_color = Some(Color::White);
+                None
+            }
+            XBoardCommand::Black => {
+                self.engine_color = Some(Color::Black);
+                None
+            }
+            XBoardCommand::Time(cs) => {
+                self.engine_time_cs = cs;
+                None
+            }
+            XBoardCommand::OTime(cs) => {
+                self.opponent_time_cs = cs;
+                None
+            }
+            XBoardCommand::Level { moves_per_session, base_minutes, increment_seconds } => {
+                self.moves_per_session = moves_per_session;
+                self.base_time_min = base_minutes;
+                self.increment_sec = increment_seconds;
+                self.time_per_move_cs = None;
+                None
+            }
+            XBoardCommand::St(secs) => {
+                self.time_per_move_cs = Some(secs * 100);
+                None
+            }
+            XBoardCommand::Sd(depth) => {
+                self.max_depth = depth;
+                None
+            }
+            XBoardCommand::MoveNow => {
+                self.stop_flag.store(true, Ordering::SeqCst);
+                None
+            }
+            XBoardCommand::Ping(n) => {
+                Some(format_pong(n))
+            }
+            XBoardCommand::Undo => {
+                if let Some((mv, info)) = self.move_history.pop() {
+                    self.board.unmake_move(&mv, info);
+                }
+                None
+            }
+            XBoardCommand::Remove => {
+                // Remove two half-moves
+                for _ in 0..2 {
+                    if let Some((mv, info)) = self.move_history.pop() {
+                        self.board.unmake_move(&mv, info);
+                    }
+                }
+                None
+            }
+            XBoardCommand::Result(_) => {
+                self.force_mode = true;
+                None
+            }
+            XBoardCommand::Hint => {
+                if let Some(mv) = self.get_hint() {
+                    Some(output::format_hint(&self.board, &mv))
+                } else {
+                    None
+                }
+            }
+            XBoardCommand::Post => {
+                self.post_thinking = true;
+                None
+            }
+            XBoardCommand::NoPost => {
+                self.post_thinking = false;
+                None
+            }
+            XBoardCommand::Hard => {
+                self.pondering_enabled = true;
+                None
+            }
+            XBoardCommand::Easy => {
+                self.pondering_enabled = false;
+                None
+            }
+            XBoardCommand::Draw => {
+                // For now, always decline draws
+                // Could check if position is drawn and accept
+                None
+            }
+            XBoardCommand::Name(name) => {
+                self.opponent_name = Some(name);
+                None
+            }
+            XBoardCommand::Memory(mb) => {
+                self.stop_ponder();
+                if let Ok(mut state) = self.state.lock() {
+                    state.reset_tables(mb as usize);
+                }
+                None
+            }
+            XBoardCommand::Cores(_n) => {
+                // Single-threaded engine, ignore
+                None
+            }
+            XBoardCommand::Computer | XBoardCommand::Random => None,
+            XBoardCommand::Quit => {
+                std::process::exit(0);
+            }
+            XBoardCommand::Edit
+            | XBoardCommand::EditDone
+            | XBoardCommand::ClearBoard
+            | XBoardCommand::EditPiece(_)
+            | XBoardCommand::EditColor(_) => {
+                // Edit mode not fully implemented
+                None
+            }
+            XBoardCommand::Analyze | XBoardCommand::ExitAnalyze => {
+                // Analyze mode not implemented
+                None
+            }
+            XBoardCommand::Unknown(s) => {
+                Some(format_error(&s, "unknown command"))
+            }
+        }
+    }
+
+    /// Handle a user move (in SAN or coordinate notation).
+    fn handle_user_move(&mut self, mv_str: &str) -> Option<String> {
+        // Stop any ongoing ponder
+        self.stop_ponder();
+
+        // Try SAN first, then coordinate notation
+        let mv = self.board.parse_san(mv_str)
+            .or_else(|_| self.board.parse_move(mv_str));
+
+        match mv {
+            Ok(mv) => {
+                let info = self.board.make_move(&mv);
+                self.move_history.push((mv, info));
+                None
+            }
+            Err(_) => Some(format_illegal_move(mv_str)),
+        }
+    }
+
+    /// Check if the engine should think now.
+    fn should_think(&self) -> bool {
+        if self.force_mode {
+            return false;
+        }
+        match self.engine_color {
+            Some(color) => self.board.side_to_move() == color,
+            None => false,
+        }
+    }
+
+    /// Think and return the search result with best move and ponder move.
+    fn think(&mut self) -> Option<SearchResult> {
+        // Stop any ongoing ponder
+        self.stop_ponder();
+
+        self.stop_flag.store(false, Ordering::SeqCst);
+
+        let mut state = self.state.lock().ok()?;
+
+        // Calculate time to use
+        if let Some(time_cs) = self.time_per_move_cs {
+            // Fixed time per move
+            let time_ms = u64::from(time_cs) * 10;
+            let start = Instant::now();
+            let deadline = start + Duration::from_millis(time_ms);
+            let clock = Arc::new(SearchClock::new(start, Some(deadline), Some(deadline)));
+            let limits = SearchLimits {
+                clock,
+                stop: self.stop_flag.clone(),
+            };
+            Some(find_best_move_with_time_and_ponder(
+                &mut self.board,
+                &mut state,
+                &limits,
+            ))
+        } else if self.engine_time_cs > 0 {
+            // Use time control - allocate a portion of remaining time
+            let time_ms = self.engine_time_cs * 10;
+            let inc_ms = u64::from(self.increment_sec) * 1000;
+            // Simple time allocation: use ~5% of remaining time + increment
+            let allocated_ms = time_ms / 20 + inc_ms;
+            let start = Instant::now();
+            let soft_deadline = start + Duration::from_millis(allocated_ms);
+            let hard_deadline = start + Duration::from_millis(allocated_ms * 3);
+            let clock = Arc::new(SearchClock::new(start, Some(soft_deadline), Some(hard_deadline)));
+            let limits = SearchLimits {
+                clock,
+                stop: self.stop_flag.clone(),
+            };
+            Some(find_best_move_with_time_and_ponder(
+                &mut self.board,
+                &mut state,
+                &limits,
+            ))
+        } else {
+            // Fixed depth
+            Some(find_best_move_with_ponder(
+                &mut self.board,
+                &mut state,
+                self.max_depth,
+                &self.stop_flag,
+            ))
+        }
+    }
+
+    /// Get a hint (quick search).
+    fn get_hint(&mut self) -> Option<Move> {
+        let mut state = self.state.lock().ok()?;
+        find_best_move(&mut self.board, &mut state, 4, &self.stop_flag)
+    }
+}
+
+/// Entry point for `XBoard` mode.
+pub fn run_xboard() {
+    let mut handler = XBoardHandler::new();
+    handler.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_command() {
+        let mut handler = XBoardHandler::new();
+        handler.handle_command(XBoardCommand::New);
+        assert!(!handler.force_mode);
+        assert_eq!(handler.engine_color, Some(Color::Black));
+    }
+
+    #[test]
+    fn test_force_command() {
+        let mut handler = XBoardHandler::new();
+        handler.handle_command(XBoardCommand::Force);
+        assert!(handler.force_mode);
+    }
+
+    #[test]
+    fn test_usermove() {
+        let mut handler = XBoardHandler::new();
+        handler.handle_command(XBoardCommand::Force);
+        let result = handler.handle_command(XBoardCommand::UserMove("e4".to_string()));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_protover() {
+        let mut handler = XBoardHandler::new();
+        let result = handler.handle_command(XBoardCommand::Protover(2));
+        assert!(result.is_some());
+        let features = result.unwrap();
+        assert!(features.contains("setboard=1"));
+    }
+
+    #[test]
+    fn test_ping_pong() {
+        let mut handler = XBoardHandler::new();
+        let result = handler.handle_command(XBoardCommand::Ping(42));
+        assert_eq!(result, Some("pong 42".to_string()));
+    }
+
+    #[test]
+    fn test_setboard() {
+        let mut handler = XBoardHandler::new();
+        let result = handler.handle_command(XBoardCommand::SetBoard(
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1".to_string()
+        ));
+        assert!(result.is_none());
+        assert!(!handler.board.white_to_move());
+    }
+}

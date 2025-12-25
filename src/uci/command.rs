@@ -29,6 +29,7 @@ pub struct GoParams {
     pub infinite: bool,
 }
 
+#[must_use] 
 pub fn parse_go_params(parts: &[&str]) -> GoParams {
     let mut params = GoParams::default();
     let mut i = 1;
@@ -84,6 +85,7 @@ pub fn parse_go_params(parts: &[&str]) -> GoParams {
     params
 }
 
+#[must_use] 
 pub fn parse_uci_command(line: &str) -> Option<UciCommand> {
     let trimmed = line.trim();
     if trimmed.is_empty() {

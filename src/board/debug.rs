@@ -1,43 +1,8 @@
-use super::{format_square, Bitboard, Board, Color, Piece, Square};
+use super::{Bitboard, Board, Color, Piece};
 
 #[cfg(debug_assertions)]
 impl Board {
-    pub fn print(&self) {
-        println!("  +---+---+---+---+---+---+---+---+");
-        for rank in (0..8).rev() {
-            print!("{} |", rank + 1);
-            for file in 0..8 {
-                let piece_char = match self.piece_at(Square(rank, file)) {
-                    Some((Color::White, Piece::Pawn)) => 'P',
-                    Some((Color::White, Piece::Knight)) => 'N',
-                    Some((Color::White, Piece::Bishop)) => 'B',
-                    Some((Color::White, Piece::Rook)) => 'R',
-                    Some((Color::White, Piece::Queen)) => 'Q',
-                    Some((Color::White, Piece::King)) => 'K',
-                    Some((Color::Black, Piece::Pawn)) => 'p',
-                    Some((Color::Black, Piece::Knight)) => 'n',
-                    Some((Color::Black, Piece::Bishop)) => 'b',
-                    Some((Color::Black, Piece::Rook)) => 'r',
-                    Some((Color::Black, Piece::Queen)) => 'q',
-                    Some((Color::Black, Piece::King)) => 'k',
-                    None => ' ',
-                };
-                print!(" {} |", piece_char);
-            }
-            println!("\n  +---+---+---+---+---+---+---+---+");
-        }
-        println!("    a   b   c   d   e   f   g   h");
-        println!(
-            "Turn: {}",
-            if self.white_to_move { "White" } else { "Black" }
-        );
-        if let Some(ep_target) = self.en_passant_target {
-            println!("EP Target: {}", format_square(ep_target));
-        }
-        println!("Castling mask: {:#06b}", self.castling_rights);
-        println!("------------------------------------");
-    }
-
+    /// Debug helper to print all bitboard values
     pub fn debug_bitboards(&self) {
         let colors = [Color::White, Color::Black];
         let pieces = [
@@ -55,7 +20,7 @@ impl Board {
         );
         println!("Castling mask: {:#06b}", self.castling_rights);
         if let Some(ep_target) = self.en_passant_target {
-            println!("EP Target: {}", format_square(ep_target));
+            println!("EP Target: {ep_target}");
         }
         println!("All occupied: {:#018x}", self.all_occupied.0);
 
@@ -67,7 +32,7 @@ impl Board {
             };
             for (piece, name) in pieces {
                 let bb = self.pieces[color.index()][piece.index()].0;
-                println!("{} {}: {:#018x}", label, name, bb);
+                println!("{label} {name}: {bb:#018x}");
             }
         }
         println!("------------------------------------");
@@ -81,7 +46,7 @@ impl Board {
             for file in 0..8 {
                 let idx = (rank * 8 + file) as u8;
                 let ch = if (bb.0 >> idx) & 1 == 1 { '1' } else { '.' };
-                print!(" {} |", ch);
+                print!(" {ch} |");
             }
             println!("\n  +---+---+---+---+---+---+---+---+");
         }

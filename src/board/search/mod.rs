@@ -17,8 +17,17 @@ use std::time::Instant;
 
 use crate::tt::TranspositionTable;
 
-use super::{Board, Color, Move, MoveList, MAX_PLY};
+use super::{Board, Move, MAX_PLY};
 pub use params::SearchParams;
+
+/// Result of a search containing best move and ponder move
+#[derive(Debug, Clone, Copy)]
+pub struct SearchResult {
+    /// The best move found
+    pub best_move: Option<Move>,
+    /// The expected opponent reply (for pondering)
+    pub ponder_move: Option<Move>,
+}
 
 /// Default transposition table size in MB
 pub const DEFAULT_TT_MB: usize = 1024;
@@ -57,6 +66,7 @@ pub struct SearchTables {
 
 impl SearchTables {
     /// MVV-LVA score for a capture move
+    #[must_use] 
     pub fn mvv_lva_score(&self, mv: &Move) -> i32 {
         let captured = match mv.captured_piece {
             Some(piece) => move_order::piece_value(piece),
@@ -67,9 +77,10 @@ impl SearchTables {
     }
 
     /// Get history score for a move
+    #[must_use] 
     pub fn history_score(&self, mv: &Move) -> i32 {
-        let from = mv.from.index().0 as usize;
-        let to = mv.to.index().0 as usize;
+        let from = mv.from.index().as_usize();
+        let to = mv.to.index().as_usize();
         let idx = from * 64 + to;
         if idx < self.history.len() {
             self.history[idx]
@@ -80,8 +91,8 @@ impl SearchTables {
 
     /// Update history on beta cutoff
     pub fn update_history(&mut self, mv: &Move, depth: u32) {
-        let from = mv.from.index().0 as usize;
-        let to = mv.to.index().0 as usize;
+        let from = mv.from.index().as_usize();
+        let to = mv.to.index().as_usize();
         let idx = from * 64 + to;
         if idx < self.history.len() {
             self.history[idx] = self.history[idx].saturating_add((depth * depth * depth) as i32);
@@ -106,6 +117,7 @@ pub struct SearchState {
 }
 
 impl SearchState {
+    #[must_use] 
     pub fn new(tt_mb: usize) -> Self {
         SearchState {
             stats: SearchStats {
@@ -147,6 +159,7 @@ impl SearchState {
         &mut self.params
     }
 
+    #[must_use] 
     pub fn params(&self) -> &SearchParams {
         &self.params
     }
@@ -155,6 +168,7 @@ impl SearchState {
         self.params = params;
     }
 
+    #[must_use] 
     pub fn trace(&self) -> bool {
         self.trace
     }
@@ -168,6 +182,7 @@ impl SearchState {
         self.stats.reset_search();
     }
 
+    #[must_use] 
     pub fn hashfull_per_mille(&self) -> u32 {
         self.tables.tt.hashfull_per_mille()
     }
@@ -193,6 +208,7 @@ pub struct SearchClock {
 }
 
 impl SearchClock {
+    #[must_use] 
     pub fn new(
         start_time: Instant,
         soft_deadline: Option<Instant>,
@@ -230,58 +246,24 @@ impl SearchClock {
     }
 }
 
-/// Context for an active search
-pub struct SearchContext<'a> {
-    pub board: &'a mut Board,
-    pub state: &'a mut SearchState,
-    pub stop: &'a AtomicBool,
-    pub start_time: Instant,
-}
+/// Extract ponder move by making best move and probing TT
+fn extract_ponder_move(board: &mut Board, state: &SearchState, best_move: Move) -> Option<Move> {
+    // Make the best move temporarily
+    let info = board.make_move(&best_move);
 
-/// Terminal game state
-pub enum TerminalState {
-    Checkmate,
-    Stalemate,
-    Draw,
-}
+    // Probe TT for opponent's expected reply
+    let ponder = state.tables.tt.probe(board.hash).and_then(|entry| {
+        entry.best_move().filter(|mv| {
+            // Verify move is legal
+            let moves = board.generate_moves();
+            moves.iter().any(|m| m == mv)
+        })
+    });
 
-/// Position wrapper for external API
-pub struct Position<'a> {
-    board: &'a mut Board,
-}
+    // Unmake the move
+    board.unmake_move(&best_move, info);
 
-impl<'a> Position<'a> {
-    pub fn new(board: &'a mut Board) -> Self {
-        Position { board }
-    }
-
-    pub fn side_to_move(&self) -> Color {
-        if self.board.white_to_move {
-            Color::White
-        } else {
-            Color::Black
-        }
-    }
-
-    pub fn legal_moves(&mut self) -> MoveList {
-        self.board.generate_moves()
-    }
-
-    pub fn terminal_state(&mut self) -> Option<TerminalState> {
-        if self.board.is_draw() {
-            return Some(TerminalState::Draw);
-        }
-        let in_check = self.board.is_in_check(self.board.current_color());
-        let legal_moves = self.board.generate_moves();
-        if legal_moves.is_empty() {
-            return Some(if in_check {
-                TerminalState::Checkmate
-            } else {
-                TerminalState::Stalemate
-            });
-        }
-        None
-    }
+    ponder
 }
 
 /// Find best move with fixed depth limit
@@ -294,18 +276,40 @@ pub fn find_best_move(
     simple::simple_search(board, state, max_depth, 0, 0, stop)
 }
 
+/// Find best move with fixed depth limit, returning ponder move too
+pub fn find_best_move_with_ponder(
+    board: &mut Board,
+    state: &mut SearchState,
+    max_depth: u32,
+    stop: &AtomicBool,
+) -> SearchResult {
+    let best_move = simple::simple_search(board, state, max_depth, 0, 0, stop);
+    let ponder_move = best_move.and_then(|mv| extract_ponder_move(board, state, mv));
+    SearchResult { best_move, ponder_move }
+}
+
 /// Find best move with time control
 pub fn find_best_move_with_time(
     board: &mut Board,
     state: &mut SearchState,
-    limits: SearchLimits,
+    limits: &SearchLimits,
 ) -> Option<Move> {
     // Calculate time limit from clock
     let (_, soft_deadline, _) = limits.clock.snapshot();
     let time_limit_ms = soft_deadline
-        .map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.saturating_duration_since(Instant::now()).as_millis() as u64);
 
     // Max depth of 64 for time-based search
     simple::simple_search(board, state, 64, time_limit_ms, 0, &limits.stop)
+}
+
+/// Find best move with time control, returning ponder move too
+pub fn find_best_move_with_time_and_ponder(
+    board: &mut Board,
+    state: &mut SearchState,
+    limits: &SearchLimits,
+) -> SearchResult {
+    let best_move = find_best_move_with_time(board, state, limits);
+    let ponder_move = best_move.and_then(|mv| extract_ponder_move(board, state, mv));
+    SearchResult { best_move, ponder_move }
 }

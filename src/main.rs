@@ -7,15 +7,22 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Search thread stack size (32 MB)
+const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
+/// Default depth limit when searching by nodes
+const NODE_SEARCH_DEFAULT_DEPTH: u32 = 64;
+/// Fallback time allocation when no time control is specified
+const FALLBACK_TIME_SECS: u64 = 5;
+
 use chess_engine::board::{
-    find_best_move, find_best_move_with_time, Board, SearchClock, SearchLimits, SearchState,
-    DEFAULT_TT_MB,
+    find_best_move_with_ponder, find_best_move_with_time_and_ponder, Board, SearchClock,
+    SearchLimits, SearchResult, SearchState, DEFAULT_TT_MB,
 };
 use chess_engine::uci::command::{parse_go_params, parse_uci_command, GoParams, UciCommand};
 use chess_engine::uci::options::{parse_setoption, UciOptionAction, UciOptions};
 use chess_engine::uci::parse_position_command;
 use chess_engine::uci::print::{print_perft_info, print_time_info};
-use chess_engine::uci::report::{print_bestmove, print_ready};
+use chess_engine::uci::report::{print_bestmove_with_ponder, print_ready};
 use chess_engine::uci::time::compute_time_limits;
 
 /// Active search job state
@@ -39,7 +46,7 @@ struct UciState {
 impl Default for UciState {
     fn default() -> Self {
         UciState {
-            time_left: Duration::from_secs(5), // fallback
+            time_left: Duration::from_secs(FALLBACK_TIME_SECS),
             inc: Duration::ZERO,
             movetime: None,
             debug: false,
@@ -103,7 +110,7 @@ fn handle_go(
     let go_infinite = params.infinite;
 
     if nodes.is_some() && depth.is_none() {
-        depth = Some(64);
+        depth = Some(NODE_SEARCH_DEFAULT_DEPTH);
     }
 
     stop_search(current_job);
@@ -184,24 +191,26 @@ fn handle_go(
 
     let handle = thread::Builder::new()
         .name("search".to_string())
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(SEARCH_STACK_SIZE)
         .spawn(move || {
             let mut guard = search_clone.lock().unwrap();
-            let best_move = if let Some(d) = depth {
-                find_best_move(&mut search_board, &mut guard, d, &stop_clone)
+            let result: SearchResult = if let Some(d) = depth {
+                find_best_move_with_ponder(&mut search_board, &mut guard, d, &stop_clone)
             } else {
                 let limits = SearchLimits {
-                    clock: clock_clone,
-                    stop: stop_clone,
+                    clock: clock_clone.clone(),
+                    stop: stop_clone.clone(),
                 };
-                find_best_move_with_time(&mut search_board, &mut guard, limits)
+                find_best_move_with_time_and_ponder(&mut search_board, &mut guard, &limits)
             };
 
-            if pondering_clone.load(Ordering::Relaxed) {
-                return;
+            // Wait while pondering (unless stopped)
+            // This handles the case where search completes before ponderhit
+            while pondering_clone.load(Ordering::Relaxed) && !stop_clone.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(10));
             }
 
-            if best_move.is_none() {
+            if result.best_move.is_none() {
                 if search_board.is_checkmate() {
                     println!("info score mate -1");
                 } else if search_board.is_stalemate() || search_board.is_draw() {
@@ -209,7 +218,7 @@ fn handle_go(
                 }
             }
 
-            print_bestmove(best_move);
+            print_bestmove_with_ponder(result);
         })
         .expect("failed to spawn search thread");
 
@@ -258,11 +267,23 @@ fn handle_ponderhit(current_job: &mut Option<SearchJob>) {
     if let Some(job) = current_job {
         if job.pondering.load(Ordering::Relaxed) {
             let start = Instant::now();
+            let hard_deadline = start + Duration::from_millis(job.planned_hard_time_ms);
             job.clock.reset(
                 start,
                 Some(start + Duration::from_millis(job.planned_soft_time_ms)),
-                Some(start + Duration::from_millis(job.planned_hard_time_ms)),
+                Some(hard_deadline),
             );
+
+            // Spawn timer thread to enforce hard deadline
+            let stop_timer = Arc::clone(&job.stop);
+            thread::spawn(move || {
+                let now = Instant::now();
+                if hard_deadline > now {
+                    thread::sleep(hard_deadline - now);
+                }
+                stop_timer.store(true, Ordering::Relaxed);
+            });
+
             job.pondering.store(false, Ordering::Relaxed);
         }
     }
@@ -333,7 +354,27 @@ fn handle_command(
     true
 }
 
-fn main() {
+/// Protocol to use for communication
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    Uci,
+    XBoard,
+    Auto,
+}
+
+fn parse_args() -> Protocol {
+    let args: Vec<String> = std::env::args().collect();
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "--uci" | "-u" => return Protocol::Uci,
+            "--xboard" | "-x" => return Protocol::XBoard,
+            _ => {}
+        }
+    }
+    Protocol::Auto
+}
+
+fn run_uci() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut board = Board::new();
@@ -362,5 +403,77 @@ fn main() {
         }
 
         stdout.flush().unwrap();
+    }
+}
+
+fn main() {
+    let protocol = parse_args();
+
+    match protocol {
+        Protocol::Uci => run_uci(),
+        Protocol::XBoard => chess_engine::xboard::run_xboard(),
+        Protocol::Auto => {
+            // Auto-detect based on first command
+            let stdin = io::stdin();
+            let mut first_line = String::new();
+            if stdin.read_line(&mut first_line).is_ok() {
+                let trimmed = first_line.trim();
+                if trimmed == "xboard" || trimmed.starts_with("protover") {
+                    // XBoard mode - process first command and continue
+                    let mut handler = chess_engine::xboard::XBoardHandler::new();
+                    if let Some(cmd) = chess_engine::xboard::command::parse_xboard_command(trimmed) {
+                        if let Some(response) = handler.handle_command(cmd) {
+                            for line in response.lines() {
+                                println!("{line}");
+                            }
+                        }
+                    }
+                    handler.run();
+                } else {
+                    // UCI mode - process first command and continue
+                    let mut stdout = io::stdout();
+                    let mut board = Board::new();
+                    let mut options = UciOptions::new(DEFAULT_TT_MB);
+                    let search = Arc::new(Mutex::new(SearchState::new(options.hash_mb)));
+                    let mut current_job: Option<SearchJob> = None;
+                    let mut uci_state = UciState::default();
+
+                    // Handle first command
+                    if let Some(cmd) = parse_uci_command(trimmed) {
+                        handle_command(
+                            cmd,
+                            &mut board,
+                            &mut options,
+                            &search,
+                            &mut current_job,
+                            &mut uci_state,
+                        );
+                    }
+                    stdout.flush().unwrap();
+
+                    // Continue with remaining input
+                    for line in stdin.lock().lines() {
+                        let line = match line {
+                            Ok(value) => value,
+                            Err(_) => continue,
+                        };
+                        if let Some(cmd) = parse_uci_command(&line) {
+                            let keep_running = handle_command(
+                                cmd,
+                                &mut board,
+                                &mut options,
+                                &search,
+                                &mut current_job,
+                                &mut uci_state,
+                            );
+                            if !keep_running {
+                                break;
+                            }
+                        }
+                        stdout.flush().unwrap();
+                    }
+                }
+            }
+        }
     }
 }

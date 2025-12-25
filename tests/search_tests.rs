@@ -91,11 +91,12 @@ fn iterative_deepening_consistency() {
     assert!(moves.iter().any(|m| *m == best4.unwrap()), "Depth 4 move should be legal");
 }
 
-/// Test that search handles single legal move positions
+/// Test that search handles positions with only one legal move
 #[test]
 fn single_legal_move() {
-    // White king on a1 can only escape to a2
-    let mut board = Board::from_fen("8/8/8/8/8/8/8/K6rk w - - 0 1");
+    // White king on h1 in check from rook on h2, bishop on g3 covers h2
+    // Kg1 is the only legal move (Kxh2 is illegal - bishop controls h2, g2 controlled by rook)
+    let mut board = Board::from_fen("6k1/8/8/8/8/6b1/7r/7K w - - 0 1");
     let mut state = SearchState::new(16);
     let stop = AtomicBool::new(false);
 
@@ -104,7 +105,7 @@ fn single_legal_move() {
 
     let mv = best.unwrap();
     let uci = format_uci_move(&mv);
-    assert_eq!(uci, "a1a2", "Only legal move should be Ka2");
+    assert_eq!(uci, "h1g1", "Only legal move is Kg1");
 }
 
 /// Test that search returns None for checkmate position
