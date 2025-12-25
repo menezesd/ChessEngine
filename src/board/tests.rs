@@ -86,7 +86,7 @@ mod draw_tests {
 
     fn find_move(board: &mut Board, from: Square, to: Square, promotion: Option<Piece>) -> Move {
         for m in board.generate_moves().iter() {
-            if m.from == from && m.to == to && m.promotion == promotion {
+            if m.from() == from && m.to() == to && m.promotion() == promotion {
                 return *m;
             }
         }
@@ -193,7 +193,7 @@ mod engine_tests {
 
     fn find_move(board: &mut Board, from: Square, to: Square, promotion: Option<Piece>) -> Move {
         for m in board.generate_moves().iter() {
-            if m.from == from && m.to == to && m.promotion == promotion {
+            if m.from() == from && m.to() == to && m.promotion() == promotion {
                 return *m;
             }
         }
@@ -500,7 +500,7 @@ mod edge_case_tests {
         let moves = board.generate_moves();
 
         // Find knight promotion
-        let knight_promo = moves.iter().find(|m| m.promotion == Some(Piece::Knight));
+        let knight_promo = moves.iter().find(|m| m.promotion() == Some(Piece::Knight));
         assert!(knight_promo.is_some(), "Knight promotion should be available");
 
         // Make the move and verify
@@ -514,7 +514,7 @@ mod edge_case_tests {
         let mut board = Board::from_fen("8/P7/8/8/8/8/8/K1k5 w - - 0 1");
         let moves = board.generate_moves();
 
-        let rook_promo = moves.iter().find(|m| m.promotion == Some(Piece::Rook));
+        let rook_promo = moves.iter().find(|m| m.promotion() == Some(Piece::Rook));
         assert!(rook_promo.is_some(), "Rook promotion should be available");
     }
 
@@ -523,7 +523,7 @@ mod edge_case_tests {
         let mut board = Board::from_fen("8/P7/8/8/8/8/8/K1k5 w - - 0 1");
         let moves = board.generate_moves();
 
-        let bishop_promo = moves.iter().find(|m| m.promotion == Some(Piece::Bishop));
+        let bishop_promo = moves.iter().find(|m| m.promotion() == Some(Piece::Bishop));
         assert!(bishop_promo.is_some(), "Bishop promotion should be available");
     }
 
@@ -534,7 +534,7 @@ mod edge_case_tests {
         let moves = board.generate_moves();
 
         // Find en passant capture
-        let ep_move = moves.iter().find(|m| m.is_en_passant);
+        let ep_move = moves.iter().find(|m| m.is_en_passant());
         assert!(ep_move.is_some(), "En passant should be available");
 
         let mv = ep_move.unwrap();
@@ -556,7 +556,7 @@ mod edge_case_tests {
         let mut board = Board::from_fen("r3k2r/8/8/8/4Q3/8/8/R3K2R b KQkq - 0 1");
         let moves = board.generate_moves();
 
-        let castling_move = moves.iter().find(|m| m.is_castling);
+        let castling_move = moves.iter().find(|m| m.is_castling());
         assert!(castling_move.is_none(), "Castling should not be available when in check");
     }
 
@@ -567,10 +567,10 @@ mod edge_case_tests {
         let moves = board.generate_moves();
 
         // Kingside castling goes through f1 which is attacked
-        let _kingside = moves.iter().find(|m| m.is_castling && m.to.1 == 6);
+        let _kingside = moves.iter().find(|m| m.is_castling() && m.to().file() == 6);
         // Note: f1 might not be attacked in this position, let me use a better example
         // This test verifies the move generation logic
-        assert!(moves.iter().any(|m| m.is_castling), "Some castling should be available");
+        assert!(moves.iter().any(|m| m.is_castling()), "Some castling should be available");
     }
 
     #[test]
@@ -583,7 +583,7 @@ mod edge_case_tests {
         // In double check, only king can move
         for mv in moves.iter() {
             // All moves should be king moves (from d1)
-            assert_eq!(mv.from, Square(0, 3), "Only king should be able to move in double check");
+            assert_eq!(mv.from(), Square(0, 3), "Only king should be able to move in double check");
         }
     }
 
@@ -592,7 +592,7 @@ mod edge_case_tests {
         let mut board = Board::from_fen("6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1");
         // Move rook to a8
         let moves = board.generate_moves();
-        let mate_move = moves.iter().find(|m| m.from == Square(0, 0) && m.to == Square(7, 0));
+        let mate_move = moves.iter().find(|m| m.from() == Square(0, 0) && m.to() == Square(7, 0));
         assert!(mate_move.is_some());
 
         board.make_move(mate_move.unwrap());
@@ -639,58 +639,51 @@ mod edge_case_tests {
     #[test]
     fn test_move_convenience_methods() {
         // Quiet move
-        let quiet = Move {
-            from: Square(1, 4),
-            to: Square(3, 4),
-            is_castling: false,
-            is_en_passant: false,
-            promotion: None,
-            captured_piece: None,
-        };
+        let quiet = Move::quiet(Square(1, 4), Square(3, 4));
         assert!(quiet.is_quiet());
         assert!(!quiet.is_capture());
         assert!(!quiet.is_promotion());
         assert!(!quiet.is_tactical());
 
+        // Double pawn push (also quiet)
+        let double_pawn = Move::double_pawn_push(Square(1, 4), Square(3, 4));
+        assert!(double_pawn.is_quiet());
+        assert!(double_pawn.is_double_pawn_push());
+
         // Capture
-        let capture = Move {
-            from: Square(3, 3),
-            to: Square(4, 4),
-            is_castling: false,
-            is_en_passant: false,
-            promotion: None,
-            captured_piece: Some(Piece::Pawn),
-        };
+        let capture = Move::capture(Square(3, 3), Square(4, 4));
         assert!(!capture.is_quiet());
         assert!(capture.is_capture());
         assert!(!capture.is_promotion());
         assert!(capture.is_tactical());
 
         // Promotion
-        let promo = Move {
-            from: Square(6, 0),
-            to: Square(7, 0),
-            is_castling: false,
-            is_en_passant: false,
-            promotion: Some(Piece::Queen),
-            captured_piece: None,
-        };
+        let promo = Move::new_promotion(Square(6, 0), Square(7, 0), Piece::Queen);
         assert!(!promo.is_quiet());
         assert!(!promo.is_capture());
         assert!(promo.is_promotion());
         assert!(promo.is_tactical());
+        assert_eq!(promo.promotion(), Some(Piece::Queen));
+
+        // Promotion capture
+        let promo_cap = Move::new_promotion_capture(Square(6, 0), Square(7, 1), Piece::Queen);
+        assert!(!promo_cap.is_quiet());
+        assert!(promo_cap.is_capture());
+        assert!(promo_cap.is_promotion());
+        assert!(promo_cap.is_tactical());
 
         // Castling (special, not quiet)
-        let castle = Move {
-            from: Square(0, 4),
-            to: Square(0, 6),
-            is_castling: true,
-            is_en_passant: false,
-            promotion: None,
-            captured_piece: None,
-        };
+        let castle = Move::castle_kingside(Square(0, 4), Square(0, 6));
         assert!(!castle.is_quiet());
         assert!(!castle.is_capture());
+        assert!(castle.is_castling());
+        assert!(castle.is_castle_kingside());
+
+        // En passant
+        let ep = Move::en_passant(Square(4, 4), Square(5, 5));
+        assert!(!ep.is_quiet());
+        assert!(ep.is_capture());
+        assert!(ep.is_en_passant());
     }
 
     #[test]

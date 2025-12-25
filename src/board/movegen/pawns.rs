@@ -4,7 +4,7 @@ impl Board {
     /// Add promotion moves for a pawn reaching the back rank
     fn add_promotions(&self, from: Square, to: Square, moves: &mut MoveList) {
         for promo in PROMOTION_PIECES {
-            moves.push(self.create_move(from, to, Some(promo), false, false));
+            moves.push(self.create_move(from, to, Some(promo), false, false, false));
         }
     }
 
@@ -38,11 +38,11 @@ impl Board {
                     if target_sq.0 == promotion_rank {
                         self.add_promotions(from, target_sq, moves);
                     } else {
-                        moves.push(self.create_move(from, target_sq, None, false, false));
+                        moves.push(self.create_move(from, target_sq, None, false, false, false));
                     }
                 }
             } else if Some(target_sq) == self.en_passant_target {
-                moves.push(self.create_move(from, target_sq, None, false, true));
+                moves.push(self.create_move(from, target_sq, None, false, true, false));
             }
         }
     }
@@ -69,13 +69,13 @@ impl Board {
                 if forward_sq.0 == promotion_rank {
                     self.add_promotions(from, forward_sq, &mut moves);
                 } else {
-                    moves.push(self.create_move(from, forward_sq, None, false, false));
+                    moves.push(self.create_move(from, forward_sq, None, false, false, false));
                     // Double push from starting rank
                     if r == start_rank as isize {
                         let double_forward_r = r + 2 * dir;
                         let double_forward_sq = Square(double_forward_r as usize, f as usize);
                         if self.is_empty(double_forward_sq) {
-                            moves.push(self.create_move(from, double_forward_sq, None, false, false));
+                            moves.push(self.create_move(from, double_forward_sq, None, false, false, true));
                         }
                     }
                 }

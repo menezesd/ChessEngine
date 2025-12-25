@@ -12,7 +12,7 @@ impl Board {
 
         for to_idx in targets.iter() {
             let to_sq = Square::from_index(to_idx);
-            moves.push(self.create_move(from, to_sq, None, false, false));
+            moves.push(self.create_move(from, to_sq, None, false, false, false));
         }
 
         if from == Square(back_rank, 4) {
@@ -22,7 +22,7 @@ impl Board {
                 && self.piece_at(Square(back_rank, 7)) == Some((color, Piece::Rook))
             {
                 let to_sq = Square(back_rank, 6);
-                moves.push(self.create_move(from, to_sq, None, true, false));
+                moves.push(self.create_move(from, to_sq, None, true, false, false));
             }
             if self.has_castling_right(color, 'Q')
                 && self.is_empty(Square(back_rank, 1))
@@ -31,7 +31,7 @@ impl Board {
                 && self.piece_at(Square(back_rank, 0)) == Some((color, Piece::Rook))
             {
                 let to_sq = Square(back_rank, 2);
-                moves.push(self.create_move(from, to_sq, None, true, false));
+                moves.push(self.create_move(from, to_sq, None, true, false, false));
             }
         }
 

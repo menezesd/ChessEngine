@@ -83,7 +83,7 @@ pub fn try_parse_position_command(board: &mut Board, parts: &[&str]) -> Result<(
                 move_str: parts[i].to_string(),
                 error: e,
             })?;
-            board.make_move(&mv);
+            board.make_move(mv);
             i += 1;
         }
     }

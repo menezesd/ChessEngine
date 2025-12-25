@@ -71,6 +71,7 @@ impl Board {
         }
     }
 
+    /// Create a move, determining the correct type based on context
     fn create_move(
         &self,
         from: Square,
@@ -78,22 +79,39 @@ impl Board {
         promotion: Option<Piece>,
         is_castling: bool,
         is_en_passant: bool,
+        is_double_pawn_push: bool,
     ) -> Move {
-        let captured_piece = if is_en_passant {
-            Some(Piece::Pawn)
-        } else if !is_castling {
-            self.piece_at(to).map(|(_, p)| p)
-        } else {
-            None
-        };
+        // Handle special move types
+        if is_en_passant {
+            return Move::en_passant(from, to);
+        }
 
-        Move {
-            from,
-            to,
-            is_castling,
-            is_en_passant,
-            promotion,
-            captured_piece,
+        if is_castling {
+            return if to.file() == 6 {
+                Move::castle_kingside(from, to)
+            } else {
+                Move::castle_queenside(from, to)
+            };
+        }
+
+        if is_double_pawn_push {
+            return Move::double_pawn_push(from, to);
+        }
+
+        // Check for promotion
+        if let Some(promo_piece) = promotion {
+            return if self.piece_at(to).is_some() {
+                Move::new_promotion_capture(from, to, promo_piece)
+            } else {
+                Move::new_promotion(from, to, promo_piece)
+            };
+        }
+
+        // Regular move - check for capture
+        if self.piece_at(to).is_some() {
+            Move::capture(from, to)
+        } else {
+            Move::quiet(from, to)
         }
     }
 
@@ -105,10 +123,12 @@ impl Board {
         let mut legal_moves = MoveList::new();
 
         for m in &pseudo_moves {
-            if m.is_castling {
-                let king_start_sq = m.from;
-                let king_mid_sq = Square(m.from.0, usize::midpoint(m.from.1, m.to.1));
-                let king_end_sq = m.to;
+            if m.is_castling() {
+                let king_start_sq = m.from();
+                let from = m.from();
+                let to = m.to();
+                let king_mid_sq = Square(from.rank(), usize::midpoint(from.file(), to.file()));
+                let king_end_sq = m.to();
 
                 if self.is_square_attacked(king_start_sq, opponent_color)
                     || self.is_square_attacked(king_mid_sq, opponent_color)
@@ -118,11 +138,11 @@ impl Board {
                 }
             }
 
-            let info = self.make_move(m);
+            let info = self.make_move(*m);
             if !self.is_in_check(current_color) {
                 legal_moves.push(*m);
             }
-            self.unmake_move(m, info);
+            self.unmake_move(*m, info);
         }
         legal_moves
     }
@@ -142,7 +162,7 @@ impl Board {
     /// Filter and collect capture moves from a piece's move list
     fn collect_captures(piece_moves: &MoveList, dest: &mut MoveList) {
         for m in piece_moves {
-            if m.captured_piece.is_some() {
+            if m.is_capture() {
                 dest.push(*m);
             }
         }
@@ -171,11 +191,11 @@ impl Board {
         // Filter for legality
         let mut legal_tactical_moves = MoveList::new();
         for m in &pseudo_tactical_moves {
-            let info = self.make_move(m);
+            let info = self.make_move(*m);
             if !self.is_in_check(current_color) {
                 legal_tactical_moves.push(*m);
             }
-            self.unmake_move(m, info);
+            self.unmake_move(*m, info);
         }
 
         legal_tactical_moves
@@ -194,9 +214,9 @@ impl Board {
 
         let mut nodes = 0;
         for m in &moves {
-            let info = self.make_move(m);
+            let info = self.make_move(*m);
             nodes += self.perft(depth - 1);
-            self.unmake_move(m, info);
+            self.unmake_move(*m, info);
         }
 
         nodes

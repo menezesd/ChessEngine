@@ -83,8 +83,8 @@ impl SimpleSearchContext<'_> {
                     KILLER1_SCORE
                 } else if ply < MAX_PLY && *m == self.state.tables.killer_moves[ply][1] {
                     KILLER2_SCORE
-                } else if m.captured_piece.is_some() {
-                    self.state.tables.mvv_lva_score(m)
+                } else if m.is_capture() {
+                    self.state.tables.mvv_lva_score(self.board, m)
                 } else {
                     self.state.tables.history_score(m)
                 };
@@ -118,18 +118,18 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Handle beta cutoff: update killers, history, and TT
-    fn handle_beta_cutoff(&mut self, m: &Move, ply: usize, depth: u32, score: i32, best_move: Move) {
+    fn handle_beta_cutoff(&mut self, m: Move, ply: usize, depth: u32, score: i32, best_move: Move) {
         // Update killers for quiet moves
-        if m.captured_piece.is_none() && ply < MAX_PLY {
+        if !m.is_capture() && ply < MAX_PLY {
             let killers = &mut self.state.tables.killer_moves[ply];
-            if killers[0] != *m {
+            if killers[0] != m {
                 killers[1] = killers[0];
-                killers[0] = *m;
+                killers[0] = m;
             }
         }
 
         // Update history
-        self.state.tables.update_history(m, depth);
+        self.state.tables.update_history(&m, depth);
 
         // Store in TT
         if !self.should_stop() && score.abs() < 29000 {
@@ -198,7 +198,7 @@ impl SimpleSearchContext<'_> {
         let mut sorted_moves: Vec<(Move, i32)> = moves
             .into_iter()
             .map(|m| {
-                let score = self.state.tables.mvv_lva_score(&m);
+                let score = self.state.tables.mvv_lva_score(self.board, &m);
                 (m, score)
             })
             .collect();
@@ -206,9 +206,9 @@ impl SimpleSearchContext<'_> {
 
         for (m, _) in sorted_moves {
             self.nodes += 1;
-            let info = self.board.make_move(&m);
+            let info = self.board.make_move(m);
             let score = -self.quiesce(-beta, -alpha, qdepth + 1);
-            self.board.unmake_move(&m, info);
+            self.board.unmake_move(m, info);
 
             if score >= beta {
                 return score;
@@ -308,12 +308,11 @@ impl SimpleSearchContext<'_> {
         let mut raised_alpha = false;
 
         for (i, (m, move_score)) in scored_moves.iter().enumerate() {
-            if self.should_stop() {
-                break;
-            }
-
-            let info = self.board.make_move(m);
-
+                            if self.should_stop() {
+                                break;
+                            }
+            
+                            let info = self.board.make_move(*m);
             let mut score: i32;
 
             // LMR: reduce late moves with low scores
@@ -330,7 +329,7 @@ impl SimpleSearchContext<'_> {
                 score = -self.alphabeta(depth - 1, -beta, -alpha, true);
             }
 
-            self.board.unmake_move(m, info);
+            self.board.unmake_move(*m, info);
 
             if score > best_score {
                 best_score = score;
@@ -338,7 +337,7 @@ impl SimpleSearchContext<'_> {
 
                 if score > alpha {
                     if score >= beta {
-                        self.handle_beta_cutoff(m, ply, depth, score, best_move);
+                        self.handle_beta_cutoff(*m, ply, depth, score, best_move);
                         return score;
                     }
                     alpha = score;

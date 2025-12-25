@@ -11,7 +11,7 @@ impl Board {
 
         for to_idx in targets.iter() {
             let to_sq = Square::from_index(to_idx);
-            moves.push(self.create_move(from, to_sq, None, false, false));
+            moves.push(self.create_move(from, to_sq, None, false, false, false));
         }
         moves
     }

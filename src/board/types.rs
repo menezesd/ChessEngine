@@ -533,81 +533,256 @@ impl Iterator for BitboardIter {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+// Move flags (4 bits, values 0-15)
+const FLAG_QUIET: u16 = 0;
+const FLAG_DOUBLE_PAWN: u16 = 1;
+const FLAG_CASTLE_KINGSIDE: u16 = 2;
+const FLAG_CASTLE_QUEENSIDE: u16 = 3;
+const FLAG_CAPTURE: u16 = 4;
+const FLAG_EN_PASSANT: u16 = 5;
+// 6-7 reserved
+const FLAG_PROMO_KNIGHT: u16 = 8;
+const FLAG_PROMO_BISHOP: u16 = 9;
+const FLAG_PROMO_ROOK: u16 = 10;
+const FLAG_PROMO_QUEEN: u16 = 11;
+const FLAG_PROMO_CAPTURE_KNIGHT: u16 = 12;
+const FLAG_PROMO_CAPTURE_BISHOP: u16 = 13;
+const FLAG_PROMO_CAPTURE_ROOK: u16 = 14;
+const FLAG_PROMO_CAPTURE_QUEEN: u16 = 15;
+
+/// Compact 16-bit move representation.
+///
+/// Encoding:
+/// - bits 0-5:   from square (0-63)
+/// - bits 6-11:  to square (0-63)
+/// - bits 12-15: flags (move type)
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct Move {
-    pub from: Square,
-    pub to: Square,
-    pub is_castling: bool,
-    pub is_en_passant: bool,
-    pub promotion: Option<Piece>,
-    pub captured_piece: Option<Piece>,
-}
+pub struct Move(u16);
 
 impl Move {
-    /// Create a null move (used for testing)
-    #[must_use]
-    pub fn null() -> Self {
-        Move {
-            from: Square(0, 0),
-            to: Square(0, 0),
-            is_castling: false,
-            is_en_passant: false,
-            promotion: None,
-            captured_piece: None,
-        }
-    }
-
-    /// Returns true if this move captures a piece
+    /// Create a null/empty move (used for initialization)
     #[inline]
     #[must_use]
-    pub const fn is_capture(&self) -> bool {
-        self.captured_piece.is_some()
+    pub const fn null() -> Self {
+        Move(0)
     }
 
-    /// Returns true if this move is a pawn promotion
+    /// Create a quiet move (no capture, no special flags)
     #[inline]
     #[must_use]
-    pub const fn is_promotion(&self) -> bool {
-        self.promotion.is_some()
+    pub const fn quiet(from: Square, to: Square) -> Self {
+        Move::with_flag(from, to, FLAG_QUIET)
     }
 
-    /// Returns true if this move is "quiet" (not a capture, promotion, or special move)
+    /// Create a capture move
     #[inline]
     #[must_use]
-    pub const fn is_quiet(&self) -> bool {
-        self.captured_piece.is_none()
-            && self.promotion.is_none()
-            && !self.is_castling
-            && !self.is_en_passant
+    pub const fn capture(from: Square, to: Square) -> Self {
+        Move::with_flag(from, to, FLAG_CAPTURE)
     }
 
-    /// Returns true if this move is tactical (capture or promotion)
+    /// Create a double pawn push move
     #[inline]
     #[must_use]
-    pub const fn is_tactical(&self) -> bool {
-        self.captured_piece.is_some() || self.promotion.is_some()
+    pub const fn double_pawn_push(from: Square, to: Square) -> Self {
+        Move::with_flag(from, to, FLAG_DOUBLE_PAWN)
+    }
+
+    /// Create an en passant capture
+    #[inline]
+    #[must_use]
+    pub const fn en_passant(from: Square, to: Square) -> Self {
+        Move::with_flag(from, to, FLAG_EN_PASSANT)
+    }
+
+    /// Create a kingside castle move
+    #[inline]
+    #[must_use]
+    pub const fn castle_kingside(from: Square, to: Square) -> Self {
+        Move::with_flag(from, to, FLAG_CASTLE_KINGSIDE)
+    }
+
+    /// Create a queenside castle move
+    #[inline]
+    #[must_use]
+    pub const fn castle_queenside(from: Square, to: Square) -> Self {
+        Move::with_flag(from, to, FLAG_CASTLE_QUEENSIDE)
+    }
+
+    /// Create a promotion move (non-capture)
+    #[inline]
+    #[must_use]
+    pub const fn new_promotion(from: Square, to: Square, piece: Piece) -> Self {
+        let flag = match piece {
+            Piece::Knight => FLAG_PROMO_KNIGHT,
+            Piece::Bishop => FLAG_PROMO_BISHOP,
+            Piece::Rook => FLAG_PROMO_ROOK,
+            _ => FLAG_PROMO_QUEEN, // Default to queen for invalid pieces
+        };
+        Move::with_flag(from, to, flag)
+    }
+
+    /// Create a promotion capture move
+    #[inline]
+    #[must_use]
+    pub const fn new_promotion_capture(from: Square, to: Square, piece: Piece) -> Self {
+        let flag = match piece {
+            Piece::Knight => FLAG_PROMO_CAPTURE_KNIGHT,
+            Piece::Bishop => FLAG_PROMO_CAPTURE_BISHOP,
+            Piece::Rook => FLAG_PROMO_CAPTURE_ROOK,
+            _ => FLAG_PROMO_CAPTURE_QUEEN, // Default to queen for invalid pieces
+        };
+        Move::with_flag(from, to, flag)
+    }
+
+    /// Create a move with a specific flag
+    #[inline]
+    const fn with_flag(from: Square, to: Square, flag: u16) -> Self {
+        let from_idx = (from.0 * 8 + from.1) as u16;
+        let to_idx = (to.0 * 8 + to.1) as u16;
+        Move(from_idx | (to_idx << 6) | (flag << 12))
+    }
+
+    /// Get the source square
+    #[inline]
+    #[must_use]
+    pub const fn from(self) -> Square {
+        let idx = (self.0 & 0x3F) as usize;
+        Square(idx / 8, idx % 8)
+    }
+
+    /// Get the destination square
+    #[inline]
+    #[must_use]
+    pub const fn to(self) -> Square {
+        let idx = ((self.0 >> 6) & 0x3F) as usize;
+        Square(idx / 8, idx % 8)
+    }
+
+    /// Get the flag bits
+    #[inline]
+    const fn flag(self) -> u16 {
+        self.0 >> 12
+    }
+
+    /// Returns true if this move captures a piece (including en passant)
+    #[inline]
+    #[must_use]
+    pub const fn is_capture(self) -> bool {
+        let f = self.flag();
+        f == FLAG_CAPTURE || f == FLAG_EN_PASSANT || f >= FLAG_PROMO_CAPTURE_KNIGHT
+    }
+
+    /// Returns true if this move is en passant
+    #[inline]
+    #[must_use]
+    pub const fn is_en_passant(self) -> bool {
+        self.flag() == FLAG_EN_PASSANT
+    }
+
+    /// Returns true if this move is castling (kingside or queenside)
+    #[inline]
+    #[must_use]
+    pub const fn is_castling(self) -> bool {
+        let f = self.flag();
+        f == FLAG_CASTLE_KINGSIDE || f == FLAG_CASTLE_QUEENSIDE
     }
 
     /// Returns true if this is kingside castling (O-O)
     #[inline]
     #[must_use]
-    pub const fn is_castle_kingside(&self) -> bool {
-        self.is_castling && self.to.file() == 6
+    pub const fn is_castle_kingside(self) -> bool {
+        self.flag() == FLAG_CASTLE_KINGSIDE
     }
 
     /// Returns true if this is queenside castling (O-O-O)
     #[inline]
     #[must_use]
-    pub const fn is_castle_queenside(&self) -> bool {
-        self.is_castling && self.to.file() == 2
+    pub const fn is_castle_queenside(self) -> bool {
+        self.flag() == FLAG_CASTLE_QUEENSIDE
+    }
+
+    /// Returns true if this move is a double pawn push
+    #[inline]
+    #[must_use]
+    pub const fn is_double_pawn_push(self) -> bool {
+        self.flag() == FLAG_DOUBLE_PAWN
+    }
+
+    /// Returns true if this move is a pawn promotion
+    #[inline]
+    #[must_use]
+    pub const fn is_promotion(self) -> bool {
+        self.flag() >= FLAG_PROMO_KNIGHT
+    }
+
+    /// Get the promotion piece, if this is a promotion move
+    #[inline]
+    #[must_use]
+    pub const fn promotion(self) -> Option<Piece> {
+        match self.flag() {
+            FLAG_PROMO_KNIGHT | FLAG_PROMO_CAPTURE_KNIGHT => Some(Piece::Knight),
+            FLAG_PROMO_BISHOP | FLAG_PROMO_CAPTURE_BISHOP => Some(Piece::Bishop),
+            FLAG_PROMO_ROOK | FLAG_PROMO_CAPTURE_ROOK => Some(Piece::Rook),
+            FLAG_PROMO_QUEEN | FLAG_PROMO_CAPTURE_QUEEN => Some(Piece::Queen),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this move is "quiet" (not a capture, promotion, or special move)
+    #[inline]
+    #[must_use]
+    pub const fn is_quiet(self) -> bool {
+        let f = self.flag();
+        f == FLAG_QUIET || f == FLAG_DOUBLE_PAWN
+    }
+
+    /// Returns true if this move is tactical (capture or promotion)
+    #[inline]
+    #[must_use]
+    pub const fn is_tactical(self) -> bool {
+        self.is_capture() || self.is_promotion()
+    }
+
+    /// Get the raw 16-bit value (for hashing/storage)
+    #[inline]
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        self.0
+    }
+
+    /// Create from raw 16-bit value
+    #[inline]
+    #[must_use]
+    pub const fn from_u16(value: u16) -> Self {
+        Move(value)
+    }
+}
+
+impl fmt::Debug for Move {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Move({}{}", self.from(), self.to())?;
+        if let Some(promo) = self.promotion() {
+            write!(f, "={}", promo.to_char().to_ascii_uppercase())?;
+        }
+        if self.is_capture() {
+            write!(f, " cap")?;
+        }
+        if self.is_castling() {
+            write!(f, " castle")?;
+        }
+        if self.is_en_passant() {
+            write!(f, " ep")?;
+        }
+        write!(f, ")")
     }
 }
 
 impl fmt::Display for Move {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.from, self.to)?;
-        if let Some(promo) = self.promotion {
+        write!(f, "{}{}", self.from(), self.to())?;
+        if let Some(promo) = self.promotion() {
             write!(f, "{}", promo.to_char())?;
         }
         Ok(())
@@ -616,14 +791,7 @@ impl fmt::Display for Move {
 
 pub(crate) const MAX_MOVES: usize = 256;
 pub(crate) const MAX_PLY: usize = 128;
-pub(crate) const EMPTY_MOVE: Move = Move {
-    from: Square(0, 0),
-    to: Square(0, 0),
-    is_castling: false,
-    is_en_passant: false,
-    promotion: None,
-    captured_piece: None,
-};
+pub(crate) const EMPTY_MOVE: Move = Move::null();
 
 #[derive(Clone, Debug)]
 pub struct MoveList {

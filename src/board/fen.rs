@@ -210,9 +210,9 @@ impl Board {
         // Find matching legal move
         let legal_moves = self.generate_moves();
         for legal_move in &legal_moves {
-            if legal_move.from == from_sq
-                && legal_move.to == to_sq
-                && legal_move.promotion == promotion
+            if legal_move.from() == from_sq
+                && legal_move.to() == to_sq
+                && legal_move.promotion() == promotion
             {
                 return Ok(*legal_move);
             }
@@ -237,7 +237,7 @@ impl Board {
     /// ```
     pub fn make_move_uci(&mut self, uci: &str) -> Result<Move, MoveParseError> {
         let mv = self.parse_move(uci)?;
-        self.make_move(&mv);
+        self.make_move(mv);
         Ok(mv)
     }
 }

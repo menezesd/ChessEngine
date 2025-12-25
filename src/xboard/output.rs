@@ -36,7 +36,7 @@ fn format_pv_san(board: &Board, pv: &[Move]) -> String {
     for mv in pv {
         let san = temp_board.move_to_san(mv);
         result.push(san);
-        temp_board.make_move(mv);
+        temp_board.make_move(*mv);
     }
 
     result.join(" ")

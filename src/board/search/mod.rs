@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crate::tt::TranspositionTable;
 
-use super::{Board, Move, MAX_PLY};
+use super::{Board, Move, Piece, MAX_PLY};
 pub use params::SearchParams;
 
 /// Result of a search containing best move and ponder move
@@ -66,10 +66,21 @@ pub struct SearchTables {
 
 impl SearchTables {
     /// MVV-LVA score for a capture move
-    #[must_use] 
-    pub fn mvv_lva_score(&self, mv: &Move) -> i32 {
-        let captured = match mv.captured_piece {
-            Some(piece) => move_order::piece_value(piece),
+    /// Looks up the captured piece from the board at the target square
+    #[must_use]
+    pub fn mvv_lva_score(&self, board: &Board, mv: &Move) -> i32 {
+        if !mv.is_capture() {
+            return 0;
+        }
+
+        // For en passant, captured piece is always a pawn
+        if mv.is_en_passant() {
+            return move_order::piece_value(Piece::Pawn) * 10;
+        }
+
+        // Look up what piece is on the target square
+        let captured = match board.piece_at(mv.to()) {
+            Some((_, piece)) => move_order::piece_value(piece),
             None => return 0,
         };
         // Simple MVV-LVA: prioritize capturing high-value pieces
@@ -77,10 +88,10 @@ impl SearchTables {
     }
 
     /// Get history score for a move
-    #[must_use] 
+    #[must_use]
     pub fn history_score(&self, mv: &Move) -> i32 {
-        let from = mv.from.index().as_usize();
-        let to = mv.to.index().as_usize();
+        let from = mv.from().index().as_usize();
+        let to = mv.to().index().as_usize();
         let idx = from * 64 + to;
         if idx < self.history.len() {
             self.history[idx]
@@ -91,8 +102,8 @@ impl SearchTables {
 
     /// Update history on beta cutoff
     pub fn update_history(&mut self, mv: &Move, depth: u32) {
-        let from = mv.from.index().as_usize();
-        let to = mv.to.index().as_usize();
+        let from = mv.from().index().as_usize();
+        let to = mv.to().index().as_usize();
         let idx = from * 64 + to;
         if idx < self.history.len() {
             self.history[idx] = self.history[idx].saturating_add((depth * depth * depth) as i32);
@@ -249,7 +260,7 @@ impl SearchClock {
 /// Extract ponder move by making best move and probing TT
 fn extract_ponder_move(board: &mut Board, state: &SearchState, best_move: Move) -> Option<Move> {
     // Make the best move temporarily
-    let info = board.make_move(&best_move);
+    let info = board.make_move(best_move);
 
     // Probe TT for opponent's expected reply
     let ponder = state.tables.tt.probe(board.hash).and_then(|entry| {
@@ -261,7 +272,7 @@ fn extract_ponder_move(board: &mut Board, state: &SearchState, best_move: Move) 
     });
 
     // Unmake the move
-    board.unmake_move(&best_move, info);
+    board.unmake_move(best_move, info);
 
     ponder
 }

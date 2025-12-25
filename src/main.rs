@@ -422,7 +422,7 @@ fn main() {
                     // XBoard mode - process first command and continue
                     let mut handler = chess_engine::xboard::XBoardHandler::new();
                     if let Some(cmd) = chess_engine::xboard::command::parse_xboard_command(trimmed) {
-                        if let Some(response) = handler.handle_command(cmd) {
+                        if let Some(response) = handler.handle_command(&cmd) {
                             for line in response.lines() {
                                 println!("{line}");
                             }

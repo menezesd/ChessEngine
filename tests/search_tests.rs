@@ -67,7 +67,7 @@ fn captures_free_piece() {
 
     let mv = best.unwrap();
     // Should capture with the bishop or find a strong tactical move
-    assert!(mv.captured_piece.is_some() || format_uci_move(&mv) == "c4f7",
+    assert!(mv.is_capture() || format_uci_move(&mv) == "c4f7",
             "Should capture material or threaten king");
 }
 

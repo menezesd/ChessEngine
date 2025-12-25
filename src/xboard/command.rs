@@ -92,6 +92,98 @@ pub enum XBoardCommand {
     Unknown(String),
 }
 
+fn parse_basic_command(cmd_str: &str) -> Option<XBoardCommand> {
+    match cmd_str {
+        "xboard" => Some(XBoardCommand::XBoard),
+        "new" => Some(XBoardCommand::New),
+        "go" => Some(XBoardCommand::Go),
+        "force" => Some(XBoardCommand::Force),
+        "playother" => Some(XBoardCommand::PlayOther),
+        "white" => Some(XBoardCommand::White),
+        "black" => Some(XBoardCommand::Black),
+        "undo" => Some(XBoardCommand::Undo),
+        "remove" => Some(XBoardCommand::Remove),
+        "hint" => Some(XBoardCommand::Hint),
+        "draw" => Some(XBoardCommand::Draw),
+        "edit" => Some(XBoardCommand::Edit),
+        "." => Some(XBoardCommand::EditDone),
+        "#" => Some(XBoardCommand::ClearBoard),
+        "computer" => Some(XBoardCommand::Computer),
+        "random" => Some(XBoardCommand::Random),
+        "post" => Some(XBoardCommand::Post),
+        "nopost" => Some(XBoardCommand::NoPost),
+        "hard" => Some(XBoardCommand::Hard),
+        "easy" => Some(XBoardCommand::Easy),
+        "analyze" => Some(XBoardCommand::Analyze),
+        "exit" => Some(XBoardCommand::ExitAnalyze),
+        "quit" => Some(XBoardCommand::Quit),
+        "?" => Some(XBoardCommand::MoveNow),
+        _ => None,
+    }
+}
+
+fn parse_arg_command(parts: &[&str]) -> Option<XBoardCommand> {
+    if parts.len() < 2 {
+        return None; // Command requires an argument but none is present
+    }
+    match parts[0] {
+        "protover" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Protover),
+        "accepted" => parts.get(1).map(|s| XBoardCommand::Accepted((*s).to_string())),
+        "rejected" => parts.get(1).map(|s| XBoardCommand::Rejected((*s).to_string())),
+        "time" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Time),
+        "otim" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::OTime),
+        "st" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::St),
+        "sd" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Sd),
+        "ping" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Ping),
+        "memory" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Memory),
+        "cores" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Cores),
+        "c" => parts.get(1).and_then(|v| v.chars().next()).map(XBoardCommand::EditColor),
+        _ => None,
+    }
+}
+
+fn parse_complex_command(trimmed: &str, parts: &[&str]) -> XBoardCommand {
+    match parts[0] {
+        "setboard" => {
+            let fen = parts[1..].join(" ");
+            XBoardCommand::SetBoard(fen)
+        }
+        "usermove" => {
+            let mv = parts.get(1).map_or(String::new(), |s| (*s).to_string());
+            XBoardCommand::UserMove(mv)
+        }
+        "level" => {
+            let mps = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let base = parts.get(2).and_then(|v| parse_time_control(v)).unwrap_or(0);
+            let inc = parts.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
+            XBoardCommand::Level {
+                moves_per_session: mps,
+                base_minutes: base,
+                increment_seconds: inc,
+            }
+        }
+        "result" => {
+            let result = parts[1..].join(" ");
+            XBoardCommand::Result(result)
+        }
+        "name" => {
+            let name = parts[1..].join(" ");
+            XBoardCommand::Name(name)
+        }
+        _ => {
+            // Check if it's a move (starts with lowercase letter or is "O-O")
+            if is_likely_move(parts[0]) {
+                XBoardCommand::UserMove(parts[0].to_string())
+            } else if parts[0].len() >= 2 && parts[0].chars().next().unwrap().is_ascii_uppercase() {
+                // Edit mode piece placement (e.g., "Pa2")
+                XBoardCommand::EditPiece(parts[0].to_string())
+            } else {
+                XBoardCommand::Unknown(trimmed.to_string())
+            }
+        }
+    }
+}
+
 /// Parse an `XBoard` command from a line of input
 #[must_use]
 pub fn parse_xboard_command(line: &str) -> Option<XBoardCommand> {
@@ -105,115 +197,17 @@ pub fn parse_xboard_command(line: &str) -> Option<XBoardCommand> {
         return None;
     }
 
-    let cmd = match parts[0] {
-        "xboard" => XBoardCommand::XBoard,
-        "protover" => {
-            let version = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(1);
-            XBoardCommand::Protover(version)
-        }
-        "accepted" => {
-            let feature = parts.get(1).map_or(String::new(), |s| (*s).to_string());
-            XBoardCommand::Accepted(feature)
-        }
-        "rejected" => {
-            let feature = parts.get(1).map_or(String::new(), |s| (*s).to_string());
-            XBoardCommand::Rejected(feature)
-        }
-        "new" => XBoardCommand::New,
-        "setboard" => {
-            // Collect the rest as FEN
-            let fen = parts[1..].join(" ");
-            XBoardCommand::SetBoard(fen)
-        }
-        "usermove" => {
-            let mv = parts.get(1).map_or(String::new(), |s| (*s).to_string());
-            XBoardCommand::UserMove(mv)
-        }
-        "go" => XBoardCommand::Go,
-        "force" => XBoardCommand::Force,
-        "playother" => XBoardCommand::PlayOther,
-        "white" => XBoardCommand::White,
-        "black" => XBoardCommand::Black,
-        "time" => {
-            let cs = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-            XBoardCommand::Time(cs)
-        }
-        "otim" => {
-            let cs = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-            XBoardCommand::OTime(cs)
-        }
-        "level" => {
-            let mps = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-            let base = parts.get(2).and_then(|v| parse_time_control(v)).unwrap_or(0);
-            let inc = parts.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
-            XBoardCommand::Level {
-                moves_per_session: mps,
-                base_minutes: base,
-                increment_seconds: inc,
-            }
-        }
-        "st" => {
-            let secs = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-            XBoardCommand::St(secs)
-        }
-        "sd" => {
-            let depth = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(64);
-            XBoardCommand::Sd(depth)
-        }
-        "?" => XBoardCommand::MoveNow,
-        "ping" => {
-            let n = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-            XBoardCommand::Ping(n)
-        }
-        "undo" => XBoardCommand::Undo,
-        "remove" => XBoardCommand::Remove,
-        "result" => {
-            let result = parts[1..].join(" ");
-            XBoardCommand::Result(result)
-        }
-        "hint" => XBoardCommand::Hint,
-        "draw" => XBoardCommand::Draw,
-        "edit" => XBoardCommand::Edit,
-        "." => XBoardCommand::EditDone,
-        "#" => XBoardCommand::ClearBoard,
-        "c" => XBoardCommand::EditColor('b'),
-        "computer" => XBoardCommand::Computer,
-        "random" => XBoardCommand::Random,
-        "post" => XBoardCommand::Post,
-        "nopost" => XBoardCommand::NoPost,
-        "hard" => XBoardCommand::Hard,
-        "easy" => XBoardCommand::Easy,
-        "name" => {
-            let name = parts[1..].join(" ");
-            XBoardCommand::Name(name)
-        }
-        "memory" => {
-            let mb = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(64);
-            XBoardCommand::Memory(mb)
-        }
-        "cores" => {
-            let n = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(1);
-            XBoardCommand::Cores(n)
-        }
-        "analyze" => XBoardCommand::Analyze,
-        "exit" => XBoardCommand::ExitAnalyze,
-        "quit" => XBoardCommand::Quit,
-        _ => {
-            // Check if it's a move (starts with lowercase letter or is "O-O")
-            if is_likely_move(parts[0]) {
-                XBoardCommand::UserMove(parts[0].to_string())
-            } else if parts[0].len() >= 2 && parts[0].chars().next().unwrap().is_ascii_uppercase() {
-                // Edit mode piece placement (e.g., "Pa2")
-                XBoardCommand::EditPiece(parts[0].to_string())
-            } else {
-                XBoardCommand::Unknown(trimmed.to_string())
-            }
-        }
-    };
+    if let Some(cmd) = parse_basic_command(parts[0]) {
+        return Some(cmd);
+    }
 
-    Some(cmd)
+    if let Some(cmd) = parse_arg_command(&parts) {
+        return Some(cmd);
+    }
+
+    // Now call the complex command parser
+    Some(parse_complex_command(trimmed, &parts))
 }
-
 /// Check if a string looks like a chess move
 fn is_likely_move(s: &str) -> bool {
     if s.is_empty() {
