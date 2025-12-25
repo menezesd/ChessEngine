@@ -63,6 +63,7 @@ impl Board {
 
         board.hash = board.calculate_initial_hash();
         board.repetition_counts.set(board.hash, 1);
+        board.recalculate_incremental_eval();
         board
     }
 

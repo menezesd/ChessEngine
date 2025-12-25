@@ -2,10 +2,17 @@ use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
 };
 
+use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
 use super::{
-    bit_for_square, castle_bit, color_index, piece_index, Board, Color, Move, NullMoveInfo, Piece,
+    bit_for_square, castle_bit, Board, Color, Move, NullMoveInfo, Piece,
     Square, UnmakeInfo,
 };
+
+/// Calculate PST square index for a given color
+#[inline]
+fn pst_sq(sq_idx: usize, is_white: bool) -> usize {
+    if is_white { sq_idx } else { sq_idx ^ 56 }
+}
 
 impl Board {
     pub(crate) fn current_color(&self) -> Color {
@@ -29,8 +36,8 @@ impl Board {
 
     pub(crate) fn set_piece(&mut self, sq: Square, color: Color, piece: Piece) {
         let bit = bit_for_square(sq).0;
-        let c_idx = color_index(color);
-        let p_idx = piece_index(piece);
+        let c_idx = color.index();
+        let p_idx = piece.index();
         self.pieces[c_idx][p_idx].0 |= bit;
         self.occupied[c_idx].0 |= bit;
         self.all_occupied.0 |= bit;
@@ -38,8 +45,8 @@ impl Board {
 
     pub(crate) fn remove_piece(&mut self, sq: Square, color: Color, piece: Piece) {
         let bit = bit_for_square(sq).0;
-        let c_idx = color_index(color);
-        let p_idx = piece_index(piece);
+        let c_idx = color.index();
+        let p_idx = piece.index();
         self.pieces[c_idx][p_idx].0 &= !bit;
         self.occupied[c_idx].0 &= !bit;
         self.all_occupied.0 &= !bit;
@@ -56,7 +63,7 @@ impl Board {
         } else {
             Color::Black
         };
-        let c_idx = color_index(color);
+        let c_idx = color.index();
         for p_idx in 0..6 {
             if self.pieces[c_idx][p_idx].0 & bit != 0 {
                 let piece = match p_idx {
@@ -123,10 +130,16 @@ impl Board {
         let previous_hash = self.hash;
 
         let color = self.current_color();
+        let c_idx = color.index();
+        let opp_idx = 1 - c_idx;
+        let is_white = color == Color::White;
 
         let previous_en_passant_target = self.en_passant_target;
         let previous_castling_rights = self.castling_rights;
         let previous_halfmove_clock = self.halfmove_clock;
+        let previous_eval_mg = self.eval_mg;
+        let previous_eval_eg = self.eval_eg;
+        let previous_game_phase = self.game_phase;
 
         current_hash ^= ZOBRIST.black_to_move_key;
 
@@ -145,16 +158,34 @@ impl Board {
             let capture_sq = Square(capture_row, m.to.1);
             captured_piece_info = self.piece_at(capture_sq);
             if let Some((cap_col, cap_piece)) = captured_piece_info {
+                let cap_sq_idx = capture_sq.index().0 as usize;
+                let cap_p_idx = cap_piece.index();
+                let cap_pst_sq = pst_sq(cap_sq_idx, cap_col == Color::White);
+
                 self.remove_piece(capture_sq, cap_col, cap_piece);
                 current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(cap_piece)]
                     [color_to_zobrist_index(cap_col)][square_to_zobrist_index(capture_sq)];
+
+                // Update incremental eval for captured piece
+                self.eval_mg[opp_idx] -= MATERIAL_MG[cap_p_idx] + PST_MG[cap_p_idx][cap_pst_sq];
+                self.eval_eg[opp_idx] -= MATERIAL_EG[cap_p_idx] + PST_EG[cap_p_idx][cap_pst_sq];
+                self.game_phase[opp_idx] -= PHASE_WEIGHTS[cap_p_idx];
             }
         } else if !m.is_castling {
             captured_piece_info = self.piece_at(m.to);
             if let Some((cap_col, cap_piece)) = captured_piece_info {
+                let cap_sq_idx = m.to.index().0 as usize;
+                let cap_p_idx = cap_piece.index();
+                let cap_pst_sq = pst_sq(cap_sq_idx, cap_col == Color::White);
+
                 self.remove_piece(m.to, cap_col, cap_piece);
                 current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(cap_piece)]
                     [color_to_zobrist_index(cap_col)][square_to_zobrist_index(m.to)];
+
+                // Update incremental eval for captured piece
+                self.eval_mg[opp_idx] -= MATERIAL_MG[cap_p_idx] + PST_MG[cap_p_idx][cap_pst_sq];
+                self.eval_eg[opp_idx] -= MATERIAL_EG[cap_p_idx] + PST_EG[cap_p_idx][cap_pst_sq];
+                self.game_phase[opp_idx] -= PHASE_WEIGHTS[cap_p_idx];
             }
         }
 
@@ -162,20 +193,37 @@ impl Board {
         let (moving_color, moving_piece) = moving_piece_info;
         let from_sq_idx = square_to_zobrist_index(m.from);
         let to_sq_idx = square_to_zobrist_index(m.to);
+        let from_idx = m.from.index().0 as usize;
+        let to_idx = m.to.index().0 as usize;
+        let piece_idx = moving_piece.index();
 
         current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(moving_piece)]
             [color_to_zobrist_index(moving_color)][from_sq_idx];
 
         self.remove_piece(m.from, moving_color, moving_piece);
 
+        // Update eval: remove piece from 'from' square
+        let from_pst_sq = pst_sq(from_idx, is_white);
+        self.eval_mg[c_idx] -= MATERIAL_MG[piece_idx] + PST_MG[piece_idx][from_pst_sq];
+        self.eval_eg[c_idx] -= MATERIAL_EG[piece_idx] + PST_EG[piece_idx][from_pst_sq];
+        self.game_phase[c_idx] -= PHASE_WEIGHTS[piece_idx];
+
         if m.is_castling {
             self.set_piece(m.to, color, Piece::King);
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::King)]
                 [color_to_zobrist_index(color)][to_sq_idx];
 
+            // Update eval: add king at 'to' square
+            let to_pst_sq = pst_sq(to_idx, is_white);
+            self.eval_mg[c_idx] += MATERIAL_MG[5] + PST_MG[5][to_pst_sq];
+            self.eval_eg[c_idx] += MATERIAL_EG[5] + PST_EG[5][to_pst_sq];
+            self.game_phase[c_idx] += PHASE_WEIGHTS[5];
+
             let (rook_from_f, rook_to_f) = if m.to.1 == 6 { (7, 5) } else { (0, 3) };
             let rook_from_sq = Square(m.to.0, rook_from_f);
             let rook_to_sq = Square(m.to.0, rook_to_f);
+            let rook_from_idx = rook_from_sq.index().0 as usize;
+            let rook_to_idx = rook_to_sq.index().0 as usize;
             let rook_info = self.piece_at(rook_from_sq).expect("Castling without rook");
             self.remove_piece(rook_from_sq, rook_info.0, rook_info.1);
             self.set_piece(rook_to_sq, rook_info.0, rook_info.1);
@@ -184,6 +232,15 @@ impl Board {
                 [color_to_zobrist_index(color)][square_to_zobrist_index(rook_from_sq)];
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)]
                 [color_to_zobrist_index(color)][square_to_zobrist_index(rook_to_sq)];
+
+            // Update eval for rook move (rook index = 3)
+            let rook_from_pst = pst_sq(rook_from_idx, is_white);
+            let rook_to_pst = pst_sq(rook_to_idx, is_white);
+            self.eval_mg[c_idx] -= MATERIAL_MG[3] + PST_MG[3][rook_from_pst];
+            self.eval_eg[c_idx] -= MATERIAL_EG[3] + PST_EG[3][rook_from_pst];
+            self.eval_mg[c_idx] += MATERIAL_MG[3] + PST_MG[3][rook_to_pst];
+            self.eval_eg[c_idx] += MATERIAL_EG[3] + PST_EG[3][rook_to_pst];
+            // game_phase unchanged for rook move
         } else {
             let piece_to_place = if let Some(promoted_piece) = m.promotion {
                 (color, promoted_piece)
@@ -193,6 +250,13 @@ impl Board {
             self.set_piece(m.to, piece_to_place.0, piece_to_place.1);
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(piece_to_place.1)]
                 [color_to_zobrist_index(piece_to_place.0)][to_sq_idx];
+
+            // Update eval: add piece at 'to' square
+            let placed_idx = piece_to_place.1.index();
+            let to_pst_sq = pst_sq(to_idx, is_white);
+            self.eval_mg[c_idx] += MATERIAL_MG[placed_idx] + PST_MG[placed_idx][to_pst_sq];
+            self.eval_eg[c_idx] += MATERIAL_EG[placed_idx] + PST_EG[placed_idx][to_pst_sq];
+            self.game_phase[c_idx] += PHASE_WEIGHTS[placed_idx];
         }
 
         self.en_passant_target = None;
@@ -265,6 +329,9 @@ impl Board {
             previous_halfmove_clock,
             made_hash,
             previous_repetition_count,
+            previous_eval_mg,
+            previous_eval_eg,
+            previous_game_phase,
         }
     }
 
@@ -296,6 +363,11 @@ impl Board {
         self.castling_rights = info.previous_castling_rights;
         self.hash = info.previous_hash;
         self.halfmove_clock = info.previous_halfmove_clock;
+
+        // Restore incremental eval
+        self.eval_mg = info.previous_eval_mg;
+        self.eval_eg = info.previous_eval_eg;
+        self.game_phase = info.previous_game_phase;
 
         let color = self.current_color();
 

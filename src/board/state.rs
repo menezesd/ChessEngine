@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
-use super::{
-    color_index, piece_index, Bitboard, Color, Piece, Square, CASTLE_BLACK_K, CASTLE_BLACK_Q,
-    CASTLE_WHITE_K, CASTLE_WHITE_Q,
-};
+use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
+use super::{Bitboard, Color, Piece, Square, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q};
 
 #[derive(Clone, Debug)]
 pub struct UnmakeInfo {
@@ -14,6 +12,10 @@ pub struct UnmakeInfo {
     pub(crate) previous_halfmove_clock: u32,
     pub(crate) made_hash: u64,
     pub(crate) previous_repetition_count: u32,
+    // Incremental eval state (for restoration)
+    pub(crate) previous_eval_mg: [i32; 2],
+    pub(crate) previous_eval_eg: [i32; 2],
+    pub(crate) previous_game_phase: [i32; 2],
 }
 
 pub struct NullMoveInfo {
@@ -63,6 +65,10 @@ pub struct Board {
     pub(crate) hash: u64,           // Zobrist hash
     pub(crate) halfmove_clock: u32,
     pub(crate) repetition_counts: RepetitionTable,
+    // Incremental evaluation scores
+    pub(crate) eval_mg: [i32; 2], // [white, black] middlegame scores
+    pub(crate) eval_eg: [i32; 2], // [white, black] endgame scores
+    pub(crate) game_phase: [i32; 2], // [white, black] phase contribution
 }
 
 impl Board {
@@ -89,7 +95,33 @@ impl Board {
         board.white_to_move = true;
         board.hash = board.calculate_initial_hash();
         board.repetition_counts.set(board.hash, 1);
+        board.recalculate_incremental_eval();
         board
+    }
+
+    /// Recalculate incremental evaluation from scratch (used after FEN parsing or initialization)
+    pub(crate) fn recalculate_incremental_eval(&mut self) {
+        self.eval_mg = [0, 0];
+        self.eval_eg = [0, 0];
+        self.game_phase = [0, 0];
+
+        for color in [Color::White, Color::Black] {
+            let c_idx = color.index();
+            for piece_type in 0..6 {
+                let mut bb = self.pieces[c_idx][piece_type].0;
+                while bb != 0 {
+                    let sq = bb.trailing_zeros() as usize;
+                    bb &= bb - 1;
+
+                    // PST square: flip for white (tables are from black's perspective)
+                    let pst_sq = if color == Color::White { sq } else { sq ^ 56 };
+
+                    self.eval_mg[c_idx] += MATERIAL_MG[piece_type] + PST_MG[piece_type][pst_sq];
+                    self.eval_eg[c_idx] += MATERIAL_EG[piece_type] + PST_EG[piece_type][pst_sq];
+                    self.game_phase[c_idx] += PHASE_WEIGHTS[piece_type];
+                }
+            }
+        }
     }
 
     pub(crate) fn empty() -> Self {
@@ -103,6 +135,9 @@ impl Board {
             hash: 0,
             halfmove_clock: 0,
             repetition_counts: RepetitionTable::new(),
+            eval_mg: [0, 0],
+            eval_eg: [0, 0],
+            game_phase: [0, 0],
         }
     }
 
@@ -130,30 +165,30 @@ impl Board {
     }
 
     fn is_insufficient_material(&self) -> bool {
-        let white = color_index(Color::White);
-        let black = color_index(Color::Black);
+        let white = Color::White.index();
+        let black = Color::Black.index();
 
-        let pawns = self.pieces[white][piece_index(Piece::Pawn)].0
-            | self.pieces[black][piece_index(Piece::Pawn)].0;
-        let rooks = self.pieces[white][piece_index(Piece::Rook)].0
-            | self.pieces[black][piece_index(Piece::Rook)].0;
-        let queens = self.pieces[white][piece_index(Piece::Queen)].0
-            | self.pieces[black][piece_index(Piece::Queen)].0;
+        let pawns = self.pieces[white][Piece::Pawn.index()].0
+            | self.pieces[black][Piece::Pawn.index()].0;
+        let rooks = self.pieces[white][Piece::Rook.index()].0
+            | self.pieces[black][Piece::Rook.index()].0;
+        let queens = self.pieces[white][Piece::Queen.index()].0
+            | self.pieces[black][Piece::Queen.index()].0;
 
         if pawns != 0 || rooks != 0 || queens != 0 {
             return false;
         }
 
-        let white_knights = self.pieces[white][piece_index(Piece::Knight)]
+        let white_knights = self.pieces[white][Piece::Knight.index()]
             .0
             .count_ones();
-        let black_knights = self.pieces[black][piece_index(Piece::Knight)]
+        let black_knights = self.pieces[black][Piece::Knight.index()]
             .0
             .count_ones();
-        let white_bishops = self.pieces[white][piece_index(Piece::Bishop)]
+        let white_bishops = self.pieces[white][Piece::Bishop.index()]
             .0
             .count_ones();
-        let black_bishops = self.pieces[black][piece_index(Piece::Bishop)]
+        let black_bishops = self.pieces[black][Piece::Bishop.index()]
             .0
             .count_ones();
 
@@ -168,8 +203,8 @@ impl Board {
 
         if total_knights == 0 && total_bishops == 2 {
             return bishops_all_same_color(
-                self.pieces[white][piece_index(Piece::Bishop)].0
-                    | self.pieces[black][piece_index(Piece::Bishop)].0,
+                self.pieces[white][Piece::Bishop.index()].0
+                    | self.pieces[black][Piece::Bishop.index()].0,
             );
         }
 

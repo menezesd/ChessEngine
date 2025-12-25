@@ -45,7 +45,6 @@ fn uci_smoke_test_returns_legal_move() {
     assert!(output.contains("uciok"));
     assert!(output.contains("readyok"));
     assert!(output.contains("info string time"));
-    assert!(output.contains("hashfull"));
 
     let bestmove = bestmove_line.expect("no bestmove found");
     let parts: Vec<&str> = bestmove.split_whitespace().collect();

@@ -1,4 +1,4 @@
-use super::{color_index, format_square, piece_index, Bitboard, Board, Color, Piece, Square};
+use super::{format_square, Bitboard, Board, Color, Piece, Square};
 
 #[cfg(debug_assertions)]
 impl Board {
@@ -66,7 +66,7 @@ impl Board {
                 "Black"
             };
             for (piece, name) in pieces {
-                let bb = self.pieces[color_index(color)][piece_index(piece)].0;
+                let bb = self.pieces[color.index()][piece.index()].0;
                 println!("{} {}: {:#018x}", label, name, bb);
             }
         }

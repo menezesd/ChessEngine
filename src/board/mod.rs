@@ -1,8 +1,8 @@
 mod attack_tables;
+mod pst;
 #[cfg(debug_assertions)]
 mod debug;
 mod eval;
-mod eval_baseline;
 mod fen;
 mod make_unmake;
 mod movegen;
@@ -22,7 +22,7 @@ pub use types::format_square;
 pub use types::{Bitboard, Color, Move, MoveList, Piece, Square, SquareIdx};
 
 pub(crate) use types::{
-    bit_for_square, castle_bit, color_index, file_to_index, piece_index, pop_lsb, rank_to_index,
-    square_from_index, square_index, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K,
-    CASTLE_WHITE_Q, EMPTY_MOVE, MAX_PLY,
+    bit_for_square, castle_bit, file_to_index, pop_lsb, rank_to_index,
+    CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K,
+    CASTLE_WHITE_Q, EMPTY_MOVE, MAX_PLY, PROMOTION_PIECES,
 };

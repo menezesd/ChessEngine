@@ -6,35 +6,8 @@ pub(crate) fn rank_to_index(rank: char) -> usize {
     (rank as usize) - ('0' as usize) - 1
 }
 
-pub(crate) fn square_index(sq: Square) -> SquareIdx {
-    SquareIdx((sq.0 * 8 + sq.1) as u8)
-}
-
-pub(crate) fn square_from_index(idx: SquareIdx) -> Square {
-    let idx = idx.0 as usize;
-    Square(idx / 8, idx % 8)
-}
-
 pub(crate) fn bit_for_square(sq: Square) -> Bitboard {
-    Bitboard(1u64 << square_index(sq).0)
-}
-
-pub(crate) fn color_index(color: Color) -> usize {
-    match color {
-        Color::White => 0,
-        Color::Black => 1,
-    }
-}
-
-pub(crate) fn piece_index(piece: Piece) -> usize {
-    match piece {
-        Piece::Pawn => 0,
-        Piece::Knight => 1,
-        Piece::Bishop => 2,
-        Piece::Rook => 3,
-        Piece::Queen => 4,
-        Piece::King => 5,
-    }
+    Bitboard(1u64 << sq.index().0)
 }
 
 pub(crate) fn pop_lsb(bb: &mut Bitboard) -> SquareIdx {
@@ -68,10 +41,40 @@ pub enum Piece {
     King,
 }
 
+impl Piece {
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Piece::Pawn => 0,
+            Piece::Knight => 1,
+            Piece::Bishop => 2,
+            Piece::Rook => 3,
+            Piece::Queen => 4,
+            Piece::King => 5,
+        }
+    }
+}
+
+/// Promotion piece choices in order of typical preference (queen first)
+pub(crate) const PROMOTION_PIECES: [Piece; 4] = [
+    Piece::Queen,
+    Piece::Rook,
+    Piece::Bishop,
+    Piece::Knight,
+];
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Color {
     White,
     Black,
+}
+
+impl Color {
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Color::White => 0,
+            Color::Black => 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -86,6 +89,17 @@ impl SquareIdx {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Square(pub usize, pub usize); // (rank, file)
 
+impl Square {
+    pub(crate) fn from_index(idx: SquareIdx) -> Self {
+        let idx = idx.0 as usize;
+        Square(idx / 8, idx % 8)
+    }
+
+    pub(crate) fn index(self) -> SquareIdx {
+        SquareIdx((self.0 * 8 + self.1) as u8)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Bitboard(pub u64);
 
@@ -97,6 +111,20 @@ pub struct Move {
     pub is_en_passant: bool,
     pub promotion: Option<Piece>,
     pub captured_piece: Option<Piece>,
+}
+
+impl Move {
+    /// Create a null move (used for testing)
+    pub fn null() -> Self {
+        Move {
+            from: Square(0, 0),
+            to: Square(0, 0),
+            is_castling: false,
+            is_en_passant: false,
+            promotion: None,
+            captured_piece: None,
+        }
+    }
 }
 
 pub(crate) const MAX_MOVES: usize = 256;

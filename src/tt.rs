@@ -5,21 +5,38 @@ use crate::board::Move;
 // --- Transposition Table ---
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BoundType {
+pub enum BoundType {
     Exact,      // Score is the exact value
     LowerBound, // Score is at least this value (failed low - score <= alpha)
     UpperBound, // Score is at most this value (failed high - score >= beta)
 }
 
-#[derive(Clone, Debug)] // Move needs to be Clone for TTEntry
+#[derive(Clone, Debug)]
 pub(crate) struct TTEntry {
-    pub(crate) hash: u64,               // Store the full hash to verify entry
-    pub(crate) depth: u32,              // Depth of the search that stored this entry
-    pub(crate) score: i32,              // The score found
-    pub(crate) bound_type: BoundType,   // Type of score (Exact, LowerBound, UpperBound)
-    pub(crate) best_move: Option<Move>, // Best move found from this position (for move ordering)
-    pub(crate) generation: u16,         // Search generation for aging/replacement
-    pub(crate) eval: i32,               // Static eval for the position
+    hash: u64,
+    depth: u32,
+    score: i32,
+    bound_type: BoundType,
+    best_move: Option<Move>,
+    generation: u16,
+}
+
+impl TTEntry {
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    pub fn score(&self) -> i32 {
+        self.score
+    }
+
+    pub fn bound_type(&self) -> BoundType {
+        self.bound_type
+    }
+
+    pub fn best_move(&self) -> Option<Move> {
+        self.best_move
+    }
 }
 
 pub struct TranspositionTable {
@@ -60,7 +77,6 @@ impl TranspositionTable {
     }
 
     // Store an entry in the table
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn store(
         &mut self,
         hash: u64,
@@ -69,7 +85,6 @@ impl TranspositionTable {
         bound_type: BoundType,
         best_move: Option<Move>,
         generation: u16,
-        eval: i32,
     ) {
         let index = self.index(hash);
         let bucket = &mut self.table[index];
@@ -84,7 +99,6 @@ impl TranspositionTable {
                         bound_type,
                         best_move,
                         generation,
-                        eval,
                     });
                     return;
                 }
@@ -100,7 +114,6 @@ impl TranspositionTable {
                     bound_type,
                     best_move,
                     generation,
-                    eval,
                 });
                 self.occupied += 1;
                 return;
@@ -128,7 +141,6 @@ impl TranspositionTable {
             bound_type,
             best_move,
             generation,
-            eval,
         });
     }
 

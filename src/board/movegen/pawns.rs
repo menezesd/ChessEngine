@@ -1,6 +1,52 @@
-use super::super::{Board, Color, MoveList, Piece, Square};
+use super::super::{Board, Color, MoveList, Square, PROMOTION_PIECES};
 
 impl Board {
+    /// Add promotion moves for a pawn reaching the back rank
+    fn add_promotions(&self, from: Square, to: Square, moves: &mut MoveList) {
+        for promo in PROMOTION_PIECES {
+            moves.push(self.create_move(from, to, Some(promo), false, false));
+        }
+    }
+
+    /// Generate pawn capture moves (used by both regular and tactical move generation)
+    fn generate_pawn_captures(
+        &self,
+        from: Square,
+        color: Color,
+        promotion_rank: usize,
+        moves: &mut MoveList,
+    ) {
+        let dir: isize = if color == Color::White { 1 } else { -1 };
+        let r = from.0 as isize;
+        let f = from.1 as isize;
+        let forward_r = r + dir;
+
+        if !(0..8).contains(&forward_r) {
+            return;
+        }
+
+        for df in [-1, 1] {
+            let capture_f = f + df;
+            if !(0..8).contains(&capture_f) {
+                continue;
+            }
+
+            let target_sq = Square(forward_r as usize, capture_f as usize);
+
+            if let Some((target_color, _)) = self.piece_at(target_sq) {
+                if target_color != color {
+                    if target_sq.0 == promotion_rank {
+                        self.add_promotions(from, target_sq, moves);
+                    } else {
+                        moves.push(self.create_move(from, target_sq, None, false, false));
+                    }
+                }
+            } else if Some(target_sq) == self.en_passant_target {
+                moves.push(self.create_move(from, target_sq, None, false, true));
+            }
+        }
+    }
+
     pub(crate) fn generate_pawn_moves(&self, from: Square) -> MoveList {
         let color = if self.white_to_move {
             Color::White
@@ -15,62 +61,29 @@ impl Board {
         let r = from.0 as isize;
         let f = from.1 as isize;
 
+        // Forward moves
         let forward_r = r + dir;
         if (0..8).contains(&forward_r) {
             let forward_sq = Square(forward_r as usize, f as usize);
             if self.is_empty(forward_sq) {
                 if forward_sq.0 == promotion_rank {
-                    for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                        moves.push(self.create_move(from, forward_sq, Some(promo), false, false));
-                    }
+                    self.add_promotions(from, forward_sq, &mut moves);
                 } else {
                     moves.push(self.create_move(from, forward_sq, None, false, false));
+                    // Double push from starting rank
                     if r == start_rank as isize {
                         let double_forward_r = r + 2 * dir;
                         let double_forward_sq = Square(double_forward_r as usize, f as usize);
                         if self.is_empty(double_forward_sq) {
-                            moves.push(self.create_move(
-                                from,
-                                double_forward_sq,
-                                None,
-                                false,
-                                false,
-                            ));
+                            moves.push(self.create_move(from, double_forward_sq, None, false, false));
                         }
                     }
                 }
             }
         }
 
-        if (0..8).contains(&forward_r) {
-            for df in [-1, 1] {
-                let capture_f = f + df;
-                if (0..8).contains(&capture_f) {
-                    let target_sq = Square(forward_r as usize, capture_f as usize);
-                    if let Some((target_color, _)) = self.piece_at(target_sq) {
-                        if target_color != color {
-                            if target_sq.0 == promotion_rank {
-                                for promo in
-                                    [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
-                                {
-                                    moves.push(self.create_move(
-                                        from,
-                                        target_sq,
-                                        Some(promo),
-                                        false,
-                                        false,
-                                    ));
-                                }
-                            } else {
-                                moves.push(self.create_move(from, target_sq, None, false, false));
-                            }
-                        }
-                    } else if Some(target_sq) == self.en_passant_target {
-                        moves.push(self.create_move(from, target_sq, None, false, true));
-                    }
-                }
-            }
-        }
+        // Captures (including en passant)
+        self.generate_pawn_captures(from, color, promotion_rank, &mut moves);
 
         moves
     }
@@ -82,47 +95,17 @@ impl Board {
 
         let r = from.0 as isize;
         let f = from.1 as isize;
-
         let forward_r = r + dir;
 
+        // Forward promotion (non-capture)
         if (0..8).contains(&forward_r) {
             let forward_sq = Square(forward_r as usize, f as usize);
             if forward_sq.0 == promotion_rank && self.is_empty(forward_sq) {
-                for promo in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                    moves.push(self.create_move(from, forward_sq, Some(promo), false, false));
-                }
+                self.add_promotions(from, forward_sq, moves);
             }
         }
 
-        if (0..8).contains(&forward_r) {
-            for df in [-1, 1] {
-                let capture_f = f + df;
-                if (0..8).contains(&capture_f) {
-                    let target_sq = Square(forward_r as usize, capture_f as usize);
-
-                    if let Some((target_color, _)) = self.piece_at(target_sq) {
-                        if target_color != color {
-                            if target_sq.0 == promotion_rank {
-                                for promo in
-                                    [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
-                                {
-                                    moves.push(self.create_move(
-                                        from,
-                                        target_sq,
-                                        Some(promo),
-                                        false,
-                                        false,
-                                    ));
-                                }
-                            } else {
-                                moves.push(self.create_move(from, target_sq, None, false, false));
-                            }
-                        }
-                    } else if Some(target_sq) == self.en_passant_target {
-                        moves.push(self.create_move(from, target_sq, None, false, true));
-                    }
-                }
-            }
-        }
+        // Captures (including en passant and capture-promotions)
+        self.generate_pawn_captures(from, color, promotion_rank, moves);
     }
 }
