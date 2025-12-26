@@ -1,0 +1,99 @@
+//! Passed pawn evaluation.
+//!
+//! Evaluates passed pawns with bonuses based on advancement and control of stop square.
+
+use crate::board::masks::{
+    relative_rank, PASSED_PAWN_BONUS_EG, PASSED_PAWN_BONUS_MG, PASSED_PAWN_MASK,
+};
+use crate::board::state::Board;
+use crate::board::types::{Bitboard, Color, Piece, Square};
+
+impl Board {
+    /// Evaluate passed pawns.
+    /// Returns `(middlegame_score, endgame_score)` from white's perspective.
+    #[must_use]
+    pub fn eval_passed_pawns(&self) -> (i32, i32) {
+        let white_attacks = self.all_attacks(Color::White);
+        let black_attacks = self.all_attacks(Color::Black);
+        self.eval_passed_pawns_with_attacks(white_attacks, black_attacks)
+    }
+
+    /// Evaluate passed pawns using pre-computed attacks (avoids recomputation).
+    pub(super) fn eval_passed_pawns_with_attacks(
+        &self,
+        white_attacks: Bitboard,
+        black_attacks: Bitboard,
+    ) -> (i32, i32) {
+        let mut mg = 0;
+        let mut eg = 0;
+
+        for color_idx in 0..2 {
+            let sign = if color_idx == 0 { 1 } else { -1 };
+            let color = if color_idx == 0 {
+                Color::White
+            } else {
+                Color::Black
+            };
+            let own_pawns = self.pieces[color_idx][Piece::Pawn.index()];
+            let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+
+            let our_attacks = if color_idx == 0 {
+                white_attacks
+            } else {
+                black_attacks
+            };
+            let their_attacks = if color_idx == 0 {
+                black_attacks
+            } else {
+                white_attacks
+            };
+
+            for sq_idx in own_pawns.iter() {
+                let sq = Square::from_index(sq_idx);
+                let rank = sq.rank();
+                let rel_rank = relative_rank(rank, color);
+
+                let pass_mask = PASSED_PAWN_MASK[color_idx][sq.as_index()];
+                if (pass_mask.0 & enemy_pawns.0) == 0 {
+                    let mut multiplier = 100i32;
+
+                    let stop_sq = match color {
+                        Color::White => {
+                            if rank < 7 {
+                                Square(rank + 1, sq.file())
+                            } else {
+                                sq
+                            }
+                        }
+                        Color::Black => {
+                            if rank > 0 {
+                                Square(rank - 1, sq.file())
+                            } else {
+                                sq
+                            }
+                        }
+                    };
+                    let stop_bb = Bitboard::from_square(stop_sq);
+
+                    if (stop_bb.0 & our_attacks.0) != 0 {
+                        multiplier += 33;
+                    }
+                    if (stop_bb.0 & their_attacks.0) != 0 {
+                        multiplier -= 33;
+                    }
+                    if (stop_bb.0 & self.all_occupied.0) != 0 {
+                        multiplier -= 15;
+                    }
+
+                    let base_mg = PASSED_PAWN_BONUS_MG[rel_rank];
+                    let base_eg = PASSED_PAWN_BONUS_EG[rel_rank];
+
+                    mg += sign * (base_mg * multiplier / 100);
+                    eg += sign * (base_eg * multiplier / 100);
+                }
+            }
+        }
+
+        (mg, eg)
+    }
+}

@@ -21,10 +21,13 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
+
 use crate::board::{
     find_best_move, find_best_move_with_ponder, find_best_move_with_time_and_ponder, Board, Color,
     Move, SearchClock, SearchLimits, SearchResult, SearchState, DEFAULT_TT_MB,
 };
+use crate::engine::time::TimeControl;
 
 use command::{parse_xboard_command, XBoardCommand};
 use output::{format_error, format_features, format_illegal_move, format_move, format_pong};
@@ -42,7 +45,7 @@ struct PonderState {
 /// `XBoard` protocol handler state
 pub struct XBoardHandler {
     board: Board,
-    state: Arc<std::sync::Mutex<SearchState>>,
+    state: Arc<Mutex<SearchState>>,
     force_mode: bool,
     engine_color: Option<Color>,
     post_thinking: bool,
@@ -76,9 +79,7 @@ impl XBoardHandler {
                 self.force_mode = false;
                 self.engine_color = Some(Color::Black);
                 self.move_history.clear();
-                if let Ok(mut state) = self.state.lock() {
-                    state.new_search();
-                }
+                self.state.lock().new_search();
                 None
             }
             XBoardCommand::SetBoard(fen) => {
@@ -92,9 +93,7 @@ impl XBoardHandler {
                     Err(e) => Some(format_error(fen, &e.to_string())),
                 }
             }
-            XBoardCommand::UserMove(mv_str) => {
-                self.handle_user_move(mv_str)
-            }
+            XBoardCommand::UserMove(mv_str) => self.handle_user_move(mv_str),
             XBoardCommand::Go => {
                 self.force_mode = false;
                 self.engine_color = Some(self.board.side_to_move());
@@ -162,7 +161,11 @@ impl XBoardHandler {
                 self.opponent_time_cs = *cs;
                 None
             }
-            XBoardCommand::Level { moves_per_session, base_minutes, increment_seconds } => {
+            XBoardCommand::Level {
+                moves_per_session,
+                base_minutes,
+                increment_seconds,
+            } => {
                 self.moves_per_session = *moves_per_session;
                 self.base_time_min = *base_minutes;
                 self.increment_sec = *increment_seconds;
@@ -205,9 +208,7 @@ impl XBoardHandler {
             }
             XBoardCommand::Memory(mb) => {
                 self.stop_ponder();
-                if let Ok(mut state) = self.state.lock() {
-                    state.reset_tables(*mb as usize);
-                }
+                self.state.lock().reset_tables(*mb as usize);
                 None
             }
             XBoardCommand::Cores(_n) => {
@@ -232,9 +233,7 @@ impl XBoardHandler {
                 }
             }
 
-            XBoardCommand::Ping(n) => {
-                Some(format_pong(*n))
-            }
+            XBoardCommand::Ping(n) => Some(format_pong(*n)),
             XBoardCommand::Name(name) => {
                 self.opponent_name = Some(name.clone());
                 None
@@ -254,20 +253,17 @@ impl XBoardHandler {
                 // Analyze mode not implemented
                 None
             }
-            XBoardCommand::Unknown(s) => {
-                Some(format_error(s, "unknown command"))
-            }
+            XBoardCommand::Unknown(s) => Some(format_error(s, "unknown command")),
             _ => None, // This should catch any remaining commands that haven't been moved
         }
     }
-
 
     /// Create a new `XBoard` handler.
     #[must_use]
     pub fn new() -> Self {
         XBoardHandler {
             board: Board::new(),
-            state: Arc::new(std::sync::Mutex::new(SearchState::new(DEFAULT_TT_MB))),
+            state: Arc::new(Mutex::new(SearchState::new(DEFAULT_TT_MB))),
             force_mode: false,
             engine_color: None,
             post_thinking: false,
@@ -309,18 +305,14 @@ impl XBoardHandler {
         let max_depth = self.max_depth;
 
         let handle = thread::spawn(move || {
-            let mut guard = state_clone.lock().ok()?;
+            let mut guard = state_clone.lock();
             // Search with low depth for pondering (background thinking)
             let result =
                 find_best_move_with_ponder(&mut ponder_board, &mut guard, max_depth, &stop_clone);
             Some(result)
         });
 
-        self.ponder = Some(PonderState {
-
-            stop,
-            handle,
-        });
+        self.ponder = Some(PonderState { stop, handle });
     }
 
     /// Run the `XBoard` protocol main loop.
@@ -363,8 +355,6 @@ impl XBoardHandler {
         }
     }
 
-
-
     /// Handle a single `XBoard` command.
     pub fn handle_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
         if let Some(response) = self.handle_game_management_command(cmd) {
@@ -392,7 +382,9 @@ impl XBoardHandler {
         self.stop_ponder();
 
         // Try SAN first, then coordinate notation
-        let mv = self.board.parse_san(mv_str)
+        let mv = self
+            .board
+            .parse_san(mv_str)
             .or_else(|_| self.board.parse_move(mv_str));
 
         match mv {
@@ -423,57 +415,68 @@ impl XBoardHandler {
 
         self.stop_flag.store(false, Ordering::SeqCst);
 
-        let mut state = self.state.lock().ok()?;
+        let mut state = self.state.lock();
 
-        // Calculate time to use
-        if let Some(time_cs) = self.time_per_move_cs {
-            // Fixed time per move
-            let time_ms = u64::from(time_cs) * 10;
-            let start = Instant::now();
-            let deadline = start + Duration::from_millis(time_ms);
-            let clock = Arc::new(SearchClock::new(start, Some(deadline), Some(deadline)));
-            let limits = SearchLimits {
-                clock,
-                stop: self.stop_flag.clone(),
-            };
-            Some(find_best_move_with_time_and_ponder(
-                &mut self.board,
-                &mut state,
-                &limits,
-            ))
+        // Determine time control using unified TimeControl enum
+        let time_control = if let Some(time_cs) = self.time_per_move_cs {
+            // Fixed time per move (XBoard "st" command, in centiseconds)
+            TimeControl::from_xboard_st(time_cs)
         } else if self.engine_time_cs > 0 {
-            // Use time control - allocate a portion of remaining time
-            let time_ms = self.engine_time_cs * 10;
-            let inc_ms = u64::from(self.increment_sec) * 1000;
-            // Simple time allocation: use ~5% of remaining time + increment
-            let allocated_ms = time_ms / 20 + inc_ms;
-            let start = Instant::now();
-            let soft_deadline = start + Duration::from_millis(allocated_ms);
-            let hard_deadline = start + Duration::from_millis(allocated_ms * 3);
-            let clock = Arc::new(SearchClock::new(start, Some(soft_deadline), Some(hard_deadline)));
-            let limits = SearchLimits {
-                clock,
-                stop: self.stop_flag.clone(),
-            };
-            Some(find_best_move_with_time_and_ponder(
-                &mut self.board,
-                &mut state,
-                &limits,
-            ))
+            // Incremental time control (XBoard "time" command)
+            TimeControl::from_xboard_time(
+                self.engine_time_cs,
+                self.increment_sec,
+                if self.moves_per_session > 0 {
+                    Some(self.moves_per_session)
+                } else {
+                    None
+                },
+            )
         } else {
-            // Fixed depth
+            // Fixed depth - no time limit
+            TimeControl::Depth
+        };
+
+        // Compute time limits
+        if time_control.is_unlimited() {
+            // Fixed depth search
             Some(find_best_move_with_ponder(
                 &mut self.board,
                 &mut state,
                 self.max_depth,
                 &self.stop_flag,
             ))
+        } else {
+            // Timed search
+            let (soft_ms, hard_ms) = time_control.compute_limits(
+                0,  // move_overhead_ms
+                5,  // soft_time_percent
+                15, // hard_time_percent
+            );
+
+            let start = Instant::now();
+            let soft_deadline = start + Duration::from_millis(soft_ms);
+            let hard_deadline = start + Duration::from_millis(hard_ms);
+            let clock = Arc::new(SearchClock::new(
+                start,
+                Some(soft_deadline),
+                Some(hard_deadline),
+            ));
+            let limits = SearchLimits {
+                clock,
+                stop: self.stop_flag.clone(),
+            };
+            Some(find_best_move_with_time_and_ponder(
+                &mut self.board,
+                &mut state,
+                &limits,
+            ))
         }
     }
 
     /// Get a hint (quick search).
     fn get_hint(&mut self) -> Option<Move> {
-        let mut state = self.state.lock().ok()?;
+        let mut state = self.state.lock();
         find_best_move(&mut self.board, &mut state, 4, &self.stop_flag)
     }
 }
@@ -491,7 +494,7 @@ mod tests {
     #[test]
     fn test_new_command() {
         let mut handler = XBoardHandler::new();
-        handler.handle_command(XBoardCommand::New);
+        handler.handle_command(&XBoardCommand::New);
         assert!(!handler.force_mode);
         assert_eq!(handler.engine_color, Some(Color::Black));
     }
@@ -499,22 +502,22 @@ mod tests {
     #[test]
     fn test_force_command() {
         let mut handler = XBoardHandler::new();
-        handler.handle_command(XBoardCommand::Force);
+        handler.handle_command(&XBoardCommand::Force);
         assert!(handler.force_mode);
     }
 
     #[test]
     fn test_usermove() {
         let mut handler = XBoardHandler::new();
-        handler.handle_command(XBoardCommand::Force);
-        let result = handler.handle_command(XBoardCommand::UserMove("e4".to_string()));
+        handler.handle_command(&XBoardCommand::Force);
+        let result = handler.handle_command(&XBoardCommand::UserMove("e4".to_string()));
         assert!(result.is_none());
     }
 
     #[test]
     fn test_protover() {
         let mut handler = XBoardHandler::new();
-        let result = handler.handle_command(XBoardCommand::Protover(2));
+        let result = handler.handle_command(&XBoardCommand::Protover(2));
         assert!(result.is_some());
         let features = result.unwrap();
         assert!(features.contains("setboard=1"));
@@ -523,15 +526,15 @@ mod tests {
     #[test]
     fn test_ping_pong() {
         let mut handler = XBoardHandler::new();
-        let result = handler.handle_command(XBoardCommand::Ping(42));
+        let result = handler.handle_command(&XBoardCommand::Ping(42));
         assert_eq!(result, Some("pong 42".to_string()));
     }
 
     #[test]
     fn test_setboard() {
         let mut handler = XBoardHandler::new();
-        let result = handler.handle_command(XBoardCommand::SetBoard(
-            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1".to_string()
+        let result = handler.handle_command(&XBoardCommand::SetBoard(
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1".to_string(),
         ));
         assert!(result.is_none());
         assert!(!handler.board.white_to_move());

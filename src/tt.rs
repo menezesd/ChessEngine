@@ -50,7 +50,7 @@ pub struct TranspositionTable {
 
 impl TranspositionTable {
     // size_mb: Desired size in Megabytes
-    #[must_use] 
+    #[must_use]
     pub fn new(size_mb: usize) -> Self {
         let entry_size = mem::size_of::<[Option<TTEntry>; 4]>();
         let mut num_entries = (size_mb * 1024 * 1024) / entry_size;
@@ -148,7 +148,7 @@ impl TranspositionTable {
         });
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn hashfull_per_mille(&self) -> u32 {
         let total_slots = self.table.len().saturating_mul(4);
         if total_slots == 0 {

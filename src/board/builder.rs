@@ -52,16 +52,26 @@ impl BoardBuilder {
 
         // White pieces
         let back_rank = [
-            Piece::Rook, Piece::Knight, Piece::Bishop, Piece::Queen,
-            Piece::King, Piece::Bishop, Piece::Knight, Piece::Rook,
+            Piece::Rook,
+            Piece::Knight,
+            Piece::Bishop,
+            Piece::Queen,
+            Piece::King,
+            Piece::Bishop,
+            Piece::Knight,
+            Piece::Rook,
         ];
         for (file, &piece) in back_rank.iter().enumerate() {
             builder.pieces.push((Square(0, file), Color::White, piece));
             builder.pieces.push((Square(7, file), Color::Black, piece));
         }
         for file in 0..8 {
-            builder.pieces.push((Square(1, file), Color::White, Piece::Pawn));
-            builder.pieces.push((Square(6, file), Color::Black, Piece::Pawn));
+            builder
+                .pieces
+                .push((Square(1, file), Color::White, Piece::Pawn));
+            builder
+                .pieces
+                .push((Square(6, file), Color::Black, Piece::Pawn));
         }
 
         builder.castling_rights = CastlingRights::all().as_u8();
@@ -208,7 +218,7 @@ mod tests {
             .build();
 
         let rights = CastlingRights::from_u8(board.castling_rights);
-        assert!(rights.has(Color::White, true));  // Kingside
+        assert!(rights.has(Color::White, true)); // Kingside
         assert!(!rights.has(Color::White, false)); // Queenside
         assert!(!rights.has(Color::Black, true));
         assert!(!rights.has(Color::Black, false));
@@ -228,7 +238,7 @@ mod tests {
     #[test]
     fn test_clear_square() {
         let board = BoardBuilder::starting_position()
-            .clear(Square(0, 0))  // Remove white rook on a1
+            .clear(Square(0, 0)) // Remove white rook on a1
             .build();
 
         assert!(board.piece_at(Square(0, 0)).is_none());

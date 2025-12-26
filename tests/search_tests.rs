@@ -25,7 +25,8 @@ fn finds_mate_in_one_back_rank() {
 #[test]
 fn finds_mate_in_one_queen() {
     // White to move, Qxf7# is mate
-    let mut board = Board::from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 0 4");
+    let mut board =
+        Board::from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 0 4");
     let mut state = SearchState::new(16);
     let stop = AtomicBool::new(false);
 
@@ -41,7 +42,8 @@ fn finds_mate_in_one_queen() {
 #[test]
 fn avoids_hanging_queen() {
     // White to move, should not hang the queen
-    let mut board = Board::from_fen("r1bqkbnr/pppppppp/2n5/8/4P3/5Q2/PPPP1PPP/RNB1KBNR w KQkq - 0 3");
+    let mut board =
+        Board::from_fen("r1bqkbnr/pppppppp/2n5/8/4P3/5Q2/PPPP1PPP/RNB1KBNR w KQkq - 0 3");
     let mut state = SearchState::new(16);
     let stop = AtomicBool::new(false);
 
@@ -58,7 +60,8 @@ fn avoids_hanging_queen() {
 #[test]
 fn captures_free_piece() {
     // White to move, free bishop on c6
-    let mut board = Board::from_fen("rnbqk1nr/pppp1ppp/2b5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4");
+    let mut board =
+        Board::from_fen("rnbqk1nr/pppp1ppp/2b5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4");
     let mut state = SearchState::new(16);
     let stop = AtomicBool::new(false);
 
@@ -67,8 +70,10 @@ fn captures_free_piece() {
 
     let mv = best.unwrap();
     // Should capture with the bishop or find a strong tactical move
-    assert!(mv.is_capture() || format_uci_move(&mv) == "c4f7",
-            "Should capture material or threaten king");
+    assert!(
+        mv.is_capture() || format_uci_move(&mv) == "c4f7",
+        "Should capture material or threaten king"
+    );
 }
 
 /// Test iterative deepening produces consistent results
@@ -87,8 +92,14 @@ fn iterative_deepening_consistency() {
 
     // Both should be legal moves
     let moves = board.generate_moves();
-    assert!(moves.iter().any(|m| *m == best2.unwrap()), "Depth 2 move should be legal");
-    assert!(moves.iter().any(|m| *m == best4.unwrap()), "Depth 4 move should be legal");
+    assert!(
+        moves.iter().any(|m| *m == best2.unwrap()),
+        "Depth 2 move should be legal"
+    );
+    assert!(
+        moves.iter().any(|m| *m == best4.unwrap()),
+        "Depth 4 move should be legal"
+    );
 }
 
 /// Test that search handles positions with only one legal move
@@ -112,7 +123,8 @@ fn single_legal_move() {
 #[test]
 fn no_move_in_checkmate() {
     // White is checkmated
-    let mut board = Board::from_fen("rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1");
+    let mut board =
+        Board::from_fen("rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1");
 
     // First verify it's actually checkmate
     assert!(board.is_checkmate(), "Position should be checkmate");
@@ -133,9 +145,8 @@ fn handles_draw_by_repetition() {
 
     // Play Nf3 Nf6 Ng1 Ng8 twice to get close to threefold
     let parts = [
-        "position", "startpos", "moves",
-        "g1f3", "g8f6", "f3g1", "f6g8",
-        "g1f3", "g8f6", "f3g1", "f6g8",
+        "position", "startpos", "moves", "g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1",
+        "f6g8",
     ];
     parse_position_command(&mut board, &parts);
 
@@ -149,22 +160,36 @@ fn evaluation_symmetry() {
     // Starting position should evaluate close to 0
     let board = Board::new();
     let eval = board.evaluate();
-    assert!(eval.abs() < 50, "Starting position should be roughly equal (eval: {})", eval);
+    assert!(
+        eval.abs() < 50,
+        "Starting position should be roughly equal (eval: {})",
+        eval
+    );
 }
 
 /// Test that positions with material advantage evaluate correctly
 #[test]
 fn evaluation_material_advantage() {
     // White up a queen
-    let board_white_up = Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let board_white_up =
+        Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     let eval_white_up = board_white_up.evaluate();
 
     // Black up a queen
-    let board_black_up = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w KQkq - 0 1");
+    let board_black_up =
+        Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w KQkq - 0 1");
     let eval_black_up = board_black_up.evaluate();
 
-    assert!(eval_white_up > 800, "White up a queen should be very positive (eval: {})", eval_white_up);
-    assert!(eval_black_up < -800, "Black up a queen should be very negative (eval: {})", eval_black_up);
+    assert!(
+        eval_white_up > 800,
+        "White up a queen should be very positive (eval: {})",
+        eval_white_up
+    );
+    assert!(
+        eval_black_up < -800,
+        "Black up a queen should be very negative (eval: {})",
+        eval_black_up
+    );
 }
 
 /// Test that search completes at reasonable depth
@@ -183,7 +208,11 @@ fn search_completes_at_depth_6() {
 
     assert!(best.is_some(), "Should find a move at depth 6");
     // Should complete reasonably quickly
-    assert!(elapsed.as_secs() < 60, "Search at depth 6 took too long: {:?}", elapsed);
+    assert!(
+        elapsed.as_secs() < 60,
+        "Search at depth 6 took too long: {:?}",
+        elapsed
+    );
 }
 
 /// Test that stalemate is correctly identified
@@ -199,7 +228,10 @@ fn identifies_stalemate() {
 #[test]
 fn fifty_move_rule() {
     let board = Board::from_fen("8/8/8/8/8/8/8/K1k5 w - - 100 1");
-    assert!(board.is_draw(), "Position with 100 halfmove clock should be a draw");
+    assert!(
+        board.is_draw(),
+        "Position with 100 halfmove clock should be a draw"
+    );
 }
 
 /// Test search finds forced mate

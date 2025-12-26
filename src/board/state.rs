@@ -3,7 +3,9 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
-use super::{Bitboard, Color, Piece, Square, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q};
+use super::{
+    Bitboard, Color, Piece, Square, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct UnmakeInfo {
@@ -69,8 +71,8 @@ pub struct Board {
     pub(crate) halfmove_clock: u32,
     pub(crate) repetition_counts: RepetitionTable,
     // Incremental evaluation scores
-    pub(crate) eval_mg: [i32; 2], // [white, black] middlegame scores
-    pub(crate) eval_eg: [i32; 2], // [white, black] endgame scores
+    pub(crate) eval_mg: [i32; 2],    // [white, black] middlegame scores
+    pub(crate) eval_eg: [i32; 2],    // [white, black] endgame scores
     pub(crate) game_phase: [i32; 2], // [white, black] phase contribution
 }
 
@@ -250,7 +252,11 @@ impl fmt::Display for Board {
         }
         writeln!(f, "    a   b   c   d   e   f   g   h")?;
         writeln!(f)?;
-        write!(f, "Side to move: {}", if self.white_to_move { "White" } else { "Black" })?;
+        write!(
+            f,
+            "Side to move: {}",
+            if self.white_to_move { "White" } else { "Black" }
+        )?;
         Ok(())
     }
 }

@@ -1,0 +1,329 @@
+//! Engine controller implementation.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
+
+use crate::board::{
+    search, Board, SearchClock, SearchConfig, SearchInfoCallback, SearchResult, SearchState,
+};
+
+/// Search thread stack size (32 MB)
+const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
+const HARD_STOP_MARGIN_MS: u64 = 5;
+
+/// Active search job state
+pub struct SearchJob {
+    /// Stop flag for the search
+    pub stop: Arc<AtomicBool>,
+    /// Clock for time management
+    pub clock: Arc<SearchClock>,
+    /// Whether we're currently pondering
+    pub pondering: Arc<AtomicBool>,
+    /// Planned soft time limit (for ponderhit)
+    pub planned_soft_time_ms: u64,
+    /// Planned hard time limit (for ponderhit)
+    pub planned_hard_time_ms: u64,
+    /// Handle to the search thread
+    handle: JoinHandle<()>,
+}
+
+impl SearchJob {
+    /// Stop the search and wait for the thread to finish
+    pub fn stop_and_wait(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.handle.join();
+    }
+
+    /// Signal stop without waiting
+    pub fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.pondering.store(false, Ordering::Relaxed);
+    }
+
+    /// Handle ponderhit - transition from pondering to real search
+    pub fn ponderhit(&self) {
+        if self.pondering.load(Ordering::Relaxed) {
+            let start = Instant::now();
+            let hard_deadline = start + Duration::from_millis(self.planned_hard_time_ms);
+            self.clock.reset(
+                start,
+                Some(start + Duration::from_millis(self.planned_soft_time_ms)),
+                Some(hard_deadline),
+            );
+
+            // Spawn timer thread to enforce hard deadline
+            let stop_timer = Arc::clone(&self.stop);
+            thread::spawn(move || {
+                let now = Instant::now();
+                if hard_deadline > now {
+                    thread::sleep(hard_deadline - now);
+                }
+                stop_timer.store(true, Ordering::Relaxed);
+            });
+
+            self.pondering.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Search parameters for starting a new search
+pub struct SearchParams {
+    /// Maximum depth to search (None = unlimited)
+    pub depth: Option<u32>,
+    /// Soft time limit in milliseconds
+    pub soft_time_ms: u64,
+    /// Hard time limit in milliseconds
+    pub hard_time_ms: u64,
+    /// Whether to ponder (think on opponent's time)
+    pub ponder: bool,
+    /// Whether to search infinitely
+    pub infinite: bool,
+}
+
+impl Default for SearchParams {
+    fn default() -> Self {
+        SearchParams {
+            depth: None,
+            soft_time_ms: 0,
+            hard_time_ms: 0,
+            ponder: false,
+            infinite: false,
+        }
+    }
+}
+
+/// Engine controller managing search and game state
+pub struct EngineController {
+    /// Current board position
+    board: Board,
+    /// Search state (transposition table, killers, etc.)
+    search_state: Arc<Mutex<SearchState>>,
+    /// Active search job (if any)
+    current_job: Option<SearchJob>,
+    /// Optional callback for per-iteration search info
+    info_callback: Option<SearchInfoCallback>,
+}
+
+impl EngineController {
+    /// Create a new engine controller
+    #[must_use]
+    pub fn new(tt_mb: usize) -> Self {
+        EngineController {
+            board: Board::new(),
+            search_state: Arc::new(Mutex::new(SearchState::new(tt_mb))),
+            current_job: None,
+            info_callback: None,
+        }
+    }
+
+    /// Get a reference to the current board
+    #[must_use]
+    pub fn board(&self) -> &Board {
+        &self.board
+    }
+
+    /// Get a mutable reference to the current board
+    pub fn board_mut(&mut self) -> &mut Board {
+        &mut self.board
+    }
+
+    /// Set the board position
+    pub fn set_board(&mut self, board: Board) {
+        self.stop_search();
+        self.board = board;
+    }
+
+    /// Get a reference to the search state
+    #[must_use]
+    pub fn search_state(&self) -> &Arc<Mutex<SearchState>> {
+        &self.search_state
+    }
+
+    /// Reset the board to starting position
+    pub fn new_game(&mut self) {
+        self.stop_search();
+        self.board = Board::new();
+        let mut state = self.search_state.lock();
+        state.new_search();
+    }
+
+    /// Stop any active search
+    pub fn stop_search(&mut self) {
+        if let Some(job) = self.current_job.take() {
+            job.stop_and_wait();
+        }
+    }
+
+    /// Signal stop to active search (non-blocking)
+    pub fn signal_stop(&mut self) {
+        if let Some(job) = &self.current_job {
+            job.signal_stop();
+        }
+    }
+
+    /// Handle ponderhit
+    pub fn ponderhit(&mut self) {
+        if let Some(job) = &self.current_job {
+            job.ponderhit();
+        }
+    }
+
+    /// Check if there's an active search
+    #[must_use]
+    pub fn is_searching(&self) -> bool {
+        self.current_job.is_some()
+    }
+
+    /// Start a search with the given parameters
+    ///
+    /// The `on_complete` callback is called when the search finishes with the result.
+    pub fn start_search<F>(&mut self, params: SearchParams, on_complete: F)
+    where
+        F: FnOnce(SearchResult) + Send + 'static,
+    {
+        self.stop_search();
+
+        // Prepare search state
+        let node_limit = {
+            let mut guard = self.search_state.lock();
+            guard.new_search();
+            guard.stats.max_nodes
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let start = Instant::now();
+
+        // Set deadlines based on params
+        let (soft_deadline, hard_deadline) = if params.infinite || params.ponder {
+            (None, None)
+        } else {
+            (
+                if params.soft_time_ms > 0 {
+                    Some(start + Duration::from_millis(params.soft_time_ms))
+                } else {
+                    None
+                },
+                if params.hard_time_ms > 0 {
+                    Some(
+                        start
+                            + Duration::from_millis(
+                                params.hard_time_ms.saturating_sub(HARD_STOP_MARGIN_MS),
+                            ),
+                    )
+                } else {
+                    None
+                },
+            )
+        };
+
+        let clock = Arc::new(SearchClock::new(start, soft_deadline, hard_deadline));
+        let pondering = Arc::new(AtomicBool::new(params.ponder));
+        let hard_deadline_for_timer = hard_deadline;
+
+        // Build unified search config
+        let mut config = if let Some(d) = params.depth {
+            SearchConfig::depth(d)
+        } else {
+            SearchConfig::default()
+        };
+        if !params.infinite && !params.ponder && params.soft_time_ms > 0 {
+            config.time_limit_ms = params.soft_time_ms;
+        }
+        if node_limit > 0 {
+            config = config.with_nodes(node_limit);
+        }
+        if let Some(cb) = &self.info_callback {
+            config = config.with_info_callback(cb.clone());
+        }
+
+        // Spawn timer thread for hard deadline
+        if !params.infinite && !params.ponder && params.depth.is_none() && params.hard_time_ms > 0 {
+            let stop_timer = Arc::clone(&stop);
+            thread::spawn(move || {
+                if let Some(deadline) = hard_deadline_for_timer {
+                    let now = Instant::now();
+                    if deadline > now {
+                        thread::sleep(deadline - now);
+                    }
+                    stop_timer.store(true, Ordering::Relaxed);
+                }
+            });
+        }
+
+        // Clone for the search thread
+        let mut search_board = self.board.clone();
+        let search_state = Arc::clone(&self.search_state);
+        let stop_clone = Arc::clone(&stop);
+        let pondering_clone = Arc::clone(&pondering);
+
+        let handle = thread::Builder::new()
+            .name("search".to_string())
+            .stack_size(SEARCH_STACK_SIZE)
+            .spawn(move || {
+                let mut guard = search_state.lock();
+                let result: SearchResult =
+                    search(&mut search_board, &mut guard, config, &stop_clone);
+
+                // Wait while pondering (unless stopped)
+                while pondering_clone.load(Ordering::Relaxed) && !stop_clone.load(Ordering::Relaxed)
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+
+                on_complete(result);
+            })
+            .expect("failed to spawn search thread");
+
+        self.current_job = Some(SearchJob {
+            stop,
+            clock,
+            pondering,
+            planned_soft_time_ms: params.soft_time_ms,
+            planned_hard_time_ms: params.hard_time_ms,
+            handle,
+        });
+    }
+
+    /// Execute a closure with mutable access to the search state.
+    ///
+    /// Returns `Some(R)` if the lock was acquired, `None` if poisoned.
+    pub fn with_search_state<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut SearchState) -> R,
+    {
+        Some(f(&mut self.search_state.lock()))
+    }
+
+    /// Execute a closure with immutable access to the search state.
+    pub fn with_search_state_ref<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&SearchState) -> R,
+    {
+        Some(f(&self.search_state.lock()))
+    }
+
+    /// Resize the transposition table
+    pub fn resize_hash(&mut self, mb: usize) {
+        self.stop_search();
+        self.with_search_state(|state| state.reset_tables(mb));
+    }
+
+    /// Set trace/debug mode
+    pub fn set_trace(&mut self, trace: bool) {
+        self.with_search_state(|state| state.set_trace(trace));
+    }
+
+    /// Set maximum nodes for search
+    pub fn set_max_nodes(&mut self, nodes: u64) {
+        self.with_search_state(|state| state.set_max_nodes(nodes));
+    }
+
+    /// Set callback for iteration info reporting.
+    pub fn set_info_callback(&mut self, cb: Option<SearchInfoCallback>) {
+        self.info_callback = cb;
+    }
+}

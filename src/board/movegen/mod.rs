@@ -159,6 +159,53 @@ impl Board {
         !self.is_in_check(color) && self.generate_moves().is_empty()
     }
 
+    /// Check if a move is legal without generating all moves.
+    ///
+    /// This is faster than `generate_moves().contains(&mv)` when you only need
+    /// to validate a single move (e.g., from TT or user input).
+    #[must_use]
+    pub fn is_legal_move(&mut self, mv: Move) -> bool {
+        let from = mv.from();
+        let current_color = self.current_color();
+
+        // Check that there's a piece of the right color on the from square
+        let Some((piece_color, piece)) = self.piece_at(from) else {
+            return false;
+        };
+        if piece_color != current_color {
+            return false;
+        }
+
+        // Generate pseudo-moves for just this piece
+        let piece_moves = self.generate_piece_moves(from, piece);
+
+        // Check if the move matches any pseudo-legal move
+        if !piece_moves.iter().any(|m| *m == mv) {
+            return false;
+        }
+
+        // For castling, check that king doesn't pass through check
+        if mv.is_castling() {
+            let opponent_color = current_color.opponent();
+            let to = mv.to();
+            let king_mid_sq = Square(from.rank(), usize::midpoint(from.file(), to.file()));
+
+            if self.is_square_attacked(from, opponent_color)
+                || self.is_square_attacked(king_mid_sq, opponent_color)
+                || self.is_square_attacked(to, opponent_color)
+            {
+                return false;
+            }
+        }
+
+        // Make the move and check if king is left in check
+        let info = self.make_move(mv);
+        let legal = !self.is_in_check(current_color);
+        self.unmake_move(mv, info);
+
+        legal
+    }
+
     /// Filter and collect capture moves from a piece's move list
     fn collect_captures(piece_moves: &MoveList, dest: &mut MoveList) {
         for m in piece_moves {
@@ -180,7 +227,13 @@ impl Board {
         }
 
         // For other pieces, filter captures from their normal moves
-        for piece in [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen, Piece::King] {
+        for piece in [
+            Piece::Knight,
+            Piece::Bishop,
+            Piece::Rook,
+            Piece::Queen,
+            Piece::King,
+        ] {
             for from_idx in self.pieces[c_idx][piece.index()].iter() {
                 let from = Square::from_index(from_idx);
                 let piece_moves = self.generate_piece_moves(from, piece);

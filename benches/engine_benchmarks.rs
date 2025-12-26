@@ -116,5 +116,11 @@ fn bench_eval(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_perft, bench_movegen, bench_search, bench_eval);
+criterion_group!(
+    benches,
+    bench_perft,
+    bench_movegen,
+    bench_search,
+    bench_eval
+);
 criterion_main!(benches);

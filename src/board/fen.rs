@@ -149,7 +149,8 @@ impl Board {
             castling.push('-');
         }
         let ep = self
-            .en_passant_target.map_or_else(|| "-".to_string(), |sq| sq.to_string());
+            .en_passant_target
+            .map_or_else(|| "-".to_string(), |sq| sq.to_string());
 
         format!(
             "{} {} {} {} {} 1",
@@ -196,9 +197,8 @@ impl Board {
 
         // Parse promotion piece if present
         let promotion = if uci.len() == 5 {
-            let piece = Piece::from_char(chars[4]).ok_or(MoveParseError::InvalidPromotion {
-                char: chars[4],
-            })?;
+            let piece = Piece::from_char(chars[4])
+                .ok_or(MoveParseError::InvalidPromotion { char: chars[4] })?;
             if matches!(piece, Piece::Pawn | Piece::King) {
                 return Err(MoveParseError::InvalidPromotion { char: chars[4] });
             }

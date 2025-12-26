@@ -83,6 +83,9 @@
 #![allow(clippy::missing_panics_doc)]
 
 pub mod board;
+pub mod engine;
+pub mod sync;
+pub mod timer;
 pub mod tt;
 pub mod uci;
 pub mod xboard;

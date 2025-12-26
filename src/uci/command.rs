@@ -29,63 +29,75 @@ pub struct GoParams {
     pub infinite: bool,
 }
 
-#[must_use] 
+/// Parse the next parameter value as type T.
+#[inline]
+fn parse_next<T: std::str::FromStr>(parts: &[&str], i: usize) -> Option<T> {
+    parts.get(i + 1).and_then(|v| v.parse::<T>().ok())
+}
+
+#[must_use]
 pub fn parse_go_params(parts: &[&str]) -> GoParams {
     let mut params = GoParams::default();
     let mut i = 1;
+
     while i < parts.len() {
-        match parts[i] {
+        let consumed = match parts[i] {
+            // Time parameters (u64)
             "wtime" => {
-                params.wtime = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
-                i += 2;
+                params.wtime = parse_next(parts, i);
+                2
             }
             "btime" => {
-                params.btime = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
-                i += 2;
+                params.btime = parse_next(parts, i);
+                2
             }
             "winc" => {
-                params.winc = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
-                i += 2;
+                params.winc = parse_next(parts, i);
+                2
             }
             "binc" => {
-                params.binc = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
-                i += 2;
+                params.binc = parse_next(parts, i);
+                2
             }
             "movetime" => {
-                params.movetime = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
-                i += 2;
+                params.movetime = parse_next(parts, i);
+                2
             }
             "movestogo" => {
-                params.movestogo = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
-                i += 2;
-            }
-            "depth" => {
-                params.depth = parts.get(i + 1).and_then(|v| v.parse::<u32>().ok());
-                i += 2;
+                params.movestogo = parse_next(parts, i);
+                2
             }
             "nodes" => {
-                params.nodes = parts.get(i + 1).and_then(|v| v.parse::<u64>().ok());
-                i += 2;
+                params.nodes = parse_next(parts, i);
+                2
+            }
+            // Depth parameters (u32)
+            "depth" => {
+                params.depth = parse_next(parts, i);
+                2
             }
             "mate" => {
-                params.mate = parts.get(i + 1).and_then(|v| v.parse::<u32>().ok());
-                i += 2;
+                params.mate = parse_next(parts, i);
+                2
             }
+            // Flags
             "ponder" => {
                 params.ponder = true;
-                i += 1;
+                1
             }
             "infinite" => {
                 params.infinite = true;
-                i += 1;
+                1
             }
-            _ => i += 1,
-        }
+            // Unknown - skip
+            _ => 1,
+        };
+        i += consumed;
     }
     params
 }
 
-#[must_use] 
+#[must_use]
 pub fn parse_uci_command(line: &str) -> Option<UciCommand> {
     let trimmed = line.trim();
     if trimmed.is_empty() {

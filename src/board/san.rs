@@ -94,9 +94,7 @@ impl Board {
         let same_dest_moves: Vec<&Move> = moves
             .iter()
             .filter(|m| {
-                m.to() == mv.to()
-                    && self.piece_on(m.from()) == Some(piece)
-                    && m.from() != mv.from()
+                m.to() == mv.to() && self.piece_on(m.from()) == Some(piece) && m.from() != mv.from()
             })
             .collect();
 
@@ -113,9 +111,9 @@ impl Board {
             .any(|m| m.from().rank() == mv.from().rank());
 
         match (same_file, same_rank) {
-            (false, _) => (true, false),  // File disambiguates
+            (false, _) => (true, false),    // File disambiguates
             (true, false) => (false, true), // Rank disambiguates
-            (true, true) => (true, true),  // Need both
+            (true, true) => (true, true),   // Need both
         }
     }
 
@@ -147,8 +145,7 @@ impl Board {
 
         // Parse the SAN components
         let (piece, rest) = if chars[0].is_ascii_uppercase() {
-            let p = Piece::from_char(chars[0])
-                .ok_or(SanError::InvalidPiece { char: chars[0] })?;
+            let p = Piece::from_char(chars[0]).ok_or(SanError::InvalidPiece { char: chars[0] })?;
             (p, &chars[1..])
         } else {
             (Piece::Pawn, &chars[..])
@@ -179,9 +176,7 @@ impl Board {
 
     /// Parse SAN components after the piece letter.
     /// Returns (`disambig_file`, `disambig_rank`, `is_capture`, `dest_chars`, promotion)
-    fn parse_san_move_str(
-        chars: &[char],
-    ) -> Result<SanParseResult, SanError> {
+    fn parse_san_move_str(chars: &[char]) -> Result<SanParseResult, SanError> {
         let mut idx = 0;
         let mut disambig_file = None;
         let mut disambig_rank = None;
@@ -302,9 +297,13 @@ impl Board {
         }
 
         match matching.len() {
-            0 => Err(SanError::NoMatchingMove { san: san.to_string() }),
+            0 => Err(SanError::NoMatchingMove {
+                san: san.to_string(),
+            }),
             1 => Ok(matching[0]),
-            _ => Err(SanError::AmbiguousMove { san: san.to_string() }),
+            _ => Err(SanError::AmbiguousMove {
+                san: san.to_string(),
+            }),
         }
     }
 
@@ -359,7 +358,8 @@ mod tests {
 
     #[test]
     fn test_captures() {
-        let mut board = Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2");
+        let mut board =
+            Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2");
 
         // exd5
         let mv = board.parse_san("exd5").unwrap();
@@ -403,7 +403,8 @@ mod tests {
     #[test]
     fn test_checkmate() {
         // Fool's mate position
-        let mut board = Board::from_fen("rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2");
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2");
 
         // Qh4#
         let mv = board.parse_san("Qh4").unwrap();

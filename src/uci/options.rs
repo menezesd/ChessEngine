@@ -15,7 +15,7 @@ pub struct UciOptions {
 }
 
 impl UciOptions {
-    #[must_use] 
+    #[must_use]
     pub fn new(hash_mb: usize) -> Self {
         UciOptions {
             hash_mb,
@@ -131,7 +131,7 @@ impl UciOptions {
     }
 }
 
-#[must_use] 
+#[must_use]
 pub fn parse_setoption(parts: &[&str]) -> Option<(String, Option<String>)> {
     if parts.is_empty() || parts[0] != "setoption" {
         return None;

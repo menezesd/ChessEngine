@@ -52,7 +52,8 @@ impl ZobristKeys {
 }
 
 // Initialize Zobrist keys lazily and globally
-pub(crate) static ZOBRIST: std::sync::LazyLock<ZobristKeys> = std::sync::LazyLock::new(ZobristKeys::new);
+pub(crate) static ZOBRIST: std::sync::LazyLock<ZobristKeys> =
+    std::sync::LazyLock::new(ZobristKeys::new);
 
 // Re-export simple index accessors for Zobrist hashing
 // These use the existing index() methods on Piece, Color, and Square

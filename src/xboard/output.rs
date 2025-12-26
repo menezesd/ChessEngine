@@ -15,7 +15,7 @@ use crate::board::{Board, Move};
 /// Format a principal variation line for `XBoard` output.
 ///
 /// `XBoard` format: `<ply> <score> <time> <nodes> <pv>`
-#[must_use] 
+#[must_use]
 pub fn format_thinking(
     board: &Board,
     depth: u32,
@@ -43,7 +43,7 @@ fn format_pv_san(board: &Board, pv: &[Move]) -> String {
 }
 
 /// Format a move announcement for `XBoard`.
-#[must_use] 
+#[must_use]
 pub fn format_move(board: &Board, mv: &Move) -> String {
     let san = board.move_to_san(mv);
     format!("move {san}")
@@ -78,25 +78,25 @@ pub fn format_features() -> String {
 }
 
 /// Format an error message for `XBoard`.
-#[must_use] 
+#[must_use]
 pub fn format_error(command: &str, message: &str) -> String {
     format!("Error ({message}): {command}")
 }
 
 /// Format illegal move error.
-#[must_use] 
+#[must_use]
 pub fn format_illegal_move(mv: &str) -> String {
     format!("Illegal move: {mv}")
 }
 
 /// Format a pong response.
-#[must_use] 
+#[must_use]
 pub fn format_pong(n: u32) -> String {
     format!("pong {n}")
 }
 
 /// Format a hint.
-#[must_use] 
+#[must_use]
 pub fn format_hint(board: &Board, mv: &Move) -> String {
     let san = board.move_to_san(mv);
     format!("Hint: {san}")

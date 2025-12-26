@@ -127,17 +127,48 @@ fn parse_arg_command(parts: &[&str]) -> Option<XBoardCommand> {
         return None; // Command requires an argument but none is present
     }
     match parts[0] {
-        "protover" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Protover),
-        "accepted" => parts.get(1).map(|s| XBoardCommand::Accepted((*s).to_string())),
-        "rejected" => parts.get(1).map(|s| XBoardCommand::Rejected((*s).to_string())),
-        "time" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Time),
-        "otim" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::OTime),
-        "st" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::St),
-        "sd" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Sd),
-        "ping" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Ping),
-        "memory" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Memory),
-        "cores" => parts.get(1).and_then(|v| v.parse().ok()).map(XBoardCommand::Cores),
-        "c" => parts.get(1).and_then(|v| v.chars().next()).map(XBoardCommand::EditColor),
+        "protover" => parts
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .map(XBoardCommand::Protover),
+        "accepted" => parts
+            .get(1)
+            .map(|s| XBoardCommand::Accepted((*s).to_string())),
+        "rejected" => parts
+            .get(1)
+            .map(|s| XBoardCommand::Rejected((*s).to_string())),
+        "time" => parts
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .map(XBoardCommand::Time),
+        "otim" => parts
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .map(XBoardCommand::OTime),
+        "st" => parts
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .map(XBoardCommand::St),
+        "sd" => parts
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .map(XBoardCommand::Sd),
+        "ping" => parts
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .map(XBoardCommand::Ping),
+        "memory" => parts
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .map(XBoardCommand::Memory),
+        "cores" => parts
+            .get(1)
+            .and_then(|v| v.parse().ok())
+            .map(XBoardCommand::Cores),
+        "c" => parts
+            .get(1)
+            .and_then(|v| v.chars().next())
+            .map(XBoardCommand::EditColor),
         _ => None,
     }
 }
@@ -154,7 +185,10 @@ fn parse_complex_command(trimmed: &str, parts: &[&str]) -> XBoardCommand {
         }
         "level" => {
             let mps = parts.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-            let base = parts.get(2).and_then(|v| parse_time_control(v)).unwrap_or(0);
+            let base = parts
+                .get(2)
+                .and_then(|v| parse_time_control(v))
+                .unwrap_or(0);
             let inc = parts.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
             XBoardCommand::Level {
                 moves_per_session: mps,
@@ -247,11 +281,26 @@ mod tests {
 
     #[test]
     fn test_basic_commands() {
-        assert!(matches!(parse_xboard_command("xboard"), Some(XBoardCommand::XBoard)));
-        assert!(matches!(parse_xboard_command("new"), Some(XBoardCommand::New)));
-        assert!(matches!(parse_xboard_command("quit"), Some(XBoardCommand::Quit)));
-        assert!(matches!(parse_xboard_command("go"), Some(XBoardCommand::Go)));
-        assert!(matches!(parse_xboard_command("force"), Some(XBoardCommand::Force)));
+        assert!(matches!(
+            parse_xboard_command("xboard"),
+            Some(XBoardCommand::XBoard)
+        ));
+        assert!(matches!(
+            parse_xboard_command("new"),
+            Some(XBoardCommand::New)
+        ));
+        assert!(matches!(
+            parse_xboard_command("quit"),
+            Some(XBoardCommand::Quit)
+        ));
+        assert!(matches!(
+            parse_xboard_command("go"),
+            Some(XBoardCommand::Go)
+        ));
+        assert!(matches!(
+            parse_xboard_command("force"),
+            Some(XBoardCommand::Force)
+        ));
     }
 
     #[test]
@@ -288,7 +337,9 @@ mod tests {
 
     #[test]
     fn test_setboard() {
-        match parse_xboard_command("setboard rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1") {
+        match parse_xboard_command(
+            "setboard rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        ) {
             Some(XBoardCommand::SetBoard(fen)) => {
                 assert!(fen.starts_with("rnbqkbnr"));
             }

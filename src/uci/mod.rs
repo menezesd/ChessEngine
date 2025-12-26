@@ -12,13 +12,18 @@ pub mod print;
 pub mod report;
 pub mod time;
 
+pub use time::TimeControl;
+
 /// Error type for UCI position command parsing
 #[derive(Debug, Clone)]
 pub enum UciError {
     /// Invalid FEN string
     InvalidFen(FenError),
     /// Invalid move in the move list
-    InvalidMove { move_str: String, error: MoveParseError },
+    InvalidMove {
+        move_str: String,
+        error: MoveParseError,
+    },
     /// Missing required parts in the command
     MissingParts,
 }
@@ -79,10 +84,12 @@ pub fn try_parse_position_command(board: &mut Board, parts: &[&str]) -> Result<(
     if i < parts.len() && parts[i] == "moves" {
         i += 1;
         while i < parts.len() {
-            let mv = board.parse_move(parts[i]).map_err(|e| UciError::InvalidMove {
-                move_str: parts[i].to_string(),
-                error: e,
-            })?;
+            let mv = board
+                .parse_move(parts[i])
+                .map_err(|e| UciError::InvalidMove {
+                    move_str: parts[i].to_string(),
+                    error: e,
+                })?;
             board.make_move(mv);
             i += 1;
         }
@@ -101,7 +108,7 @@ pub fn parse_position_command(board: &mut Board, parts: &[&str]) {
     }
 }
 
-#[must_use] 
+#[must_use]
 pub fn format_uci_move(mv: &Move) -> String {
     mv.to_string()
 }

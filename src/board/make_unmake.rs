@@ -2,17 +2,11 @@ use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
 };
 
+use super::eval_update::pst_square;
 use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
 use super::{
-    bit_for_square, castle_bit, Board, Color, Move, NullMoveInfo, Piece,
-    Square, UnmakeInfo,
+    bit_for_square, castle_bit, Board, Color, Move, NullMoveInfo, Piece, Square, UnmakeInfo,
 };
-
-/// Calculate PST square index for a given color
-#[inline]
-fn pst_sq(sq_idx: usize, is_white: bool) -> usize {
-    if is_white { sq_idx } else { sq_idx ^ 56 }
-}
 
 impl Board {
     pub(crate) fn current_color(&self) -> Color {
@@ -130,16 +124,141 @@ impl Board {
         hash
     }
 
-    #[allow(clippy::too_many_lines)] // Inherently complex: handles all move types + incremental eval
+    // =========================================================================
+    // Make/Unmake helper methods
+    // =========================================================================
+
+    /// Remove a captured piece, updating board state, hash, and incremental eval.
+    /// Returns the hash XOR delta for the capture.
+    #[inline]
+    fn remove_captured_piece(
+        &mut self,
+        capture_sq: Square,
+        captured: (Color, Piece),
+        opp_idx: usize,
+    ) -> u64 {
+        let (cap_col, cap_piece) = captured;
+        let cap_sq_idx = capture_sq.index().as_usize();
+        let cap_p_idx = cap_piece.index();
+        let cap_pst = pst_square(cap_sq_idx, cap_col == Color::White);
+
+        // Remove from board
+        self.remove_piece(capture_sq, cap_col, cap_piece);
+
+        // Update incremental eval
+        self.eval_mg[opp_idx] -= MATERIAL_MG[cap_p_idx] + PST_MG[cap_p_idx][cap_pst];
+        self.eval_eg[opp_idx] -= MATERIAL_EG[cap_p_idx] + PST_EG[cap_p_idx][cap_pst];
+        self.game_phase[opp_idx] -= PHASE_WEIGHTS[cap_p_idx];
+
+        // Return hash delta
+        ZOBRIST.piece_keys[piece_to_zobrist_index(cap_piece)][color_to_zobrist_index(cap_col)]
+            [square_to_zobrist_index(capture_sq)]
+    }
+
+    /// Execute castling: move king (already removed), place king and rook.
+    /// Returns the hash XOR delta for the rook movement.
+    #[inline]
+    fn execute_castling(&mut self, m: &Move, color: Color, c_idx: usize, is_white: bool) -> u64 {
+        let to_idx = m.to().index().as_usize();
+        let to_pst = pst_square(to_idx, is_white);
+
+        // Place king at destination
+        self.set_piece(m.to(), color, Piece::King);
+
+        // Update eval for king placement (king index = 5)
+        self.eval_mg[c_idx] += MATERIAL_MG[5] + PST_MG[5][to_pst];
+        self.eval_eg[c_idx] += MATERIAL_EG[5] + PST_EG[5][to_pst];
+        self.game_phase[c_idx] += PHASE_WEIGHTS[5];
+
+        // Determine rook squares
+        let (rook_from_f, rook_to_f) = if m.to().file() == 6 { (7, 5) } else { (0, 3) };
+        let rook_from = Square(m.to().rank(), rook_from_f);
+        let rook_to = Square(m.to().rank(), rook_to_f);
+        let rook_from_idx = rook_from.index().as_usize();
+        let rook_to_idx = rook_to.index().as_usize();
+
+        // Move the rook
+        let rook_info = self.piece_at(rook_from).expect("Castling without rook");
+        self.remove_piece(rook_from, rook_info.0, rook_info.1);
+        self.set_piece(rook_to, rook_info.0, rook_info.1);
+
+        // Update eval for rook move (rook index = 3)
+        let rook_from_pst = pst_square(rook_from_idx, is_white);
+        let rook_to_pst = pst_square(rook_to_idx, is_white);
+        self.eval_mg[c_idx] -= MATERIAL_MG[3] + PST_MG[3][rook_from_pst];
+        self.eval_eg[c_idx] -= MATERIAL_EG[3] + PST_EG[3][rook_from_pst];
+        self.eval_mg[c_idx] += MATERIAL_MG[3] + PST_MG[3][rook_to_pst];
+        self.eval_eg[c_idx] += MATERIAL_EG[3] + PST_EG[3][rook_to_pst];
+
+        // Return hash delta for rook movement
+        ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)][color_to_zobrist_index(color)]
+            [square_to_zobrist_index(rook_from)]
+            ^ ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)][color_to_zobrist_index(color)]
+                [square_to_zobrist_index(rook_to)]
+    }
+
+    /// Update castling rights based on a move.
+    /// Returns the hash XOR delta for castling rights changes.
+    #[inline]
+    fn update_castling_rights(
+        &mut self,
+        m: &Move,
+        moving_piece: Piece,
+        color: Color,
+        captured: Option<(Color, Piece)>,
+    ) -> u64 {
+        let mut hash_delta: u64 = 0;
+
+        // King move removes both castling rights
+        if moving_piece == Piece::King {
+            if self.has_castling_right(color, 'K') {
+                hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][0];
+                self.castling_rights &= !castle_bit(color, 'K');
+            }
+            if self.has_castling_right(color, 'Q') {
+                hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][1];
+                self.castling_rights &= !castle_bit(color, 'Q');
+            }
+        } else if moving_piece == Piece::Rook {
+            // Rook move from starting square removes that side's castling
+            let start_rank = if color == Color::White { 0 } else { 7 };
+            if m.from() == Square(start_rank, 0) && self.has_castling_right(color, 'Q') {
+                hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][1];
+                self.castling_rights &= !castle_bit(color, 'Q');
+            } else if m.from() == Square(start_rank, 7) && self.has_castling_right(color, 'K') {
+                hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][0];
+                self.castling_rights &= !castle_bit(color, 'K');
+            }
+        }
+
+        // Capturing a rook on its starting square removes opponent's castling
+        if let Some((captured_color, captured_piece)) = captured {
+            if captured_piece == Piece::Rook {
+                let start_rank = if captured_color == Color::White { 0 } else { 7 };
+                if m.to() == Square(start_rank, 0) && self.has_castling_right(captured_color, 'Q') {
+                    hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][1];
+                    self.castling_rights &= !castle_bit(captured_color, 'Q');
+                } else if m.to() == Square(start_rank, 7)
+                    && self.has_castling_right(captured_color, 'K')
+                {
+                    hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][0];
+                    self.castling_rights &= !castle_bit(captured_color, 'K');
+                }
+            }
+        }
+
+        hash_delta
+    }
+
+    // =========================================================================
+    // Core make/unmake implementation
+    // =========================================================================
+
     pub(crate) fn make_move(&mut self, m: Move) -> UnmakeInfo {
-        let mut current_hash = self.hash;
         let previous_hash = self.hash;
+        let mut current_hash = self.hash;
 
-        let color = self.current_color();
-        let c_idx = color.index();
-        let opp_idx = 1 - c_idx;
-        let is_white = color == Color::White;
-
+        // Save state for unmake
         let previous_en_passant_target = self.en_passant_target;
         let previous_castling_rights = self.castling_rights;
         let previous_halfmove_clock = self.halfmove_clock;
@@ -147,124 +266,89 @@ impl Board {
         let previous_eval_eg = self.eval_eg;
         let previous_game_phase = self.game_phase;
 
+        let color = self.current_color();
+        let c_idx = color.index();
+        let opp_idx = 1 - c_idx;
+        let is_white = color == Color::White;
+
+        // Flip side to move in hash
         current_hash ^= ZOBRIST.black_to_move_key;
 
+        // Remove old en passant from hash
         if let Some(old_ep) = self.en_passant_target {
             current_hash ^= ZOBRIST.en_passant_keys[old_ep.1];
         }
 
-        let mut captured_piece_info: Option<(Color, Piece)> = None;
-
-        if m.is_en_passant() {
-            let capture_row = if color == Color::White {
+        // Handle captures
+        let captured_piece_info = if m.is_en_passant() {
+            let capture_row = if is_white {
                 m.to().rank() - 1
             } else {
                 m.to().rank() + 1
             };
             let capture_sq = Square(capture_row, m.to().file());
-            captured_piece_info = self.piece_at(capture_sq);
-            if let Some((cap_col, cap_piece)) = captured_piece_info {
-                let cap_sq_idx = capture_sq.index().as_usize();
-                let cap_p_idx = cap_piece.index();
-                let cap_pst_sq = pst_sq(cap_sq_idx, cap_col == Color::White);
-
-                self.remove_piece(capture_sq, cap_col, cap_piece);
-                current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(cap_piece)]
-                    [color_to_zobrist_index(cap_col)][square_to_zobrist_index(capture_sq)];
-
-                // Update incremental eval for captured piece
-                self.eval_mg[opp_idx] -= MATERIAL_MG[cap_p_idx] + PST_MG[cap_p_idx][cap_pst_sq];
-                self.eval_eg[opp_idx] -= MATERIAL_EG[cap_p_idx] + PST_EG[cap_p_idx][cap_pst_sq];
-                self.game_phase[opp_idx] -= PHASE_WEIGHTS[cap_p_idx];
+            if let Some(captured) = self.piece_at(capture_sq) {
+                current_hash ^= self.remove_captured_piece(capture_sq, captured, opp_idx);
+                Some(captured)
+            } else {
+                None
             }
         } else if !m.is_castling() {
-            captured_piece_info = self.piece_at(m.to());
-            if let Some((cap_col, cap_piece)) = captured_piece_info {
-                let cap_sq_idx = m.to().index().as_usize();
-                let cap_p_idx = cap_piece.index();
-                let cap_pst_sq = pst_sq(cap_sq_idx, cap_col == Color::White);
-
-                self.remove_piece(m.to(), cap_col, cap_piece);
-                current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(cap_piece)]
-                    [color_to_zobrist_index(cap_col)][square_to_zobrist_index(m.to())];
-
-                // Update incremental eval for captured piece
-                self.eval_mg[opp_idx] -= MATERIAL_MG[cap_p_idx] + PST_MG[cap_p_idx][cap_pst_sq];
-                self.eval_eg[opp_idx] -= MATERIAL_EG[cap_p_idx] + PST_EG[cap_p_idx][cap_pst_sq];
-                self.game_phase[opp_idx] -= PHASE_WEIGHTS[cap_p_idx];
+            if let Some(captured) = self.piece_at(m.to()) {
+                current_hash ^= self.remove_captured_piece(m.to(), captured, opp_idx);
+                Some(captured)
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
+        // Get moving piece info and remove from source square
         let moving_piece_info = self.piece_at(m.from()).expect("make_move 'from' empty");
         let (moving_color, moving_piece) = moving_piece_info;
-        let from_sq_idx = square_to_zobrist_index(m.from());
-        let to_sq_idx = square_to_zobrist_index(m.to());
+        let piece_idx = moving_piece.index();
         let from_idx = m.from().index().as_usize();
         let to_idx = m.to().index().as_usize();
-        let piece_idx = moving_piece.index();
 
+        // Remove moving piece from hash
         current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(moving_piece)]
-            [color_to_zobrist_index(moving_color)][from_sq_idx];
+            [color_to_zobrist_index(moving_color)][square_to_zobrist_index(m.from())];
 
+        // Remove moving piece from board
         self.remove_piece(m.from(), moving_color, moving_piece);
 
         // Update eval: remove piece from 'from' square
-        let from_pst_sq = pst_sq(from_idx, is_white);
-        self.eval_mg[c_idx] -= MATERIAL_MG[piece_idx] + PST_MG[piece_idx][from_pst_sq];
-        self.eval_eg[c_idx] -= MATERIAL_EG[piece_idx] + PST_EG[piece_idx][from_pst_sq];
+        let from_pst = pst_square(from_idx, is_white);
+        self.eval_mg[c_idx] -= MATERIAL_MG[piece_idx] + PST_MG[piece_idx][from_pst];
+        self.eval_eg[c_idx] -= MATERIAL_EG[piece_idx] + PST_EG[piece_idx][from_pst];
         self.game_phase[c_idx] -= PHASE_WEIGHTS[piece_idx];
 
+        // Place piece at destination
         if m.is_castling() {
-            self.set_piece(m.to(), color, Piece::King);
+            // Add king to hash at destination
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::King)]
-                [color_to_zobrist_index(color)][to_sq_idx];
-
-            // Update eval: add king at 'to' square
-            let to_pst_sq = pst_sq(to_idx, is_white);
-            self.eval_mg[c_idx] += MATERIAL_MG[5] + PST_MG[5][to_pst_sq];
-            self.eval_eg[c_idx] += MATERIAL_EG[5] + PST_EG[5][to_pst_sq];
-            self.game_phase[c_idx] += PHASE_WEIGHTS[5];
-
-            let (rook_from_f, rook_to_f) = if m.to().file() == 6 { (7, 5) } else { (0, 3) };
-            let rook_from_sq = Square(m.to().rank(), rook_from_f);
-            let rook_to_sq = Square(m.to().rank(), rook_to_f);
-            let rook_from_idx = rook_from_sq.index().as_usize();
-            let rook_to_idx = rook_to_sq.index().as_usize();
-            let rook_info = self.piece_at(rook_from_sq).expect("Castling without rook");
-            self.remove_piece(rook_from_sq, rook_info.0, rook_info.1);
-            self.set_piece(rook_to_sq, rook_info.0, rook_info.1);
-
-            current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)]
-                [color_to_zobrist_index(color)][square_to_zobrist_index(rook_from_sq)];
-            current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)]
-                [color_to_zobrist_index(color)][square_to_zobrist_index(rook_to_sq)];
-
-            // Update eval for rook move (rook index = 3)
-            let rook_from_pst = pst_sq(rook_from_idx, is_white);
-            let rook_to_pst = pst_sq(rook_to_idx, is_white);
-            self.eval_mg[c_idx] -= MATERIAL_MG[3] + PST_MG[3][rook_from_pst];
-            self.eval_eg[c_idx] -= MATERIAL_EG[3] + PST_EG[3][rook_from_pst];
-            self.eval_mg[c_idx] += MATERIAL_MG[3] + PST_MG[3][rook_to_pst];
-            self.eval_eg[c_idx] += MATERIAL_EG[3] + PST_EG[3][rook_to_pst];
-            // game_phase unchanged for rook move
+                [color_to_zobrist_index(color)][square_to_zobrist_index(m.to())];
+            // Execute castling (places king and moves rook)
+            current_hash ^= self.execute_castling(&m, color, c_idx, is_white);
         } else {
-            let piece_to_place = if let Some(promoted_piece) = m.promotion() {
-                (color, promoted_piece)
-            } else {
-                moving_piece_info
-            };
+            // Determine piece to place (may be promoted)
+            let piece_to_place = m.promotion().map_or(moving_piece_info, |p| (color, p));
             self.set_piece(m.to(), piece_to_place.0, piece_to_place.1);
+
+            // Add placed piece to hash
             current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(piece_to_place.1)]
-                [color_to_zobrist_index(piece_to_place.0)][to_sq_idx];
+                [color_to_zobrist_index(piece_to_place.0)][square_to_zobrist_index(m.to())];
 
             // Update eval: add piece at 'to' square
             let placed_idx = piece_to_place.1.index();
-            let to_pst_sq = pst_sq(to_idx, is_white);
-            self.eval_mg[c_idx] += MATERIAL_MG[placed_idx] + PST_MG[placed_idx][to_pst_sq];
-            self.eval_eg[c_idx] += MATERIAL_EG[placed_idx] + PST_EG[placed_idx][to_pst_sq];
+            let to_pst = pst_square(to_idx, is_white);
+            self.eval_mg[c_idx] += MATERIAL_MG[placed_idx] + PST_MG[placed_idx][to_pst];
+            self.eval_eg[c_idx] += MATERIAL_EG[placed_idx] + PST_EG[placed_idx][to_pst];
             self.game_phase[c_idx] += PHASE_WEIGHTS[placed_idx];
         }
 
+        // Handle double pawn push - set new en passant target
         self.en_passant_target = None;
         if m.is_double_pawn_push() {
             let ep_row = usize::midpoint(m.from().rank(), m.to().rank());
@@ -273,52 +357,15 @@ impl Board {
             current_hash ^= ZOBRIST.en_passant_keys[ep_sq.file()];
         }
 
-        let is_capture = m.is_capture();
-        if moving_piece == Piece::Pawn || is_capture {
+        // Update halfmove clock
+        if moving_piece == Piece::Pawn || m.is_capture() {
             self.halfmove_clock = 0;
         } else {
             self.halfmove_clock = self.halfmove_clock.saturating_add(1);
         }
 
-        let mut castle_hash_diff: u64 = 0;
-
-        if moving_piece == Piece::King {
-            if self.has_castling_right(color, 'K') {
-                castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][0];
-                self.castling_rights &= !castle_bit(color, 'K');
-            }
-            if self.has_castling_right(color, 'Q') {
-                castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][1];
-                self.castling_rights &= !castle_bit(color, 'Q');
-            }
-        } else if moving_piece == Piece::Rook {
-            let start_rank = if color == Color::White { 0 } else { 7 };
-            if m.from() == Square(start_rank, 0) && self.has_castling_right(color, 'Q') {
-                castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][1];
-                self.castling_rights &= !castle_bit(color, 'Q');
-            } else if m.from() == Square(start_rank, 7) && self.has_castling_right(color, 'K') {
-                castle_hash_diff ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][0];
-                self.castling_rights &= !castle_bit(color, 'K');
-            }
-        }
-
-        if let Some((captured_color, captured_piece)) = captured_piece_info {
-            if captured_piece == Piece::Rook {
-                let start_rank = if captured_color == Color::White { 0 } else { 7 };
-                if m.to() == Square(start_rank, 0) && self.has_castling_right(captured_color, 'Q') {
-                    castle_hash_diff ^=
-                        ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][1];
-                    self.castling_rights &= !castle_bit(captured_color, 'Q');
-                } else if m.to() == Square(start_rank, 7)
-                    && self.has_castling_right(captured_color, 'K')
-                {
-                    castle_hash_diff ^=
-                        ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][0];
-                    self.castling_rights &= !castle_bit(captured_color, 'K');
-                }
-            }
-        }
-        current_hash ^= castle_hash_diff;
+        // Update castling rights
+        current_hash ^= self.update_castling_rights(&m, moving_piece, color, captured_piece_info);
 
         self.white_to_move = !self.white_to_move;
         self.hash = current_hash;

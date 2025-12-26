@@ -7,12 +7,14 @@
 //! - Move ordering (TT move, killers, MVV-LVA, history)
 //! - Transposition table for move ordering and cutoffs
 
+mod constants;
 mod move_order;
 mod params;
 mod simple;
 
+use parking_lot::Mutex;
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::tt::TranspositionTable;
@@ -33,7 +35,7 @@ pub struct SearchResult {
 pub const DEFAULT_TT_MB: usize = 1024;
 
 /// Mate score constant
-pub(crate) const MATE_SCORE: i32 = 200000;
+pub(crate) const MATE_SCORE: i32 = constants::MATE_THRESHOLD + MAX_PLY as i32;
 
 /// Statistics tracked during search
 pub struct SearchStats {
@@ -41,6 +43,7 @@ pub struct SearchStats {
     pub seldepth: u32,
     pub total_nodes: u64,
     pub max_nodes: u64,
+    pub tt_hits: u64,
 }
 
 impl SearchStats {
@@ -48,6 +51,7 @@ impl SearchStats {
         self.nodes = 0;
         self.seldepth = 0;
         self.total_nodes = 0;
+        self.tt_hits = 0;
     }
 
     pub fn reset_iteration(&mut self) {
@@ -128,7 +132,7 @@ pub struct SearchState {
 }
 
 impl SearchState {
-    #[must_use] 
+    #[must_use]
     pub fn new(tt_mb: usize) -> Self {
         SearchState {
             stats: SearchStats {
@@ -136,6 +140,7 @@ impl SearchState {
                 seldepth: 0,
                 total_nodes: 0,
                 max_nodes: 0,
+                tt_hits: 0,
             },
             tables: SearchTables {
                 tt: TranspositionTable::new(tt_mb),
@@ -156,6 +161,19 @@ impl SearchState {
         self.stats.reset_search();
         self.last_move = super::EMPTY_MOVE;
         self.hard_stop_at = None;
+        // Decay history and clear tactical helpers to avoid stale biases.
+        for entry in self.tables.history.iter_mut() {
+            *entry >>= 2;
+        }
+        for killers in self.tables.killer_moves.iter_mut() {
+            killers[0] = super::EMPTY_MOVE;
+            killers[1] = super::EMPTY_MOVE;
+        }
+        for counters in self.tables.counter_moves.iter_mut() {
+            for mv in counters.iter_mut() {
+                *mv = super::EMPTY_MOVE;
+            }
+        }
     }
 
     pub fn set_max_nodes(&mut self, max_nodes: u64) {
@@ -170,7 +188,7 @@ impl SearchState {
         &mut self.params
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn params(&self) -> &SearchParams {
         &self.params
     }
@@ -179,7 +197,7 @@ impl SearchState {
         self.params = params;
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn trace(&self) -> bool {
         self.trace
     }
@@ -193,7 +211,7 @@ impl SearchState {
         self.stats.reset_search();
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn hashfull_per_mille(&self) -> u32 {
         self.tables.tt.hashfull_per_mille()
     }
@@ -219,7 +237,7 @@ pub struct SearchClock {
 }
 
 impl SearchClock {
-    #[must_use] 
+    #[must_use]
     pub fn new(
         start_time: Instant,
         soft_deadline: Option<Instant>,
@@ -238,24 +256,126 @@ impl SearchClock {
         soft_deadline: Option<Instant>,
         hard_deadline: Option<Instant>,
     ) {
-        if let Ok(mut start) = self.start_time.lock() {
-            *start = start_time;
-        }
-        if let Ok(mut soft) = self.soft_deadline.lock() {
-            *soft = soft_deadline;
-        }
-        if let Ok(mut hard) = self.hard_deadline.lock() {
-            *hard = hard_deadline;
-        }
+        let mut start = self.start_time.lock();
+        *start = start_time;
+        let mut soft = self.soft_deadline.lock();
+        *soft = soft_deadline;
+        let mut hard = self.hard_deadline.lock();
+        *hard = hard_deadline;
     }
 
     pub fn snapshot(&self) -> (Instant, Option<Instant>, Option<Instant>) {
-        let start_time = *self.start_time.lock().unwrap();
-        let soft_deadline = *self.soft_deadline.lock().unwrap();
-        let hard_deadline = *self.hard_deadline.lock().unwrap();
+        let start_time = *self.start_time.lock();
+        let soft_deadline = *self.soft_deadline.lock();
+        let hard_deadline = *self.hard_deadline.lock();
         (start_time, soft_deadline, hard_deadline)
     }
 }
+
+// ============================================================================
+// UNIFIED SEARCH API
+// ============================================================================
+
+/// Configuration for a search operation.
+///
+/// This struct consolidates all search parameters into a single configuration
+/// object, replacing the need for multiple `find_best_move_*` functions.
+#[derive(Clone)]
+pub struct SearchConfig {
+    /// Maximum depth to search (None = unlimited, defaults to 64)
+    pub max_depth: Option<u32>,
+    /// Time limit in milliseconds (0 = unlimited)
+    pub time_limit_ms: u64,
+    /// Node limit (0 = unlimited)
+    pub node_limit: u64,
+    /// Whether to extract ponder move from TT after search
+    pub extract_ponder: bool,
+    /// Optional callback for iteration info
+    pub info_callback: Option<SearchInfoCallback>,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        SearchConfig {
+            max_depth: None,
+            time_limit_ms: 0,
+            node_limit: 0,
+            extract_ponder: true,
+            info_callback: None,
+        }
+    }
+}
+
+impl SearchConfig {
+    /// Create a depth-limited search config
+    #[must_use]
+    pub fn depth(max_depth: u32) -> Self {
+        SearchConfig {
+            max_depth: Some(max_depth),
+            ..Default::default()
+        }
+    }
+
+    /// Create a time-limited search config
+    #[must_use]
+    pub fn time(time_limit_ms: u64) -> Self {
+        SearchConfig {
+            time_limit_ms,
+            ..Default::default()
+        }
+    }
+
+    /// Create a config from SearchLimits
+    #[must_use]
+    pub fn from_limits(limits: &SearchLimits) -> Self {
+        let (_, soft_deadline, _) = limits.clock.snapshot();
+        let time_limit_ms = soft_deadline.map_or(0, |d| {
+            d.saturating_duration_since(Instant::now()).as_millis() as u64
+        });
+        SearchConfig {
+            time_limit_ms,
+            ..Default::default()
+        }
+    }
+
+    /// Set whether to extract ponder move
+    #[must_use]
+    pub fn with_ponder(mut self, extract_ponder: bool) -> Self {
+        self.extract_ponder = extract_ponder;
+        self
+    }
+
+    /// Set node limit
+    #[must_use]
+    pub fn with_nodes(mut self, node_limit: u64) -> Self {
+        self.node_limit = node_limit;
+        self
+    }
+
+    /// Attach a callback for iteration info reporting.
+    #[must_use]
+    pub fn with_info_callback(mut self, callback: SearchInfoCallback) -> Self {
+        self.info_callback = Some(callback);
+        self
+    }
+}
+
+/// Information about a completed search iteration.
+#[derive(Debug, Clone)]
+pub struct SearchIterationInfo {
+    pub depth: u32,
+    pub nodes: u64,
+    pub nps: u64,
+    pub time_ms: u64,
+    pub score: i32,
+    pub mate_in: Option<i32>,
+    pub pv: String,
+    pub seldepth: u32,
+    pub tt_hits: u64,
+}
+
+/// Callback type for iteration info.
+pub type SearchInfoCallback = Arc<dyn Fn(&SearchIterationInfo) + Send + Sync>;
 
 /// Extract ponder move by making best move and probing TT
 fn extract_ponder_move(board: &mut Board, state: &SearchState, best_move: Move) -> Option<Move> {
@@ -277,6 +397,50 @@ fn extract_ponder_move(board: &mut Board, state: &SearchState, best_move: Move) 
     ponder
 }
 
+/// Unified search function that accepts a configuration.
+///
+/// This is the preferred API for running searches. It consolidates
+/// all the `find_best_move_*` variants into a single function.
+///
+/// # Example
+/// ```ignore
+/// let config = SearchConfig::depth(10).with_ponder(true);
+/// let result = search(board, state, config, &stop);
+/// ```
+pub fn search(
+    board: &mut Board,
+    state: &mut SearchState,
+    config: SearchConfig,
+    stop: &AtomicBool,
+) -> SearchResult {
+    let max_depth = config.max_depth.unwrap_or(64);
+    let info_callback = config.info_callback.clone();
+    let best_move = simple::simple_search(
+        board,
+        state,
+        max_depth,
+        config.time_limit_ms,
+        config.node_limit,
+        stop,
+        info_callback,
+    );
+
+    let ponder_move = if config.extract_ponder {
+        best_move.and_then(|mv| extract_ponder_move(board, state, mv))
+    } else {
+        None
+    };
+
+    SearchResult {
+        best_move,
+        ponder_move,
+    }
+}
+
+// ============================================================================
+// LEGACY API (for backward compatibility)
+// ============================================================================
+
 /// Find best move with fixed depth limit
 pub fn find_best_move(
     board: &mut Board,
@@ -284,7 +448,7 @@ pub fn find_best_move(
     max_depth: u32,
     stop: &AtomicBool,
 ) -> Option<Move> {
-    simple::simple_search(board, state, max_depth, 0, 0, stop)
+    simple::simple_search(board, state, max_depth, 0, 0, stop, None)
 }
 
 /// Find best move with fixed depth limit, returning ponder move too
@@ -294,9 +458,7 @@ pub fn find_best_move_with_ponder(
     max_depth: u32,
     stop: &AtomicBool,
 ) -> SearchResult {
-    let best_move = simple::simple_search(board, state, max_depth, 0, 0, stop);
-    let ponder_move = best_move.and_then(|mv| extract_ponder_move(board, state, mv));
-    SearchResult { best_move, ponder_move }
+    search(board, state, SearchConfig::depth(max_depth), stop)
 }
 
 /// Find best move with time control
@@ -305,13 +467,8 @@ pub fn find_best_move_with_time(
     state: &mut SearchState,
     limits: &SearchLimits,
 ) -> Option<Move> {
-    // Calculate time limit from clock
-    let (_, soft_deadline, _) = limits.clock.snapshot();
-    let time_limit_ms = soft_deadline
-        .map_or(0, |d| d.saturating_duration_since(Instant::now()).as_millis() as u64);
-
-    // Max depth of 64 for time-based search
-    simple::simple_search(board, state, 64, time_limit_ms, 0, &limits.stop)
+    let config = SearchConfig::from_limits(limits).with_ponder(false);
+    search(board, state, config, &limits.stop).best_move
 }
 
 /// Find best move with time control, returning ponder move too
@@ -320,7 +477,6 @@ pub fn find_best_move_with_time_and_ponder(
     state: &mut SearchState,
     limits: &SearchLimits,
 ) -> SearchResult {
-    let best_move = find_best_move_with_time(board, state, limits);
-    let ponder_move = best_move.and_then(|mv| extract_ponder_move(board, state, mv));
-    SearchResult { best_move, ponder_move }
+    let config = SearchConfig::from_limits(limits);
+    search(board, state, config, &limits.stop)
 }

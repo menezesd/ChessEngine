@@ -14,17 +14,21 @@
 
 mod attack_tables;
 mod builder;
-mod pst;
 #[cfg(debug_assertions)]
 mod debug;
 mod error;
 mod eval;
+mod eval_terms;
+mod eval_update;
 mod fen;
 mod make_unmake;
+mod masks;
 mod movegen;
 pub mod prelude;
+mod pst;
 mod san;
 mod search;
+mod see;
 mod state;
 mod types;
 
@@ -40,8 +44,8 @@ pub use types::{Bitboard, CastlingRights, Color, Move, MoveList, MoveListIntoIte
 // Public API - search functions and configuration
 pub use search::{
     find_best_move, find_best_move_with_ponder, find_best_move_with_time,
-    find_best_move_with_time_and_ponder, SearchClock, SearchLimits, SearchResult, SearchState,
-    DEFAULT_TT_MB,
+    find_best_move_with_time_and_ponder, search, SearchClock, SearchConfig, SearchInfoCallback,
+    SearchIterationInfo, SearchLimits, SearchResult, SearchState, DEFAULT_TT_MB,
 };
 
 // Internal types exposed for advanced usage (but not in prelude)
@@ -52,7 +56,6 @@ pub use types::SquareIdx;
 pub use search::{SearchParams, SearchStats, SearchTables};
 
 pub(crate) use types::{
-    bit_for_square, castle_bit, file_to_index, rank_to_index,
-    CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K,
-    CASTLE_WHITE_Q, EMPTY_MOVE, MAX_PLY, PROMOTION_PIECES,
+    bit_for_square, castle_bit, file_to_index, rank_to_index, ScoredMoveList, CASTLE_BLACK_K,
+    CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q, EMPTY_MOVE, MAX_PLY, PROMOTION_PIECES,
 };

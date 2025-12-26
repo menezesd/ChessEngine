@@ -75,7 +75,14 @@ impl Board {
                         let double_forward_r = r + 2 * dir;
                         let double_forward_sq = Square(double_forward_r as usize, f as usize);
                         if self.is_empty(double_forward_sq) {
-                            moves.push(self.create_move(from, double_forward_sq, None, false, false, true));
+                            moves.push(self.create_move(
+                                from,
+                                double_forward_sq,
+                                None,
+                                false,
+                                false,
+                                true,
+                            ));
                         }
                     }
                 }

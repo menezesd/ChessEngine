@@ -66,8 +66,8 @@ impl Board {
             return true;
         }
 
-        let rook_like = self.pieces[c_idx][Piece::Rook.index()].0
-            | self.pieces[c_idx][Piece::Queen.index()].0;
+        let rook_like =
+            self.pieces[c_idx][Piece::Rook.index()].0 | self.pieces[c_idx][Piece::Queen.index()].0;
         let bishop_like = self.pieces[c_idx][Piece::Bishop.index()].0
             | self.pieces[c_idx][Piece::Queen.index()].0;
 
