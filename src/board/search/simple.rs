@@ -27,7 +27,8 @@ use std::time::Instant;
 use crate::tt::BoundType;
 
 use super::constants::{
-    COUNTER_SCORE, KILLER1_SCORE, KILLER2_SCORE, LMR_SCORE_THRESHOLD, MATE_THRESHOLD, TT_MOVE_SCORE,
+    COUNTER_SCORE, KILLER1_SCORE, KILLER2_SCORE, LMR_IDX_BASE, LMR_SCORE_THRESHOLD,
+    LMR_TABLE_MAX_DEPTH, LMR_TABLE_MAX_IDX, MATE_THRESHOLD, TT_MOVE_SCORE,
 };
 use super::{SearchInfoCallback, SearchState, MATE_SCORE};
 use crate::board::{Board, Move, MoveList, ScoredMoveList, EMPTY_MOVE, MAX_PLY};
@@ -69,6 +70,22 @@ struct MovePruning {
 }
 
 impl SimpleSearchContext<'_> {
+    /// Precomputed LMR table similar to Frolic/chess.cpp
+    fn lmr_table() -> &'static [[u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH] {
+        use std::sync::OnceLock;
+        static TABLE: OnceLock<[[u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH]> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let mut t = [[0u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH];
+            for depth in 1..LMR_TABLE_MAX_DEPTH {
+                for idx in 1..LMR_TABLE_MAX_IDX {
+                    let val = (0.53 + (depth as f64).ln() * (idx as f64).ln() / 2.44).floor();
+                    t[depth][idx] = val.max(0.0) as u32;
+                }
+            }
+            t
+        })
+    }
+
     /// Extract Principal Variation from TT
     /// Returns a vector of moves representing the best line
     fn extract_pv(&mut self, max_len: usize) -> Vec<Move> {
@@ -337,7 +354,7 @@ impl SimpleSearchContext<'_> {
         is_pv: bool,
         tt_tactical: bool,
     ) -> u32 {
-        let lmr_ok = move_idx > super::constants::LMR_IDX_BASE + move_count / 4
+        let lmr_ok = move_idx > LMR_IDX_BASE + move_count / 4
             && move_score < LMR_SCORE_THRESHOLD
             && depth > 1
             && !in_check
@@ -347,7 +364,11 @@ impl SimpleSearchContext<'_> {
             && !tt_tactical;
 
         if lmr_ok {
-            1u32.min(depth.saturating_sub(1))
+            let table = Self::lmr_table();
+            let depth_idx = depth.min((LMR_TABLE_MAX_DEPTH - 1) as u32) as usize;
+            let move_idx_clamped = move_idx.min(LMR_TABLE_MAX_IDX - 1);
+            let base = table[depth_idx][move_idx_clamped];
+            base.min(depth.saturating_sub(1))
         } else {
             0
         }

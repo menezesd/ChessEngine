@@ -42,4 +42,8 @@ pub const NULL_MOVE_BASE_REDUCTION: u32 = 1;
 /// LMR starts after this many moves (moves with idx > LMR_IDX_BASE + move_count/4)
 pub const LMR_IDX_BASE: usize = 3;
 
+/// LMR reduction table dimensions (depth x move index buckets)
+pub const LMR_TABLE_MAX_DEPTH: usize = 32;
+pub const LMR_TABLE_MAX_IDX: usize = 256;
+
 // No pruning margins are currently used (kept lean to mirror chess.cpp).
