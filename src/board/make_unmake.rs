@@ -250,6 +250,97 @@ impl Board {
         hash_delta
     }
 
+    /// Remove captured piece for a move (including en passant) and return hash delta.
+    fn capture_piece_for_move(
+        &mut self,
+        m: Move,
+        is_white: bool,
+        opp_idx: usize,
+    ) -> (Option<(Color, Piece)>, u64) {
+        if m.is_en_passant() {
+            let capture_row = if is_white {
+                m.to().rank() - 1
+            } else {
+                m.to().rank() + 1
+            };
+            let capture_sq = Square(capture_row, m.to().file());
+            if let Some(captured) = self.piece_at(capture_sq) {
+                let delta = self.remove_captured_piece(capture_sq, captured, opp_idx);
+                return (Some(captured), delta);
+            }
+            return (None, 0);
+        }
+
+        if m.is_castling() {
+            return (None, 0);
+        }
+
+        if let Some(captured) = self.piece_at(m.to()) {
+            let delta = self.remove_captured_piece(m.to(), captured, opp_idx);
+            (Some(captured), delta)
+        } else {
+            (None, 0)
+        }
+    }
+
+    /// Place the moving piece (and rook for castling), updating eval and returning hash delta.
+    fn place_moving_piece(
+        &mut self,
+        m: Move,
+        color: Color,
+        moving_piece: Piece,
+        c_idx: usize,
+        is_white: bool,
+    ) -> u64 {
+        if m.is_castling() {
+            let king_hash = ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::King)]
+                [color_to_zobrist_index(color)][square_to_zobrist_index(m.to())];
+            // execute_castling places king and rook plus eval updates
+            return king_hash ^ self.execute_castling(&m, color, c_idx, is_white);
+        }
+
+        let piece_to_place = m.promotion().unwrap_or(moving_piece);
+        self.set_piece(m.to(), color, piece_to_place);
+
+        let placed_idx = piece_to_place.index();
+        let to_idx = m.to().index().as_usize();
+        let to_pst = pst_square(to_idx, is_white);
+        self.eval_mg[c_idx] += MATERIAL_MG[placed_idx] + PST_MG[placed_idx][to_pst];
+        self.eval_eg[c_idx] += MATERIAL_EG[placed_idx] + PST_EG[placed_idx][to_pst];
+        self.game_phase[c_idx] += PHASE_WEIGHTS[placed_idx];
+
+        ZOBRIST.piece_keys[piece_to_zobrist_index(piece_to_place)][color_to_zobrist_index(color)]
+            [square_to_zobrist_index(m.to())]
+    }
+
+    /// Update en passant target based on the move and return hash delta.
+    fn update_en_passant_target(&mut self, m: Move) -> u64 {
+        self.en_passant_target = None;
+        if m.is_double_pawn_push() {
+            let ep_row = usize::midpoint(m.from().rank(), m.to().rank());
+            let ep_sq = Square(ep_row, m.from().file());
+            self.en_passant_target = Some(ep_sq);
+            return ZOBRIST.en_passant_keys[ep_sq.file()];
+        }
+        0
+    }
+
+    /// Update halfmove clock after a move.
+    fn update_halfmove_clock(&mut self, moving_piece: Piece, is_capture: bool) {
+        if moving_piece == Piece::Pawn || is_capture {
+            self.halfmove_clock = 0;
+        } else {
+            self.halfmove_clock = self.halfmove_clock.saturating_add(1);
+        }
+    }
+
+    /// Record repetition info and return the previous count.
+    fn record_repetition(&mut self, made_hash: u64) -> u32 {
+        let previous_repetition_count = self.repetition_counts.get(made_hash);
+        self.repetition_counts.increment(made_hash);
+        previous_repetition_count
+    }
+
     // =========================================================================
     // Core make/unmake implementation
     // =========================================================================
@@ -280,37 +371,15 @@ impl Board {
         }
 
         // Handle captures
-        let captured_piece_info = if m.is_en_passant() {
-            let capture_row = if is_white {
-                m.to().rank() - 1
-            } else {
-                m.to().rank() + 1
-            };
-            let capture_sq = Square(capture_row, m.to().file());
-            if let Some(captured) = self.piece_at(capture_sq) {
-                current_hash ^= self.remove_captured_piece(capture_sq, captured, opp_idx);
-                Some(captured)
-            } else {
-                None
-            }
-        } else if !m.is_castling() {
-            if let Some(captured) = self.piece_at(m.to()) {
-                current_hash ^= self.remove_captured_piece(m.to(), captured, opp_idx);
-                Some(captured)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let (captured_piece_info, capture_hash_delta) =
+            self.capture_piece_for_move(m, is_white, opp_idx);
+        current_hash ^= capture_hash_delta;
 
         // Get moving piece info and remove from source square
         let moving_piece_info = self.piece_at(m.from()).expect("make_move 'from' empty");
         let (moving_color, moving_piece) = moving_piece_info;
         let piece_idx = moving_piece.index();
         let from_idx = m.from().index().as_usize();
-        let to_idx = m.to().index().as_usize();
-
         // Remove moving piece from hash
         current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(moving_piece)]
             [color_to_zobrist_index(moving_color)][square_to_zobrist_index(m.from())];
@@ -324,45 +393,13 @@ impl Board {
         self.eval_eg[c_idx] -= MATERIAL_EG[piece_idx] + PST_EG[piece_idx][from_pst];
         self.game_phase[c_idx] -= PHASE_WEIGHTS[piece_idx];
 
-        // Place piece at destination
-        if m.is_castling() {
-            // Add king to hash at destination
-            current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::King)]
-                [color_to_zobrist_index(color)][square_to_zobrist_index(m.to())];
-            // Execute castling (places king and moves rook)
-            current_hash ^= self.execute_castling(&m, color, c_idx, is_white);
-        } else {
-            // Determine piece to place (may be promoted)
-            let piece_to_place = m.promotion().map_or(moving_piece_info, |p| (color, p));
-            self.set_piece(m.to(), piece_to_place.0, piece_to_place.1);
-
-            // Add placed piece to hash
-            current_hash ^= ZOBRIST.piece_keys[piece_to_zobrist_index(piece_to_place.1)]
-                [color_to_zobrist_index(piece_to_place.0)][square_to_zobrist_index(m.to())];
-
-            // Update eval: add piece at 'to' square
-            let placed_idx = piece_to_place.1.index();
-            let to_pst = pst_square(to_idx, is_white);
-            self.eval_mg[c_idx] += MATERIAL_MG[placed_idx] + PST_MG[placed_idx][to_pst];
-            self.eval_eg[c_idx] += MATERIAL_EG[placed_idx] + PST_EG[placed_idx][to_pst];
-            self.game_phase[c_idx] += PHASE_WEIGHTS[placed_idx];
-        }
+        current_hash ^= self.place_moving_piece(m, color, moving_piece, c_idx, is_white);
 
         // Handle double pawn push - set new en passant target
-        self.en_passant_target = None;
-        if m.is_double_pawn_push() {
-            let ep_row = usize::midpoint(m.from().rank(), m.to().rank());
-            let ep_sq = Square(ep_row, m.from().file());
-            self.en_passant_target = Some(ep_sq);
-            current_hash ^= ZOBRIST.en_passant_keys[ep_sq.file()];
-        }
+        current_hash ^= self.update_en_passant_target(m);
 
         // Update halfmove clock
-        if moving_piece == Piece::Pawn || m.is_capture() {
-            self.halfmove_clock = 0;
-        } else {
-            self.halfmove_clock = self.halfmove_clock.saturating_add(1);
-        }
+        self.update_halfmove_clock(moving_piece, m.is_capture());
 
         // Update castling rights
         current_hash ^= self.update_castling_rights(&m, moving_piece, color, captured_piece_info);
@@ -371,8 +408,7 @@ impl Board {
         self.hash = current_hash;
 
         let made_hash = current_hash;
-        let previous_repetition_count = self.repetition_counts.get(made_hash);
-        self.repetition_counts.increment(made_hash);
+        let previous_repetition_count = self.record_repetition(made_hash);
 
         UnmakeInfo {
             captured_piece_info,
@@ -407,6 +443,45 @@ impl Board {
         }
     }
 
+    fn restore_castling_move(&mut self, m: Move, color: Color) {
+        self.set_piece(m.from(), color, Piece::King);
+        self.remove_piece(m.to(), color, Piece::King);
+
+        let (rook_orig_f, rook_moved_f) = if m.to().file() == 6 { (7, 5) } else { (0, 3) };
+        let rook_sq = Square(m.to().rank(), rook_moved_f);
+        let rook_info = self
+            .piece_at(rook_sq)
+            .expect("Unmake castling: rook missing");
+        self.remove_piece(rook_sq, rook_info.0, rook_info.1);
+        self.set_piece(Square(m.to().rank(), rook_orig_f), rook_info.0, rook_info.1);
+    }
+
+    fn restore_standard_move(&mut self, m: Move, color: Color, info: &UnmakeInfo) {
+        let moved_piece_at_to = self
+            .piece_at(m.to())
+            .expect("Unmake move: 'to' square empty?");
+        self.remove_piece(m.to(), moved_piece_at_to.0, moved_piece_at_to.1);
+        let piece_on_from = if m.promotion().is_some() {
+            (color, Piece::Pawn)
+        } else {
+            moved_piece_at_to
+        };
+        self.set_piece(m.from(), piece_on_from.0, piece_on_from.1);
+
+        if m.is_en_passant() {
+            let capture_row = if color == Color::White {
+                m.to().rank() - 1
+            } else {
+                m.to().rank() + 1
+            };
+            if let Some((cap_col, cap_piece)) = info.captured_piece_info {
+                self.set_piece(Square(capture_row, m.to().file()), cap_col, cap_piece);
+            }
+        } else if let Some((cap_col, cap_piece)) = info.captured_piece_info {
+            self.set_piece(m.to(), cap_col, cap_piece);
+        }
+    }
+
     pub(crate) fn unmake_move(&mut self, m: Move, info: UnmakeInfo) {
         self.repetition_counts
             .set(info.made_hash, info.previous_repetition_count);
@@ -424,50 +499,10 @@ impl Board {
 
         let color = self.current_color();
 
-        let piece_that_moved = if m.promotion().is_some() {
-            (color, Piece::Pawn)
-        } else if m.is_castling() {
-            (color, Piece::King)
-        } else {
-            self.piece_at(m.to())
-                .expect("Unmake move: 'to' square empty?")
-        };
-
         if m.is_castling() {
-            self.set_piece(m.from(), piece_that_moved.0, piece_that_moved.1);
-            self.remove_piece(m.to(), color, Piece::King);
-
-            let (rook_orig_f, rook_moved_f) = if m.to().file() == 6 { (7, 5) } else { (0, 3) };
-            let rook_sq = Square(m.to().rank(), rook_moved_f);
-            let rook_info = self
-                .piece_at(rook_sq)
-                .expect("Unmake castling: rook missing");
-            self.remove_piece(rook_sq, rook_info.0, rook_info.1);
-            self.set_piece(Square(m.to().rank(), rook_orig_f), rook_info.0, rook_info.1);
+            self.restore_castling_move(m, color);
         } else {
-            let moved_piece_at_to = self
-                .piece_at(m.to())
-                .expect("Unmake move: 'to' square empty?");
-            self.remove_piece(m.to(), moved_piece_at_to.0, moved_piece_at_to.1);
-            let piece_on_from = if m.promotion().is_some() {
-                (color, Piece::Pawn)
-            } else {
-                moved_piece_at_to
-            };
-            self.set_piece(m.from(), piece_on_from.0, piece_on_from.1);
-
-            if m.is_en_passant() {
-                let capture_row = if color == Color::White {
-                    m.to().rank() - 1
-                } else {
-                    m.to().rank() + 1
-                };
-                if let Some((cap_col, cap_piece)) = info.captured_piece_info {
-                    self.set_piece(Square(capture_row, m.to().file()), cap_col, cap_piece);
-                }
-            } else if let Some((cap_col, cap_piece)) = info.captured_piece_info {
-                self.set_piece(m.to(), cap_col, cap_piece);
-            }
+            self.restore_standard_move(m, color, &info);
         }
     }
 

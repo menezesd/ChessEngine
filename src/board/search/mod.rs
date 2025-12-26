@@ -60,12 +60,129 @@ impl SearchStats {
     }
 }
 
+pub struct KillerTable {
+    slots: [[Move; 2]; MAX_PLY],
+}
+
+impl KillerTable {
+    pub fn new() -> Self {
+        KillerTable {
+            slots: [[super::EMPTY_MOVE; 2]; MAX_PLY],
+        }
+    }
+
+    #[must_use]
+    pub fn primary(&self, ply: usize) -> Move {
+        self.slots
+            .get(ply)
+            .map(|row| row[0])
+            .unwrap_or(super::EMPTY_MOVE)
+    }
+
+    #[must_use]
+    pub fn secondary(&self, ply: usize) -> Move {
+        self.slots
+            .get(ply)
+            .map(|row| row[1])
+            .unwrap_or(super::EMPTY_MOVE)
+    }
+
+    pub fn update(&mut self, ply: usize, mv: Move) {
+        if ply >= MAX_PLY {
+            return;
+        }
+        if self.slots[ply][0] != mv {
+            self.slots[ply][1] = self.slots[ply][0];
+            self.slots[ply][0] = mv;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for killers in self.slots.iter_mut() {
+            killers[0] = super::EMPTY_MOVE;
+            killers[1] = super::EMPTY_MOVE;
+        }
+    }
+}
+
+pub struct HistoryTable {
+    entries: [i32; 4096],
+}
+
+impl HistoryTable {
+    pub fn new() -> Self {
+        HistoryTable { entries: [0; 4096] }
+    }
+
+    #[must_use]
+    pub fn score(&self, mv: &Move) -> i32 {
+        let from = mv.from().index().as_usize();
+        let to = mv.to().index().as_usize();
+        let idx = from * 64 + to;
+        self.entries.get(idx).copied().unwrap_or(0)
+    }
+
+    pub fn update(&mut self, mv: &Move, depth: u32) {
+        let from = mv.from().index().as_usize();
+        let to = mv.to().index().as_usize();
+        let idx = from * 64 + to;
+        if let Some(entry) = self.entries.get_mut(idx) {
+            *entry = entry.saturating_add((depth * depth * depth) as i32);
+        }
+    }
+
+    pub fn decay(&mut self) {
+        for entry in self.entries.iter_mut() {
+            *entry >>= 2;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.entries = [0; 4096];
+    }
+}
+
+pub struct CounterMoveTable {
+    entries: [[Move; 64]; 64],
+}
+
+impl CounterMoveTable {
+    pub fn new() -> Self {
+        CounterMoveTable {
+            entries: [[super::EMPTY_MOVE; 64]; 64],
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self, from: usize, to: usize) -> Move {
+        if from < 64 && to < 64 {
+            self.entries[from][to]
+        } else {
+            super::EMPTY_MOVE
+        }
+    }
+
+    pub fn set(&mut self, from: usize, to: usize, mv: Move) {
+        if from < 64 && to < 64 {
+            self.entries[from][to] = mv;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for counters in self.entries.iter_mut() {
+            for mv in counters.iter_mut() {
+                *mv = super::EMPTY_MOVE;
+            }
+        }
+    }
+}
+
 /// Tables used during search (TT, killers, history, counter moves)
 pub struct SearchTables {
     pub tt: TranspositionTable,
-    pub killer_moves: [[Move; 2]; MAX_PLY],
-    pub history: [i32; 4096],
-    pub counter_moves: [[Move; 64]; 64],
+    pub killer_moves: KillerTable,
+    pub history: HistoryTable,
+    pub counter_moves: CounterMoveTable,
 }
 
 impl SearchTables {
@@ -94,29 +211,17 @@ impl SearchTables {
     /// Get history score for a move
     #[must_use]
     pub fn history_score(&self, mv: &Move) -> i32 {
-        let from = mv.from().index().as_usize();
-        let to = mv.to().index().as_usize();
-        let idx = from * 64 + to;
-        if idx < self.history.len() {
-            self.history[idx]
-        } else {
-            0
-        }
+        self.history.score(mv)
     }
 
     /// Update history on beta cutoff
     pub fn update_history(&mut self, mv: &Move, depth: u32) {
-        let from = mv.from().index().as_usize();
-        let to = mv.to().index().as_usize();
-        let idx = from * 64 + to;
-        if idx < self.history.len() {
-            self.history[idx] = self.history[idx].saturating_add((depth * depth * depth) as i32);
-        }
+        self.history.update(mv, depth);
     }
 
     /// Reset history table
     pub fn reset_history(&mut self) {
-        self.history = [0; 4096];
+        self.history.reset();
     }
 }
 
@@ -144,9 +249,9 @@ impl SearchState {
             },
             tables: SearchTables {
                 tt: TranspositionTable::new(tt_mb),
-                killer_moves: [[super::EMPTY_MOVE; 2]; MAX_PLY],
-                history: [0; 4096],
-                counter_moves: [[super::EMPTY_MOVE; 64]; 64],
+                killer_moves: KillerTable::new(),
+                history: HistoryTable::new(),
+                counter_moves: CounterMoveTable::new(),
             },
             generation: 0,
             last_move: super::EMPTY_MOVE,
@@ -162,18 +267,9 @@ impl SearchState {
         self.last_move = super::EMPTY_MOVE;
         self.hard_stop_at = None;
         // Decay history and clear tactical helpers to avoid stale biases.
-        for entry in self.tables.history.iter_mut() {
-            *entry >>= 2;
-        }
-        for killers in self.tables.killer_moves.iter_mut() {
-            killers[0] = super::EMPTY_MOVE;
-            killers[1] = super::EMPTY_MOVE;
-        }
-        for counters in self.tables.counter_moves.iter_mut() {
-            for mv in counters.iter_mut() {
-                *mv = super::EMPTY_MOVE;
-            }
-        }
+        self.tables.history.decay();
+        self.tables.killer_moves.reset();
+        self.tables.counter_moves.reset();
     }
 
     pub fn set_max_nodes(&mut self, max_nodes: u64) {

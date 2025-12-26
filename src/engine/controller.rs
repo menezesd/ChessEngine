@@ -29,6 +29,8 @@ pub struct SearchJob {
     pub planned_hard_time_ms: u64,
     /// Handle to the search thread
     handle: JoinHandle<()>,
+    /// Optional handle to the timer thread enforcing hard stops
+    timer_handle: Option<JoinHandle<()>>,
 }
 
 impl SearchJob {
@@ -36,6 +38,9 @@ impl SearchJob {
     pub fn stop_and_wait(self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.handle.join();
+        if let Some(timer) = self.timer_handle {
+            let _ = timer.join();
+        }
     }
 
     /// Signal stop without waiting
@@ -178,6 +183,73 @@ impl EngineController {
         self.current_job.is_some()
     }
 
+    fn build_deadlines(
+        params: &SearchParams,
+        start: Instant,
+    ) -> (Option<Instant>, Option<Instant>) {
+        if params.infinite || params.ponder {
+            return (None, None);
+        }
+
+        let soft_deadline = if params.soft_time_ms > 0 {
+            Some(start + Duration::from_millis(params.soft_time_ms))
+        } else {
+            None
+        };
+
+        let hard_deadline = if params.hard_time_ms > 0 {
+            Some(
+                start
+                    + Duration::from_millis(
+                        params.hard_time_ms.saturating_sub(HARD_STOP_MARGIN_MS),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        (soft_deadline, hard_deadline)
+    }
+
+    fn build_search_config(&self, params: &SearchParams, node_limit: u64) -> SearchConfig {
+        let mut config = if let Some(d) = params.depth {
+            SearchConfig::depth(d)
+        } else {
+            SearchConfig::default()
+        };
+
+        if !params.infinite && !params.ponder && params.soft_time_ms > 0 {
+            config.time_limit_ms = params.soft_time_ms;
+        }
+        if node_limit > 0 {
+            config = config.with_nodes(node_limit);
+        }
+        if let Some(cb) = &self.info_callback {
+            config = config.with_info_callback(cb.clone());
+        }
+        config
+    }
+
+    fn spawn_hard_stop_timer(
+        hard_deadline: Option<Instant>,
+        stop: Arc<AtomicBool>,
+    ) -> Option<JoinHandle<()>> {
+        hard_deadline.map(|deadline| {
+            thread::spawn(move || loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    stop.store(true, Ordering::Relaxed);
+                    break;
+                }
+                let sleep_for = (deadline - now).min(Duration::from_millis(5));
+                thread::sleep(sleep_for);
+            })
+        })
+    }
+
     /// Start a search with the given parameters
     ///
     /// The `on_complete` callback is called when the search finishes with the result.
@@ -198,61 +270,24 @@ impl EngineController {
         let start = Instant::now();
 
         // Set deadlines based on params
-        let (soft_deadline, hard_deadline) = if params.infinite || params.ponder {
-            (None, None)
-        } else {
-            (
-                if params.soft_time_ms > 0 {
-                    Some(start + Duration::from_millis(params.soft_time_ms))
-                } else {
-                    None
-                },
-                if params.hard_time_ms > 0 {
-                    Some(
-                        start
-                            + Duration::from_millis(
-                                params.hard_time_ms.saturating_sub(HARD_STOP_MARGIN_MS),
-                            ),
-                    )
-                } else {
-                    None
-                },
-            )
-        };
+        let (soft_deadline, hard_deadline) = Self::build_deadlines(&params, start);
 
         let clock = Arc::new(SearchClock::new(start, soft_deadline, hard_deadline));
         let pondering = Arc::new(AtomicBool::new(params.ponder));
-        let hard_deadline_for_timer = hard_deadline;
 
         // Build unified search config
-        let mut config = if let Some(d) = params.depth {
-            SearchConfig::depth(d)
-        } else {
-            SearchConfig::default()
-        };
-        if !params.infinite && !params.ponder && params.soft_time_ms > 0 {
-            config.time_limit_ms = params.soft_time_ms;
-        }
-        if node_limit > 0 {
-            config = config.with_nodes(node_limit);
-        }
-        if let Some(cb) = &self.info_callback {
-            config = config.with_info_callback(cb.clone());
-        }
+        let config = self.build_search_config(&params, node_limit);
 
         // Spawn timer thread for hard deadline
-        if !params.infinite && !params.ponder && params.depth.is_none() && params.hard_time_ms > 0 {
-            let stop_timer = Arc::clone(&stop);
-            thread::spawn(move || {
-                if let Some(deadline) = hard_deadline_for_timer {
-                    let now = Instant::now();
-                    if deadline > now {
-                        thread::sleep(deadline - now);
-                    }
-                    stop_timer.store(true, Ordering::Relaxed);
-                }
-            });
-        }
+        let timer_handle = if !params.infinite
+            && !params.ponder
+            && params.depth.is_none()
+            && params.hard_time_ms > 0
+        {
+            Self::spawn_hard_stop_timer(hard_deadline, Arc::clone(&stop))
+        } else {
+            None
+        };
 
         // Clone for the search thread
         let mut search_board = self.board.clone();
@@ -285,6 +320,7 @@ impl EngineController {
             planned_soft_time_ms: params.soft_time_ms,
             planned_hard_time_ms: params.hard_time_ms,
             handle,
+            timer_handle,
         });
     }
 

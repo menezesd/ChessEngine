@@ -3,7 +3,7 @@
 //! Uses `PeSTO` tuned values for middlegame and endgame evaluation.
 //! Tables are indexed by piece type and square, with values in centipawns.
 
-// Values mirrored from the original chess.cpp for parity.
+// Values mirrored from the PeSTO tables for parity.
 /// Material values for middlegame (indexed by `Piece::index()`)
 pub(crate) const MATERIAL_MG: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
 

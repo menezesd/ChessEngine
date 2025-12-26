@@ -88,6 +88,15 @@ struct UciSession {
     state: UciState,
 }
 
+struct GoSearchPlan {
+    search_params: EngineSearchParams,
+    soft_time_ms: u64,
+    hard_time_ms: u64,
+    depth_hint: Option<u32>,
+    go_ponder: bool,
+    max_nodes: u64,
+}
+
 impl UciSession {
     fn new(default_tt_mb: usize) -> Self {
         let options = UciOptions::new(default_tt_mb);
@@ -100,14 +109,8 @@ impl UciSession {
         }
     }
 
-    /// Handle the "go" command - start a search
-    fn handle_go(&mut self, parts: &[String]) {
-        let parts_ref = parts_as_strs(parts);
-        let params = parse_go_params(&parts_ref);
-
-        let time_control = self
-            .state
-            .update_time_control(&params, self.engine.board().white_to_move());
+    fn build_go_plan(&mut self, params: &GoParams, is_white: bool) -> GoSearchPlan {
+        let time_control = self.state.update_time_control(params, is_white);
         let mut depth = params.depth;
         let nodes = params.nodes;
         let mate = params.mate;
@@ -136,23 +139,6 @@ impl UciSession {
             self.options.hard_time_percent,
         );
 
-        self.engine.set_max_nodes(request.max_nodes);
-
-        print_time_info(
-            soft_time_ms,
-            hard_time_ms,
-            self.options.move_overhead_ms,
-            request.max_nodes,
-            go_ponder,
-            depth.unwrap_or(0),
-        );
-
-        // Get board state for checkmate/stalemate reporting
-        let is_checkmate = self.engine.board_mut().is_checkmate();
-        let is_stalemate = self.engine.board_mut().is_stalemate();
-        let is_draw = self.engine.board().is_draw();
-
-        // Build search parameters
         let search_params = EngineSearchParams {
             depth: request.depth,
             soft_time_ms: request.soft_time_ms,
@@ -161,7 +147,41 @@ impl UciSession {
             infinite: request.infinite,
         };
 
-        self.engine.start_search(search_params, move |result| {
+        GoSearchPlan {
+            search_params,
+            soft_time_ms,
+            hard_time_ms,
+            depth_hint: depth,
+            go_ponder,
+            max_nodes: request.max_nodes,
+        }
+    }
+
+    /// Handle the "go" command - start a search
+    fn handle_go(&mut self, parts: &[String]) {
+        let parts_ref = parts_as_strs(parts);
+        let params = parse_go_params(&parts_ref);
+
+        let plan = self.build_go_plan(&params, self.engine.board().white_to_move());
+
+        self.engine.set_max_nodes(plan.max_nodes);
+
+        print_time_info(
+            plan.soft_time_ms,
+            plan.hard_time_ms,
+            self.options.move_overhead_ms,
+            plan.max_nodes,
+            plan.go_ponder,
+            plan.depth_hint.unwrap_or(0),
+        );
+
+        // Get board state for checkmate/stalemate reporting
+        let is_checkmate = self.engine.board_mut().is_checkmate();
+        let is_stalemate = self.engine.board_mut().is_stalemate();
+        let is_draw = self.engine.board().is_draw();
+
+        // Build search parameters
+        self.engine.start_search(plan.search_params, move |result| {
             if result.best_move.is_none() {
                 if is_checkmate {
                     println!("info score mate -1");

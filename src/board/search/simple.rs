@@ -70,7 +70,7 @@ struct MovePruning {
 }
 
 impl SimpleSearchContext<'_> {
-    /// Precomputed LMR table similar to Frolic/chess.cpp
+    /// Precomputed LMR table
     fn lmr_table() -> &'static [[u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH] {
         use std::sync::OnceLock;
         static TABLE: OnceLock<[[u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH]> = OnceLock::new();
@@ -142,6 +142,153 @@ impl SimpleSearchContext<'_> {
             .join(" ")
     }
 
+    /// Search the ordered move list and return the best score.
+    fn search_moves(
+        &mut self,
+        node: &NodeContext,
+        depth: u32,
+        mut alpha: i32,
+        beta: i32,
+        moves: &MoveList,
+    ) -> i32 {
+        let is_pv = node.is_pv;
+        let ply = node.ply;
+        let in_check = node.in_check;
+        let improving = node.improving;
+
+        // Get previous move for counter-move ordering
+        let prev_move = if ply > 0 && ply < MAX_PLY {
+            self.previous_move[ply - 1]
+        } else {
+            EMPTY_MOVE
+        };
+
+        // Move ordering: TT move, killers, counter, captures, history
+        let mut scored_moves = self.order_moves(moves, node.tt_move, ply, prev_move);
+        if depth > 1 {
+            scored_moves.sort_by_score_desc();
+        }
+
+        let move_count = scored_moves.len();
+        let tt_tactical = node.tt_move.is_capture() || node.tt_move.is_promotion();
+
+        let mut best_score = -30000i32;
+        let mut best_move = EMPTY_MOVE;
+        let mut raised_alpha = false;
+        let mut moves_tried = 0;
+        let mut _quiet_moves_tried = 0;
+
+        for (i, scored) in scored_moves.iter().enumerate() {
+            let m = scored.mv;
+            let move_score = scored.score;
+            if self.should_stop() {
+                break;
+            }
+
+            // Track if this is a quiet move
+            let is_quiet = !m.is_capture() && !m.is_promotion();
+            if is_quiet {
+                _quiet_moves_tried += 1;
+            }
+
+            // Make move first (we'll check for check after)
+            let info = self.board.make_move(m);
+
+            // Check if move gives check
+            let gives_check = self.board.is_in_check(self.board.current_color());
+
+            if ply < MAX_PLY {
+                self.previous_move[ply] = m;
+            }
+
+            moves_tried += 1;
+
+            let mut pruning = MovePruning {
+                skip: false,
+                reduction: 0,
+            };
+
+            pruning.reduction = self.compute_lmr_reduction(
+                i,
+                move_count,
+                move_score,
+                depth,
+                in_check,
+                gives_check,
+                is_quiet,
+                improving,
+                is_pv,
+                tt_tactical || gives_check || m.is_capture(),
+            );
+
+            if pruning.skip {
+                self.board.unmake_move(m, info);
+                continue;
+            }
+
+            let new_depth = if move_count == 1 { depth } else { depth - 1 };
+
+            let mut score: i32;
+
+            if i > 0 {
+                // PVS: null window search for non-first moves
+                score = -self.alphabeta(
+                    new_depth.saturating_sub(pruning.reduction),
+                    -alpha - 1,
+                    -alpha,
+                    true,
+                    ply + 1,
+                    false,
+                );
+
+                // Re-search at full depth if reduced search found something
+                if pruning.reduction > 0 && score > alpha {
+                    score = -self.alphabeta(new_depth, -alpha - 1, -alpha, true, ply + 1, false);
+                }
+
+                // Re-search with full window if PVS found improvement
+                if score > alpha && score < beta {
+                    score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, false);
+                }
+            } else {
+                // First move: full window search
+                score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, false);
+            }
+
+            self.board.unmake_move(m, info);
+
+            if self.should_stop() {
+                break;
+            }
+
+            if score > best_score {
+                best_score = score;
+                best_move = m;
+
+                if score > alpha {
+                    if score >= beta {
+                        self.handle_beta_cutoff(m, ply, depth, score, best_move);
+                        return score;
+                    }
+                    alpha = score;
+                    raised_alpha = true;
+                }
+            }
+        }
+
+        // Check for checkmate/stalemate
+        if moves_tried == 0 {
+            return if in_check {
+                -MATE_SCORE + ply as i32
+            } else {
+                0
+            };
+        }
+
+        self.store_tt(depth, best_score, raised_alpha, best_move);
+        best_score
+    }
+
     /// Check if we should stop searching
     #[inline]
     fn should_stop(&self) -> bool {
@@ -202,11 +349,7 @@ impl SimpleSearchContext<'_> {
         let counter = if prev_move != EMPTY_MOVE {
             let from = prev_move.from().index().as_usize();
             let to = prev_move.to().index().as_usize();
-            if from < 64 && to < 64 {
-                self.state.tables.counter_moves[from][to]
-            } else {
-                EMPTY_MOVE
-            }
+            self.state.tables.counter_moves.get(from, to)
         } else {
             EMPTY_MOVE
         };
@@ -215,9 +358,9 @@ impl SimpleSearchContext<'_> {
         for m in moves {
             let score = if *m == tt_move {
                 TT_MOVE_SCORE
-            } else if ply < MAX_PLY && *m == self.state.tables.killer_moves[ply][0] {
+            } else if ply < MAX_PLY && *m == self.state.tables.killer_moves.primary(ply) {
                 KILLER1_SCORE
-            } else if ply < MAX_PLY && *m == self.state.tables.killer_moves[ply][1] {
+            } else if ply < MAX_PLY && *m == self.state.tables.killer_moves.secondary(ply) {
                 KILLER2_SCORE
             } else if *m == counter {
                 COUNTER_SCORE
@@ -235,11 +378,7 @@ impl SimpleSearchContext<'_> {
     fn handle_beta_cutoff(&mut self, m: Move, ply: usize, depth: u32, score: i32, best_move: Move) {
         // Update killers for quiet moves
         if !m.is_capture() && ply < MAX_PLY {
-            let killers = &mut self.state.tables.killer_moves[ply];
-            if killers[0] != m {
-                killers[1] = killers[0];
-                killers[0] = m;
-            }
+            self.state.tables.killer_moves.update(ply, m);
 
             // Update counter move: what move refuted the opponent's previous move?
             if ply > 0 {
@@ -247,9 +386,7 @@ impl SimpleSearchContext<'_> {
                 if prev != EMPTY_MOVE {
                     let from = prev.from().index().as_usize();
                     let to = prev.to().index().as_usize();
-                    if from < 64 && to < 64 {
-                        self.state.tables.counter_moves[from][to] = m;
-                    }
+                    self.state.tables.counter_moves.set(from, to, m);
                 }
             }
         }
@@ -482,150 +619,8 @@ impl SimpleSearchContext<'_> {
             }
         }
 
-        // Internal Iterative Reduction disabled to align with chess.cpp
+        // Internal Iterative Reduction disabled for now
 
-        // Get previous move for counter-move ordering
-        let prev_move = if ply > 0 && ply < MAX_PLY {
-            self.previous_move[ply - 1]
-        } else {
-            EMPTY_MOVE
-        };
-
-        // Move ordering: TT move, killers, counter, captures, history
-        let mut scored_moves = self.order_moves(&moves, node.tt_move, ply, prev_move);
-        if depth > 1 {
-            scored_moves.sort_by_score_desc();
-        }
-
-        let move_count = scored_moves.len();
-
-        // Futility pruning disabled to mimic chess.cpp style search
-        let tt_tactical = node.tt_move.is_capture() || node.tt_move.is_promotion();
-
-        let mut best_score = -30000i32;
-        let mut best_move = EMPTY_MOVE;
-        let mut raised_alpha = false;
-        let mut moves_tried = 0;
-        let mut _quiet_moves_tried = 0;
-
-        for (i, scored) in scored_moves.iter().enumerate() {
-            let m = scored.mv;
-            let move_score = scored.score;
-            if self.should_stop() {
-                break;
-            }
-
-            // Track if this is a quiet move
-            let is_quiet = !m.is_capture() && !m.is_promotion();
-            if is_quiet {
-                _quiet_moves_tried += 1;
-            }
-
-            // ====================================================================
-            // MOVE-LEVEL PRUNING (before making move)
-            // ====================================================================
-
-            // Make move first (we'll check for check after)
-            let info = self.board.make_move(m);
-
-            // Check if move gives check
-            let gives_check = self.board.is_in_check(self.board.current_color());
-
-            // Late Move Pruning and futility are disabled to mirror chess.cpp
-
-            if ply < MAX_PLY {
-                self.previous_move[ply] = m;
-            }
-
-            moves_tried += 1;
-
-            let mut pruning = MovePruning {
-                skip: false,
-                reduction: 0,
-            };
-
-            pruning.reduction = self.compute_lmr_reduction(
-                i,
-                move_count,
-                move_score,
-                depth,
-                in_check,
-                gives_check,
-                is_quiet,
-                improving,
-                is_pv,
-                tt_tactical || gives_check || m.is_capture(),
-            );
-
-            if pruning.skip {
-                self.board.unmake_move(m, info);
-                continue;
-            }
-
-            let new_depth = if move_count == 1 { depth } else { depth - 1 };
-
-            // ====================================================================
-            // SEARCH
-            // ====================================================================
-
-            let mut score: i32;
-
-            if i > 0 {
-                // PVS: null window search for non-first moves
-                score = -self.alphabeta(
-                    new_depth.saturating_sub(pruning.reduction),
-                    -alpha - 1,
-                    -alpha,
-                    true,
-                    ply + 1,
-                    false,
-                );
-
-                // Re-search at full depth if reduced search found something
-                if pruning.reduction > 0 && score > alpha {
-                    score = -self.alphabeta(new_depth, -alpha - 1, -alpha, true, ply + 1, false);
-                }
-
-                // Re-search with full window if PVS found improvement
-                if score > alpha && score < beta {
-                    score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, false);
-                }
-            } else {
-                // First move: full window search
-                score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, false);
-            }
-
-            self.board.unmake_move(m, info);
-
-            if self.should_stop() {
-                break;
-            }
-
-            if score > best_score {
-                best_score = score;
-                best_move = m;
-
-                if score > alpha {
-                    if score >= beta {
-                        self.handle_beta_cutoff(m, ply, depth, score, best_move);
-                        return score;
-                    }
-                    alpha = score;
-                    raised_alpha = true;
-                }
-            }
-        }
-
-        // Check for checkmate/stalemate
-        if moves_tried == 0 {
-            return if in_check {
-                -MATE_SCORE + ply as i32
-            } else {
-                0
-            };
-        }
-
-        self.store_tt(depth, best_score, raised_alpha, best_move);
-        best_score
+        self.search_moves(&node, depth, alpha, beta, &moves)
     }
 }
