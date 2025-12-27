@@ -193,16 +193,22 @@ pub struct SearchTables {
 
 impl SearchTables {
     /// MVV-LVA score for a capture move
-    /// Looks up the captured piece from the board at the target square
+    /// Prioritizes capturing high-value pieces with low-value attackers
     #[must_use]
     pub fn mvv_lva_score(&self, board: &Board, mv: &Move) -> i32 {
         if !mv.is_capture() {
             return 0;
         }
 
+        // Get attacker piece value
+        let attacker = match board.piece_at(mv.from()) {
+            Some((_, piece)) => move_order::piece_value(piece),
+            None => return 0,
+        };
+
         // For en passant, captured piece is always a pawn
         if mv.is_en_passant() {
-            return move_order::piece_value(Piece::Pawn) * 10;
+            return move_order::piece_value(Piece::Pawn) * 10 - attacker;
         }
 
         // Look up what piece is on the target square
@@ -210,8 +216,8 @@ impl SearchTables {
             Some((_, piece)) => move_order::piece_value(piece),
             None => return 0,
         };
-        // Simple MVV-LVA: prioritize capturing high-value pieces
-        captured * 10
+        // MVV-LVA: prioritize high-value victims captured by low-value attackers
+        captured * 10 - attacker
     }
 
     /// Get history score for a move
