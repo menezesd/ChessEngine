@@ -14,15 +14,14 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use crate::board::{Board, Move, EMPTY_MOVE, MAX_PLY};
+use crate::board::{Board, Move};
 use crate::tt::TranspositionTable;
 
 use super::simple::simple_search;
 use super::{
-    SearchConfig, SearchInfoCallback, SearchIterationInfo, SearchParams, SearchResult,
-    SearchState, MATE_SCORE,
+    SearchConfig, SearchInfoCallback, SearchParams, SearchResult,
+    SearchState,
 };
-use super::constants::MATE_THRESHOLD;
 
 /// Shared state across all worker threads
 pub struct SharedSearchState {
@@ -294,7 +293,7 @@ fn run_worker(
     time_limit_ms: u64,
     node_limit: u64,
     info_callback: Option<SearchInfoCallback>,
-    start_time: Instant,
+    _start_time: Instant,
 ) -> WorkerResult {
     // Create local SearchState for this worker with shared TT
     let mut local_state = SearchState::with_shared_tt(
@@ -309,140 +308,40 @@ fn run_worker(
     local_state.tables.counter_moves.reset();
 
     // Calculate this worker's depth offset
+    // Helper threads search slightly deeper to populate TT for main thread
     let depth_offset = worker_depth_offset(worker_id);
+    let search_depth = ((max_depth as i32) + depth_offset).max(1) as u32;
 
-    let mut best_move: Option<Move> = None;
-    let mut best_score = -30000i32;
-    let mut completed_depth = 0u32;
+    // Run search with iterative deepening (handled internally by simple_search)
+    // Each worker does full iterative deepening from depth 1 to search_depth
+    let move_result = simple_search(
+        &mut board,
+        &mut local_state,
+        search_depth,
+        time_limit_ms,
+        node_limit,
+        &shared.stop,
+        info_callback, // Main worker (id 0) reports info via callback
+    );
 
-    // Iterative deepening loop
-    for depth in 1..=max_depth {
-        if shared.stop.load(Ordering::Relaxed) {
-            break;
-        }
+    // Update shared stats
+    shared.add_nodes(local_state.stats.nodes);
+    shared.update_seldepth(local_state.stats.seldepth);
 
-        // Apply depth offset (worker 0 has no offset)
-        let search_depth = (depth as i32 + depth_offset).max(1) as u32;
-        if search_depth > max_depth {
-            continue;
-        }
-
-        // Run search at this depth
-        let move_result = simple_search(
-            &mut board,
-            &mut local_state,
-            search_depth,
-            time_limit_ms,
-            node_limit,
-            &shared.stop,
-            None, // Worker doesn't report directly
-        );
-
-        if shared.stop.load(Ordering::Relaxed) {
-            break;
-        }
-
-        if let Some(mv) = move_result {
-            best_move = Some(mv);
-            completed_depth = search_depth;
-
-            // Get score from TT
-            if let Some(entry) = shared.tt.probe(board.hash) {
-                best_score = entry.score();
-            }
-        }
-
-        // Update shared stats
-        shared.add_nodes(local_state.stats.nodes);
-        shared.update_seldepth(local_state.stats.seldepth);
-        local_state.stats.nodes = 0;
-
-        // Main worker reports info
-        if worker_id == 0 {
-            if let Some(ref cb) = info_callback {
-                let elapsed = start_time.elapsed().as_millis() as u64;
-                let total_nodes = shared.total_nodes.load(Ordering::Relaxed);
-                let nps = if elapsed > 0 { total_nodes * 1000 / elapsed } else { 0 };
-                let mate_in = if best_score.abs() >= MATE_THRESHOLD {
-                    if best_score > 0 {
-                        Some((MATE_SCORE - best_score + 1) / 2)
-                    } else {
-                        Some(-(MATE_SCORE + best_score + 1) / 2)
-                    }
-                } else {
-                    None
-                };
-
-                // Extract PV from TT
-                let pv = extract_pv_from_tt(&mut board, &shared.tt, search_depth as usize);
-                let pv_str = pv.iter()
-                    .map(|m| m.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                let info = SearchIterationInfo {
-                    depth: search_depth,
-                    nodes: total_nodes,
-                    nps,
-                    time_ms: elapsed,
-                    score: best_score,
-                    mate_in,
-                    pv: pv_str,
-                    seldepth: shared.max_seldepth.load(Ordering::Relaxed) as u32,
-                    tt_hits: local_state.stats.tt_hits,
-                };
-                cb(&info);
-            }
-        }
-    }
+    // Get best move and score
+    let best_move = move_result;
+    let best_score = if let Some(entry) = shared.tt.probe(board.hash) {
+        entry.score()
+    } else {
+        -30000i32
+    };
 
     WorkerResult {
         worker_id,
         best_move,
         score: best_score,
-        depth: completed_depth,
+        depth: search_depth,
         nodes: local_state.stats.total_nodes,
     }
 }
 
-/// Extract principal variation from transposition table
-fn extract_pv_from_tt(board: &mut Board, tt: &TranspositionTable, max_len: usize) -> Vec<Move> {
-    let mut pv = Vec::with_capacity(max_len);
-    let mut seen_hashes = [0u64; MAX_PLY];
-    let mut seen_count = 0usize;
-    let mut unmake_infos = Vec::with_capacity(max_len);
-
-    for _ in 0..max_len {
-        let hash = board.hash;
-        if seen_hashes[..seen_count].contains(&hash) {
-            break;
-        }
-        seen_hashes[seen_count] = hash;
-        seen_count += 1;
-
-        let tt_move = if let Some(entry) = tt.probe(board.hash) {
-            entry.best_move()
-        } else {
-            None
-        };
-
-        let Some(mv) = tt_move else { break };
-        if mv == EMPTY_MOVE {
-            break;
-        }
-
-        if !board.is_legal_move(mv) {
-            break;
-        }
-
-        pv.push(mv);
-        let info = board.make_move(mv);
-        unmake_infos.push((mv, info));
-    }
-
-    for (mv, info) in unmake_infos.into_iter().rev() {
-        board.unmake_move(mv, info);
-    }
-
-    pv
-}
