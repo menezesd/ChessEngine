@@ -46,7 +46,7 @@ impl Board {
 
             // Knight mobility
             for sq_idx in self.pieces[color_idx][Piece::Knight.index()].iter() {
-                let moves = KNIGHT_ATTACKS[sq_idx.as_usize()];
+                let moves = KNIGHT_ATTACKS[sq_idx.index()];
                 // Count safe squares (not attacked by enemy pawns, not blocked by own pieces)
                 let safe = moves & !enemy_pawn_attacks.0 & !self.occupied[color_idx].0;
                 let count = safe.count_ones() as usize;
@@ -56,7 +56,7 @@ impl Board {
 
             // Bishop mobility
             for sq_idx in self.pieces[color_idx][Piece::Bishop.index()].iter() {
-                let moves = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, true);
+                let moves = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
                 let safe = moves & !enemy_pawn_attacks.0 & !self.occupied[color_idx].0;
                 let count = safe.count_ones() as usize;
                 mg += sign * BISHOP_MOB_MG[count.min(13)];
@@ -65,7 +65,7 @@ impl Board {
 
             // Rook mobility
             for sq_idx in self.pieces[color_idx][Piece::Rook.index()].iter() {
-                let moves = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, false);
+                let moves = slider_attacks(sq_idx.index(), self.all_occupied.0, false);
                 let safe = moves & !self.occupied[color_idx].0;
                 let count = safe.count_ones() as usize;
                 mg += sign * ROOK_MOB_MG[count.min(14)];
@@ -74,8 +74,8 @@ impl Board {
 
             // Queen mobility
             for sq_idx in self.pieces[color_idx][Piece::Queen.index()].iter() {
-                let diag = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, true);
-                let straight = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, false);
+                let diag = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
+                let straight = slider_attacks(sq_idx.index(), self.all_occupied.0, false);
                 let moves = diag | straight;
                 let safe = moves & !enemy_pawn_attacks.0 & !self.occupied[color_idx].0;
                 let count = safe.count_ones() as usize;

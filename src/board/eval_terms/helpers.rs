@@ -70,28 +70,28 @@ impl Board {
 
         // Knight attacks
         for sq_idx in self.pieces[c_idx][Piece::Knight.index()].iter() {
-            attacks.0 |= KNIGHT_ATTACKS[sq_idx.as_usize()];
+            attacks.0 |= KNIGHT_ATTACKS[sq_idx.index()];
         }
 
         // Bishop attacks
         for sq_idx in self.pieces[c_idx][Piece::Bishop.index()].iter() {
-            attacks.0 |= slider_attacks(sq_idx.as_usize(), self.all_occupied.0, true);
+            attacks.0 |= slider_attacks(sq_idx.index(), self.all_occupied.0, true);
         }
 
         // Rook attacks
         for sq_idx in self.pieces[c_idx][Piece::Rook.index()].iter() {
-            attacks.0 |= slider_attacks(sq_idx.as_usize(), self.all_occupied.0, false);
+            attacks.0 |= slider_attacks(sq_idx.index(), self.all_occupied.0, false);
         }
 
         // Queen attacks
         for sq_idx in self.pieces[c_idx][Piece::Queen.index()].iter() {
-            attacks.0 |= slider_attacks(sq_idx.as_usize(), self.all_occupied.0, true);
-            attacks.0 |= slider_attacks(sq_idx.as_usize(), self.all_occupied.0, false);
+            attacks.0 |= slider_attacks(sq_idx.index(), self.all_occupied.0, true);
+            attacks.0 |= slider_attacks(sq_idx.index(), self.all_occupied.0, false);
         }
 
         // King attacks
         for sq_idx in self.pieces[c_idx][Piece::King.index()].iter() {
-            attacks.0 |= KING_ATTACKS[sq_idx.as_usize()];
+            attacks.0 |= KING_ATTACKS[sq_idx.index()];
         }
 
         attacks

@@ -49,7 +49,7 @@ impl Board {
             };
 
             for sq_idx in own_pawns.iter() {
-                let sq = Square::from_index(sq_idx);
+                let sq = sq_idx;
                 let rank = sq.rank();
                 let rel_rank = relative_rank(rank, color);
 
@@ -60,14 +60,14 @@ impl Board {
                     let stop_sq = match color {
                         Color::White => {
                             if rank < 7 {
-                                Square(rank + 1, sq.file())
+                                Square::new(rank + 1, sq.file())
                             } else {
                                 sq
                             }
                         }
                         Color::Black => {
                             if rank > 0 {
-                                Square(rank - 1, sq.file())
+                                Square::new(rank - 1, sq.file())
                             } else {
                                 sq
                             }

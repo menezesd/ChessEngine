@@ -4,7 +4,7 @@
 
 use crate::board::masks::{FILES, RANK_7TH};
 use crate::board::state::Board;
-use crate::board::types::{Bitboard, Piece, Square};
+use crate::board::types::{Bitboard, Piece};
 
 use super::tables::{
     ROOK_7TH_EG, ROOK_7TH_MG, ROOK_OPEN_FILE_EG, ROOK_OPEN_FILE_MG, ROOK_SEMI_OPEN_EG,
@@ -26,7 +26,7 @@ impl Board {
             let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
 
             for sq_idx in self.pieces[color_idx][Piece::Rook.index()].iter() {
-                let sq = Square::from_index(sq_idx);
+                let sq = sq_idx;
                 let file = sq.file();
 
                 // Open/semi-open file
@@ -64,8 +64,7 @@ impl Board {
                 // Check for trapped rook by uncastled king
                 let back_rank = if color_idx == 0 { 0 } else { 7 };
                 if king_rank == back_rank {
-                    for sq_idx in self.pieces[color_idx][Piece::Rook.index()].iter() {
-                        let rook_sq = Square::from_index(sq_idx);
+                    for rook_sq in self.pieces[color_idx][Piece::Rook.index()].iter() {
                         let rook_file = rook_sq.file();
                         let rook_rank = rook_sq.rank();
 

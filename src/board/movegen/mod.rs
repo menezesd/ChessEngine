@@ -17,42 +17,42 @@ impl Board {
         let c_idx = color.index();
 
         for from_idx in self.pieces[c_idx][Piece::Pawn.index()].iter() {
-            let from = Square::from_index(from_idx);
+            let from = from_idx;
             for m in &self.generate_pawn_moves(from) {
                 moves.push(*m);
             }
         }
 
         for from_idx in self.pieces[c_idx][Piece::Knight.index()].iter() {
-            let from = Square::from_index(from_idx);
+            let from = from_idx;
             for m in &self.generate_knight_moves(from) {
                 moves.push(*m);
             }
         }
 
         for from_idx in self.pieces[c_idx][Piece::Bishop.index()].iter() {
-            let from = Square::from_index(from_idx);
+            let from = from_idx;
             for m in &self.generate_slider_moves(from, SliderType::Bishop) {
                 moves.push(*m);
             }
         }
 
         for from_idx in self.pieces[c_idx][Piece::Rook.index()].iter() {
-            let from = Square::from_index(from_idx);
+            let from = from_idx;
             for m in &self.generate_slider_moves(from, SliderType::Rook) {
                 moves.push(*m);
             }
         }
 
         for from_idx in self.pieces[c_idx][Piece::Queen.index()].iter() {
-            let from = Square::from_index(from_idx);
+            let from = from_idx;
             for m in &self.generate_slider_moves(from, SliderType::Queen) {
                 moves.push(*m);
             }
         }
 
         for from_idx in self.pieces[c_idx][Piece::King.index()].iter() {
-            let from = Square::from_index(from_idx);
+            let from = from_idx;
             for m in &self.generate_king_moves(from) {
                 moves.push(*m);
             }
@@ -127,7 +127,7 @@ impl Board {
                 let king_start_sq = m.from();
                 let from = m.from();
                 let to = m.to();
-                let king_mid_sq = Square(from.rank(), usize::midpoint(from.file(), to.file()));
+                let king_mid_sq = Square::new(from.rank(), usize::midpoint(from.file(), to.file()));
                 let king_end_sq = m.to();
 
                 if self.is_square_attacked(king_start_sq, opponent_color)
@@ -188,7 +188,7 @@ impl Board {
         if mv.is_castling() {
             let opponent_color = current_color.opponent();
             let to = mv.to();
-            let king_mid_sq = Square(from.rank(), usize::midpoint(from.file(), to.file()));
+            let king_mid_sq = Square::new(from.rank(), usize::midpoint(from.file(), to.file()));
 
             if self.is_square_attacked(from, opponent_color)
                 || self.is_square_attacked(king_mid_sq, opponent_color)
@@ -222,7 +222,7 @@ impl Board {
 
         // Pawns have special tactical move generation (includes promotions)
         for from_idx in self.pieces[c_idx][Piece::Pawn.index()].iter() {
-            let from = Square::from_index(from_idx);
+            let from = from_idx;
             self.generate_pawn_tactical_moves(from, &mut pseudo_tactical_moves);
         }
 
@@ -235,7 +235,7 @@ impl Board {
             Piece::King,
         ] {
             for from_idx in self.pieces[c_idx][piece.index()].iter() {
-                let from = Square::from_index(from_idx);
+                let from = from_idx;
                 let piece_moves = self.generate_piece_moves(from, piece);
                 Self::collect_captures(&piece_moves, &mut pseudo_tactical_moves);
             }

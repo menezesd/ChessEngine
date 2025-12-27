@@ -40,7 +40,7 @@ impl Board {
                             files: file + 1,
                         });
                     }
-                    board.set_piece(Square(7 - rank_idx, file), color, piece);
+                    board.set_piece(Square::new(7 - rank_idx, file), color, piece);
                     file += 1;
                 }
             }
@@ -78,7 +78,7 @@ impl Board {
                 && ('a'..='h').contains(&chars[0])
                 && ('1'..='8').contains(&chars[1])
             {
-                Some(Square(rank_to_index(chars[1]), file_to_index(chars[0])))
+                Some(Square::new(rank_to_index(chars[1]), file_to_index(chars[0])))
             } else {
                 return Err(FenError::InvalidEnPassant {
                     found: parts[3].to_string(),
@@ -114,7 +114,7 @@ impl Board {
             let mut row = String::new();
             let mut empty = 0;
             for file in 0..8 {
-                let sq = Square(rank, file);
+                let sq = Square::new(rank, file);
                 if let Some((color, piece)) = self.piece_at(sq) {
                     if empty > 0 {
                         row.push_str(&empty.to_string());
@@ -192,8 +192,8 @@ impl Board {
             });
         }
 
-        let from_sq = Square(rank_to_index(chars[1]), file_to_index(chars[0]));
-        let to_sq = Square(rank_to_index(chars[3]), file_to_index(chars[2]));
+        let from_sq = Square::new(rank_to_index(chars[1]), file_to_index(chars[0]));
+        let to_sq = Square::new(rank_to_index(chars[3]), file_to_index(chars[2]));
 
         // Parse promotion piece if present
         let promotion = if uci.len() == 5 {

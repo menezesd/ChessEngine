@@ -69,5 +69,5 @@ pub(crate) fn color_to_zobrist_index(color: Color) -> usize {
 
 #[inline]
 pub(crate) fn square_to_zobrist_index(sq: Square) -> usize {
-    sq.index().as_usize()
+    sq.index()
 }

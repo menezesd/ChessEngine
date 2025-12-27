@@ -1,6 +1,6 @@
 //! Bitboard type and operations.
 
-use super::square::{Square, SquareIdx};
+use super::square::Square;
 
 /// A 64-bit bitboard representing piece positions or attack squares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -40,7 +40,7 @@ impl Bitboard {
     #[inline]
     #[must_use]
     pub const fn from_square(sq: Square) -> Self {
-        Bitboard(1 << (sq.0 * 8 + sq.1))
+        Bitboard(1 << sq.as_index())
     }
 
     /// Returns an iterator over the square indices set in this bitboard
@@ -75,7 +75,7 @@ impl Bitboard {
     #[inline]
     #[must_use]
     pub const fn contains(self, sq: Square) -> bool {
-        (self.0 & (1 << (sq.0 * 8 + sq.1))) != 0
+        (self.0 & (1 << sq.as_index())) != 0
     }
 
     /// Shift all bits north (toward rank 8)
@@ -150,20 +150,20 @@ impl Bitboard {
 }
 
 pub(crate) fn bit_for_square(sq: Square) -> Bitboard {
-    Bitboard(1u64 << sq.index().as_usize())
+    Bitboard(1u64 << sq.index())
 }
 
-pub(crate) fn pop_lsb(bb: &mut Bitboard) -> SquareIdx {
-    let idx = bb.0.trailing_zeros() as u8;
+pub(crate) fn pop_lsb(bb: &mut Bitboard) -> Square {
+    let idx = bb.0.trailing_zeros() as usize;
     bb.0 &= bb.0 - 1;
-    SquareIdx(idx)
+    Square::from_index(idx)
 }
 
 /// Iterator over set bits in a Bitboard
 pub struct BitboardIter(Bitboard);
 
 impl Iterator for BitboardIter {
-    type Item = SquareIdx;
+    type Item = Square;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.0.is_empty() {

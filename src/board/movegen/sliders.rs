@@ -14,7 +14,7 @@ impl Board {
         let mut moves = MoveList::new();
         let color = self.current_color();
         let own_occ = self.occupied[color.index()].0;
-        let from_idx = from.index().as_usize();
+        let from_idx = from.index();
 
         let targets_raw = match slider {
             SliderType::Bishop => slider_attacks(from_idx, self.all_occupied.0, true),
@@ -26,7 +26,7 @@ impl Board {
         } & !own_occ;
 
         for to_idx in Bitboard(targets_raw).iter() {
-            let to_sq = Square::from_index(to_idx);
+            let to_sq = to_idx;
             moves.push(self.create_move(from, to_sq, None, false, false, false));
         }
         moves

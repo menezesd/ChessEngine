@@ -7,9 +7,9 @@
 //! use chess_engine::board::{BoardBuilder, Color, Piece, Square};
 //!
 //! let board = BoardBuilder::new()
-//!     .piece(Square(0, 4), Color::White, Piece::King)
-//!     .piece(Square(7, 4), Color::Black, Piece::King)
-//!     .piece(Square(1, 0), Color::White, Piece::Pawn)
+//!     .piece(Square::new(0, 4), Color::White, Piece::King)
+//!     .piece(Square::new(7, 4), Color::Black, Piece::King)
+//!     .piece(Square::new(1, 0), Color::White, Piece::Pawn)
 //!     .side_to_move(Color::White)
 //!     .build();
 //! ```
@@ -62,16 +62,20 @@ impl BoardBuilder {
             Piece::Rook,
         ];
         for (file, &piece) in back_rank.iter().enumerate() {
-            builder.pieces.push((Square(0, file), Color::White, piece));
-            builder.pieces.push((Square(7, file), Color::Black, piece));
+            builder
+                .pieces
+                .push((Square::new(0, file), Color::White, piece));
+            builder
+                .pieces
+                .push((Square::new(7, file), Color::Black, piece));
         }
         for file in 0..8 {
             builder
                 .pieces
-                .push((Square(1, file), Color::White, Piece::Pawn));
+                .push((Square::new(1, file), Color::White, Piece::Pawn));
             builder
                 .pieces
-                .push((Square(6, file), Color::Black, Piece::Pawn));
+                .push((Square::new(6, file), Color::Black, Piece::Pawn));
         }
 
         builder.castling_rights = CastlingRights::all().as_u8();
@@ -200,14 +204,14 @@ mod tests {
     #[test]
     fn test_empty_board() {
         let board = BoardBuilder::new()
-            .piece(Square(0, 4), Color::White, Piece::King)
-            .piece(Square(7, 4), Color::Black, Piece::King)
+            .piece(Square::new(0, 4), Color::White, Piece::King)
+            .piece(Square::new(7, 4), Color::Black, Piece::King)
             .build();
 
         // Should have only two kings
-        assert!(board.piece_at(Square(0, 4)).is_some());
-        assert!(board.piece_at(Square(7, 4)).is_some());
-        assert!(board.piece_at(Square(0, 0)).is_none());
+        assert!(board.piece_at(Square::new(0, 4)).is_some());
+        assert!(board.piece_at(Square::new(7, 4)).is_some());
+        assert!(board.piece_at(Square::new(0, 0)).is_none());
     }
 
     #[test]
@@ -227,8 +231,8 @@ mod tests {
     #[test]
     fn test_side_to_move() {
         let board = BoardBuilder::new()
-            .piece(Square(0, 4), Color::White, Piece::King)
-            .piece(Square(7, 4), Color::Black, Piece::King)
+            .piece(Square::new(0, 4), Color::White, Piece::King)
+            .piece(Square::new(7, 4), Color::Black, Piece::King)
             .side_to_move(Color::Black)
             .build();
 
@@ -238,10 +242,10 @@ mod tests {
     #[test]
     fn test_clear_square() {
         let board = BoardBuilder::starting_position()
-            .clear(Square(0, 0)) // Remove white rook on a1
+            .clear(Square::new(0, 0)) // Remove white rook on a1
             .build();
 
-        assert!(board.piece_at(Square(0, 0)).is_none());
-        assert!(board.piece_at(Square(0, 1)).is_some()); // Knight still there
+        assert!(board.piece_at(Square::new(0, 0)).is_none());
+        assert!(board.piece_at(Square::new(0, 1)).is_some()); // Knight still there
     }
 }

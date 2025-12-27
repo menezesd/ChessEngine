@@ -18,7 +18,7 @@ fn test_en_passant_make_unmake() {
         Board::from_fen("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3");
     let original_hash = board.hash();
     let original_ep = board.en_passant_target;
-    let mv = find_move(&mut board, Square(4, 4), Square(5, 5), None);
+    let mv = find_move(&mut board, Square::new(4, 4), Square::new(5, 5), None);
     let info = board.make_move(mv);
     board.unmake_move(mv, info);
     assert_eq!(board.hash(), original_hash);
@@ -29,12 +29,12 @@ fn test_en_passant_make_unmake() {
 fn test_promotion_make_unmake() {
     let mut board = Board::from_fen("8/P7/8/8/8/8/8/K1k5 w - - 0 1");
     let original_hash = board.hash();
-    let mv = find_move(&mut board, Square(6, 0), Square(7, 0), Some(Piece::Queen));
+    let mv = find_move(&mut board, Square::new(6, 0), Square::new(7, 0), Some(Piece::Queen));
     let info = board.make_move(mv);
     board.unmake_move(mv, info);
     assert_eq!(board.hash(), original_hash);
     assert_eq!(
-        board.piece_at(Square(6, 0)),
+        board.piece_at(Square::new(6, 0)),
         Some((Color::White, Piece::Pawn))
     );
 }

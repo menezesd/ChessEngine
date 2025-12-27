@@ -94,7 +94,7 @@ impl Board {
                 // Diagonal x-ray
                 let diag_attackers = self.diagonal_sliders();
                 let new_diag = Bitboard(
-                    slider_attacks(to.index().as_usize(), occupancy, true) & diag_attackers.0,
+                    slider_attacks(to.index(), occupancy, true) & diag_attackers.0,
                 );
                 attackers = Bitboard(attackers.0 | (new_diag.0 & occupancy));
             }
@@ -103,7 +103,7 @@ impl Board {
                 // Straight x-ray
                 let straight_attackers = self.straight_sliders();
                 let new_straight = Bitboard(
-                    slider_attacks(to.index().as_usize(), occupancy, false) & straight_attackers.0,
+                    slider_attacks(to.index(), occupancy, false) & straight_attackers.0,
                 );
                 attackers = Bitboard(attackers.0 | (new_straight.0 & occupancy));
             }
@@ -163,7 +163,7 @@ impl Board {
 
     /// Get all pieces attacking a square.
     fn attackers_to(&self, sq: Square, occupancy: Bitboard) -> Bitboard {
-        let sq_idx = sq.index().as_usize();
+        let sq_idx = sq.index();
         let mut attackers = Bitboard(0);
 
         // Pawn attacks (look backwards from target to find attacking pawns)
@@ -267,8 +267,8 @@ mod tests {
     fn test_see_simple_capture() {
         // White pawn captures black pawn
         let board = make_board("8/8/8/3p4/4P3/8/8/8 w - - 0 1");
-        let from = Square(3, 4); // e4
-        let to = Square(4, 3); // d5
+        let from = Square::new(3, 4); // e4
+        let to = Square::new(4, 3); // d5
         let see = board.see(from, to);
         assert_eq!(see, 100); // Win a pawn
     }
@@ -277,8 +277,8 @@ mod tests {
     fn test_see_bad_capture() {
         // White pawn captures defended pawn
         let board = make_board("8/8/2p5/3p4/4P3/8/8/8 w - - 0 1");
-        let from = Square(3, 4); // e4
-        let to = Square(4, 3); // d5
+        let from = Square::new(3, 4); // e4
+        let to = Square::new(4, 3); // d5
         let see = board.see(from, to);
         assert_eq!(see, 0); // Equal exchange: pawn takes pawn, pawn recaptures
     }
@@ -287,8 +287,8 @@ mod tests {
     fn test_see_winning_exchange() {
         // Knight takes pawn defended by pawn - bad for knight
         let board = make_board("8/8/2p5/3p4/4N3/8/8/8 w - - 0 1");
-        let from = Square(3, 4); // e4 knight
-        let to = Square(4, 3); // d5 pawn
+        let from = Square::new(3, 4); // e4 knight
+        let to = Square::new(4, 3); // d5 pawn
         let see = board.see(from, to);
         assert!(see < 0); // Lose: 100 - 320 = -220
     }
@@ -297,8 +297,8 @@ mod tests {
     fn test_see_queen_takes_defended_pawn() {
         // Queen takes pawn defended by pawn
         let board = make_board("8/8/2p5/3p4/4Q3/8/8/8 w - - 0 1");
-        let from = Square(3, 4); // e4 queen
-        let to = Square(4, 3); // d5 pawn
+        let from = Square::new(3, 4); // e4 queen
+        let to = Square::new(4, 3); // d5 pawn
         let see = board.see(from, to);
         assert!(see < 0); // Very bad: 100 - 900 = -800
     }
@@ -307,8 +307,8 @@ mod tests {
     fn test_see_with_xray() {
         // Rook takes rook, x-ray rook recaptures
         let board = make_board("3r4/8/8/8/8/8/8/R2R4 w - - 0 1");
-        let from = Square(0, 0); // a1 rook
-        let to = Square(7, 3); // d8 rook
+        let from = Square::new(0, 0); // a1 rook
+        let to = Square::new(7, 3); // d8 rook
         let see = board.see(from, to);
         // White Rxd8, if black had another attacker it would recapture
         // But black has no recapture, so SEE = 500 (win rook)

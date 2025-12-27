@@ -91,10 +91,10 @@ impl Board {
             Piece::Rook,
         ];
         for (i, piece) in back_rank.iter().enumerate() {
-            board.set_piece(Square(0, i), Color::White, *piece);
-            board.set_piece(Square(7, i), Color::Black, *piece);
-            board.set_piece(Square(1, i), Color::White, Piece::Pawn);
-            board.set_piece(Square(6, i), Color::Black, Piece::Pawn);
+            board.set_piece(Square::new(0, i), Color::White, *piece);
+            board.set_piece(Square::new(7, i), Color::Black, *piece);
+            board.set_piece(Square::new(1, i), Color::White, Piece::Pawn);
+            board.set_piece(Square::new(6, i), Color::Black, Piece::Pawn);
         }
 
         board.castling_rights = CASTLE_WHITE_K | CASTLE_WHITE_Q | CASTLE_BLACK_K | CASTLE_BLACK_Q;
@@ -115,7 +115,7 @@ impl Board {
             let c_idx = color.index();
             for piece_type in 0..6 {
                 for sq_idx in self.pieces[c_idx][piece_type].iter() {
-                    let sq = sq_idx.as_usize();
+                    let sq = sq_idx.index();
                     // PST square: flip for white (tables are from black's perspective)
                     let pst_sq = if color == Color::White { sq } else { sq ^ 56 };
 
@@ -240,7 +240,7 @@ impl fmt::Display for Board {
         for rank in (0..8).rev() {
             write!(f, "{} |", rank + 1)?;
             for file in 0..8 {
-                let sq = Square(rank, file);
+                let sq = Square::new(rank, file);
                 let piece_char = match self.piece_at(sq) {
                     Some((color, piece)) => piece.to_fen_char(color),
                     None => ' ',

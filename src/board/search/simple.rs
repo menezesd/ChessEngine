@@ -347,8 +347,8 @@ impl SimpleSearchContext<'_> {
     ) -> ScoredMoveList {
         // Get counter move for the previous move (if any)
         let counter = if prev_move != EMPTY_MOVE {
-            let from = prev_move.from().index().as_usize();
-            let to = prev_move.to().index().as_usize();
+            let from = prev_move.from().index();
+            let to = prev_move.to().index();
             self.state.tables.counter_moves.get(from, to)
         } else {
             EMPTY_MOVE
@@ -384,8 +384,8 @@ impl SimpleSearchContext<'_> {
             if ply > 0 {
                 let prev = self.previous_move[ply - 1];
                 if prev != EMPTY_MOVE {
-                    let from = prev.from().index().as_usize();
-                    let to = prev.to().index().as_usize();
+                    let from = prev.from().index();
+                    let to = prev.to().index();
                     self.state.tables.counter_moves.set(from, to, m);
                 }
             }

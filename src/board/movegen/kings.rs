@@ -6,31 +6,31 @@ impl Board {
         let mut moves = MoveList::new();
         let color = self.current_color();
         let back_rank = if color == Color::White { 0 } else { 7 };
-        let from_idx = from.index().as_usize();
+        let from_idx = from.index();
         let own_occ = self.occupied[color.index()].0;
         let targets = Bitboard(KING_ATTACKS[from_idx] & !own_occ);
 
         for to_idx in targets.iter() {
-            let to_sq = Square::from_index(to_idx);
+            let to_sq = to_idx;
             moves.push(self.create_move(from, to_sq, None, false, false, false));
         }
 
-        if from == Square(back_rank, 4) {
+        if from == Square::new(back_rank, 4) {
             if self.has_castling_right(color, 'K')
-                && self.is_empty(Square(back_rank, 5))
-                && self.is_empty(Square(back_rank, 6))
-                && self.piece_at(Square(back_rank, 7)) == Some((color, Piece::Rook))
+                && self.is_empty(Square::new(back_rank, 5))
+                && self.is_empty(Square::new(back_rank, 6))
+                && self.piece_at(Square::new(back_rank, 7)) == Some((color, Piece::Rook))
             {
-                let to_sq = Square(back_rank, 6);
+                let to_sq = Square::new(back_rank, 6);
                 moves.push(self.create_move(from, to_sq, None, true, false, false));
             }
             if self.has_castling_right(color, 'Q')
-                && self.is_empty(Square(back_rank, 1))
-                && self.is_empty(Square(back_rank, 2))
-                && self.is_empty(Square(back_rank, 3))
-                && self.piece_at(Square(back_rank, 0)) == Some((color, Piece::Rook))
+                && self.is_empty(Square::new(back_rank, 1))
+                && self.is_empty(Square::new(back_rank, 2))
+                && self.is_empty(Square::new(back_rank, 3))
+                && self.piece_at(Square::new(back_rank, 0)) == Some((color, Piece::Rook))
             {
-                let to_sq = Square(back_rank, 2);
+                let to_sq = Square::new(back_rank, 2);
                 moves.push(self.create_move(from, to_sq, None, true, false, false));
             }
         }
@@ -42,11 +42,10 @@ impl Board {
         self.pieces[color.index()][Piece::King.index()]
             .iter()
             .next()
-            .map(Square::from_index)
     }
 
     pub(crate) fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
-        let target_idx = square.index().as_usize();
+        let target_idx = square.index();
         let c_idx = attacker_color.index();
 
         let pawn_sources = if attacker_color == Color::White {

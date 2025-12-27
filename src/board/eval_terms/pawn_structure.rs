@@ -4,7 +4,7 @@
 
 use crate::board::masks::{fill_forward, relative_rank, ADJACENT_FILES, PAWN_SUPPORT_MASK};
 use crate::board::state::Board;
-use crate::board::types::{Bitboard, Color, Piece, Square};
+use crate::board::types::{Bitboard, Color, Piece};
 
 use super::tables::{
     BACKWARD_OPEN_EG, BACKWARD_OPEN_MG, BACKWARD_PAWN_EG, BACKWARD_PAWN_MG, DEFENDED_BONUS_EG,
@@ -31,7 +31,7 @@ impl Board {
             let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
 
             for sq_idx in own_pawns.iter() {
-                let sq = Square::from_index(sq_idx);
+                let sq = sq_idx;
                 let file = sq.file();
                 let rank = sq.rank();
                 let rel_rank = relative_rank(rank, color);

@@ -55,7 +55,7 @@ impl Board {
                 let our_pieces = self.pieces[color_idx][piece.index()];
 
                 for sq_idx in our_pieces.iter() {
-                    let sq_bb = 1u64 << sq_idx.as_usize();
+                    let sq_bb = 1u64 << sq_idx.index();
 
                     let attacked_undefended =
                         (sq_bb & their_attacks.0) != 0 && (sq_bb & our_attacks.0) == 0;
@@ -75,28 +75,28 @@ impl Board {
         let black_bishops = self.pieces[1][Piece::Bishop.index()];
 
         for sq_idx in white_bishops.iter() {
-            let attacks = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, true);
+            let attacks = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
             if (attacks & black_knights.0) != 0 {
                 score += MINOR_ON_MINOR;
             }
         }
 
         for sq_idx in white_knights.iter() {
-            let attacks = KNIGHT_ATTACKS[sq_idx.as_usize()];
+            let attacks = KNIGHT_ATTACKS[sq_idx.index()];
             if (attacks & black_bishops.0) != 0 {
                 score += MINOR_ON_MINOR;
             }
         }
 
         for sq_idx in black_bishops.iter() {
-            let attacks = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, true);
+            let attacks = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
             if (attacks & white_knights.0) != 0 {
                 score -= MINOR_ON_MINOR;
             }
         }
 
         for sq_idx in black_knights.iter() {
-            let attacks = KNIGHT_ATTACKS[sq_idx.as_usize()];
+            let attacks = KNIGHT_ATTACKS[sq_idx.index()];
             if (attacks & white_bishops.0) != 0 {
                 score -= MINOR_ON_MINOR;
             }

@@ -16,29 +16,27 @@ pub(crate) fn rank_to_index(rank: char) -> usize {
     (rank as usize) - ('0' as usize) - 1
 }
 
-/// Index into a 64-square bitboard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SquareIdx(pub u8);
-
-impl SquareIdx {
-    #[inline]
-    #[must_use]
-    pub(crate) const fn as_usize(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// A square on the chess board, represented as (rank, file).
+/// A square on the chess board, stored as a compact 0-63 index.
+///
+/// Index layout: rank * 8 + file, where a1=0, b1=1, ..., h8=63.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct Square(pub usize, pub usize); // (rank, file)
+pub struct Square(u8);
 
 impl Square {
+    /// Create a new square from rank and file (both 0-7).
+    /// Does not perform bounds checking - use `try_new` for checked construction.
+    #[inline]
+    #[must_use]
+    pub const fn new(rank: usize, file: usize) -> Self {
+        Square((rank * 8 + file) as u8)
+    }
+
     /// Create a new square with bounds checking
     #[must_use]
-    pub fn new(rank: usize, file: usize) -> Option<Self> {
+    pub const fn try_new(rank: usize, file: usize) -> Option<Self> {
         if rank < 8 && file < 8 {
-            Some(Square(rank, file))
+            Some(Square::new(rank, file))
         } else {
             None
         }
@@ -48,60 +46,60 @@ impl Square {
     #[inline]
     #[must_use]
     pub const fn rank(self) -> usize {
-        self.0
+        (self.0 / 8) as usize
     }
 
     /// Get the file (0-7, where 0 = file a)
     #[inline]
     #[must_use]
     pub const fn file(self) -> usize {
-        self.1
+        (self.0 % 8) as usize
     }
 
     /// Flip the square vertically (e.g., a1 <-> a8)
     #[inline]
     #[must_use]
     pub const fn flip_vertical(self) -> Self {
-        Square(7 - self.0, self.1)
+        Square::new(7 - self.rank(), self.file())
     }
 
     /// Flip the square horizontally (e.g., a1 <-> h1)
     #[inline]
     #[must_use]
     pub const fn flip_horizontal(self) -> Self {
-        Square(self.0, 7 - self.1)
+        Square::new(self.rank(), 7 - self.file())
     }
 
     /// Get the square's index (0-63, a1=0, b1=1, ..., h8=63)
     #[inline]
     #[must_use]
     pub const fn as_index(self) -> usize {
-        self.0 * 8 + self.1
+        self.0 as usize
     }
 
     /// Create a square from an index (0-63)
-    #[must_use]
-    pub const fn from_index_const(idx: usize) -> Self {
-        Square(idx / 8, idx % 8)
-    }
-
     #[inline]
     #[must_use]
-    pub(crate) fn from_index(idx: SquareIdx) -> Self {
-        let idx = idx.0 as usize;
-        Square(idx / 8, idx % 8)
+    pub const fn from_index(idx: usize) -> Self {
+        Square(idx as u8)
     }
 
+    /// Alias for as_index, returns the internal index directly
     #[inline]
     #[must_use]
-    pub(crate) const fn index(self) -> SquareIdx {
-        SquareIdx((self.0 * 8 + self.1) as u8)
+    pub(crate) const fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
 impl fmt::Display for Square {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", (self.1 as u8 + b'a') as char, self.0 + 1)
+        write!(
+            f,
+            "{}{}",
+            (self.file() as u8 + b'a') as char,
+            self.rank() + 1
+        )
     }
 }
 
@@ -113,8 +111,7 @@ impl PartialOrd for Square {
 
 impl Ord for Square {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare by index (a1=0, b1=1, ..., h8=63)
-        self.index().0.cmp(&other.index().0)
+        self.0.cmp(&other.0)
     }
 }
 
@@ -128,7 +125,7 @@ impl TryFrom<(usize, usize)> for Square {
         if file >= 8 {
             return Err(SquareError::FileOutOfBounds { file });
         }
-        Ok(Square(rank, file))
+        Ok(Square::new(rank, file))
     }
 }
 
@@ -161,6 +158,6 @@ impl FromStr for Square {
             }
         };
 
-        Ok(Square(rank, file))
+        Ok(Square::new(rank, file))
     }
 }

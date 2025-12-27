@@ -168,7 +168,7 @@ impl Board {
                 notation: dest_str.iter().collect(),
             });
         }
-        let dest = Square(dest_rank, dest_file);
+        let dest = Square::new(dest_rank, dest_file);
 
         // Find matching move
         self.find_san_move(piece, dest, disambig_file, disambig_rank, promotion, san)
@@ -325,8 +325,8 @@ mod tests {
 
         // e4
         let mv = board.parse_san("e4").unwrap();
-        assert_eq!(mv.from(), Square(1, 4));
-        assert_eq!(mv.to(), Square(3, 4));
+        assert_eq!(mv.from(), Square::new(1, 4));
+        assert_eq!(mv.to(), Square::new(3, 4));
         assert_eq!(board.move_to_san(&mv), "e4");
     }
 
@@ -336,8 +336,8 @@ mod tests {
 
         // Nf3
         let mv = board.parse_san("Nf3").unwrap();
-        assert_eq!(mv.from(), Square(0, 6));
-        assert_eq!(mv.to(), Square(2, 5));
+        assert_eq!(mv.from(), Square::new(0, 6));
+        assert_eq!(mv.to(), Square::new(2, 5));
         assert_eq!(board.move_to_san(&mv), "Nf3");
     }
 

@@ -69,7 +69,7 @@ impl Board {
             // Knight attacks on king zone
             for sq_idx in self.pieces[enemy_idx][Piece::Knight.index()].iter() {
                 let attacks =
-                    crate::board::Bitboard(KNIGHT_ATTACKS[sq_idx.as_usize()] & king_zone.0);
+                    crate::board::Bitboard(KNIGHT_ATTACKS[sq_idx.index()] & king_zone.0);
                 if !attacks.is_empty() {
                     let defended = (attacks.0 & our_pawn_attacks.0).count_ones() as i32;
                     let undefended = attacks.popcount() as i32 - defended;
@@ -80,7 +80,7 @@ impl Board {
 
             // Bishop attacks on king zone
             for sq_idx in self.pieces[enemy_idx][Piece::Bishop.index()].iter() {
-                let moves = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, true);
+                let moves = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
                 let attacks = crate::board::Bitboard(moves & king_zone.0);
                 if !attacks.is_empty() {
                     let defended = (attacks.0 & our_pawn_attacks.0).count_ones() as i32;
@@ -92,7 +92,7 @@ impl Board {
 
             // Rook attacks on king zone
             for sq_idx in self.pieces[enemy_idx][Piece::Rook.index()].iter() {
-                let moves = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, false);
+                let moves = slider_attacks(sq_idx.index(), self.all_occupied.0, false);
                 let attacks = crate::board::Bitboard(moves & king_zone.0);
                 if !attacks.is_empty() {
                     let defended = (attacks.0 & our_pawn_attacks.0).count_ones() as i32;
@@ -104,8 +104,8 @@ impl Board {
 
             // Queen attacks on king zone
             for sq_idx in self.pieces[enemy_idx][Piece::Queen.index()].iter() {
-                let diag = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, true);
-                let straight = slider_attacks(sq_idx.as_usize(), self.all_occupied.0, false);
+                let diag = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
+                let straight = slider_attacks(sq_idx.index(), self.all_occupied.0, false);
                 let moves = diag | straight;
                 let attacks = crate::board::Bitboard(moves & king_zone.0);
                 if !attacks.is_empty() {

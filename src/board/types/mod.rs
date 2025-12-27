@@ -2,7 +2,7 @@
 //!
 //! This module contains the fundamental types used throughout the chess engine:
 //! - `Piece` and `Color` - chess piece types and colors
-//! - `Square` and `SquareIdx` - board square representation
+//! - `Square` - compact board square representation (u8)
 //! - `Bitboard` - 64-bit board representation
 //! - `Move` and `MoveList` - move representation
 //! - `CastlingRights` - castling state
@@ -22,7 +22,7 @@ pub use indices::{ColorIndex, PieceIndex};
 pub(crate) use moves::ScoredMoveList;
 pub use moves::{Move, MoveList, MoveListIntoIter};
 pub use piece::{Color, Piece};
-pub use square::{Square, SquareIdx};
+pub use square::Square;
 
 // Re-export internal utilities
 pub(crate) use bitboard::bit_for_square;

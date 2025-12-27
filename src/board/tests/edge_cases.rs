@@ -23,7 +23,7 @@ fn test_underpromotion_to_knight() {
 
     let mv = knight_promo.unwrap();
     board.make_move(*mv);
-    assert_eq!(board.piece_on(Square(7, 0)), Some(Piece::Knight));
+    assert_eq!(board.piece_on(Square::new(7, 0)), Some(Piece::Knight));
 }
 
 #[test]
@@ -59,23 +59,23 @@ fn test_en_passant_removes_correct_pawn() {
     let info = board.make_move(*mv);
 
     assert!(
-        board.piece_on(Square(4, 3)).is_none(),
+        board.piece_on(Square::new(4, 3)).is_none(),
         "Captured pawn should be removed"
     );
     assert_eq!(
-        board.piece_on(Square(5, 3)),
+        board.piece_on(Square::new(5, 3)),
         Some(Piece::Pawn),
         "Capturing pawn should be on d6"
     );
 
     board.unmake_move(*mv, info);
     assert_eq!(
-        board.piece_on(Square(4, 3)),
+        board.piece_on(Square::new(4, 3)),
         Some(Piece::Pawn),
         "Black pawn should be restored"
     );
     assert_eq!(
-        board.piece_on(Square(4, 4)),
+        board.piece_on(Square::new(4, 4)),
         Some(Piece::Pawn),
         "White pawn should be back on e5"
     );
@@ -112,7 +112,7 @@ fn test_double_check_only_king_can_move() {
     for mv in moves.iter() {
         assert_eq!(
             mv.from(),
-            Square(0, 3),
+            Square::new(0, 3),
             "Only king should be able to move in double check"
         );
     }
@@ -124,7 +124,7 @@ fn test_checkmate_back_rank() {
     let moves = board.generate_moves();
     let mate_move = moves
         .iter()
-        .find(|m| m.from() == Square(0, 0) && m.to() == Square(7, 0));
+        .find(|m| m.from() == Square::new(0, 0) && m.to() == Square::new(7, 0));
     assert!(mate_move.is_some());
 
     board.make_move(*mate_move.unwrap());
@@ -149,9 +149,9 @@ fn test_fen_parsing_errors() {
 fn test_square_parsing() {
     use std::str::FromStr;
 
-    assert_eq!(Square::from_str("a1").unwrap(), Square(0, 0));
-    assert_eq!(Square::from_str("h8").unwrap(), Square(7, 7));
-    assert_eq!(Square::from_str("e4").unwrap(), Square(3, 4));
+    assert_eq!(Square::from_str("a1").unwrap(), Square::new(0, 0));
+    assert_eq!(Square::from_str("h8").unwrap(), Square::new(7, 7));
+    assert_eq!(Square::from_str("e4").unwrap(), Square::new(3, 4));
 
     assert!(Square::from_str("i1").is_err());
     assert!(Square::from_str("a9").is_err());
@@ -169,42 +169,42 @@ fn test_square_try_from() {
 
 #[test]
 fn test_move_convenience_methods() {
-    let quiet = Move::quiet(Square(1, 4), Square(3, 4));
+    let quiet = Move::quiet(Square::new(1, 4), Square::new(3, 4));
     assert!(quiet.is_quiet());
     assert!(!quiet.is_capture());
     assert!(!quiet.is_promotion());
     assert!(!quiet.is_tactical());
 
-    let double_pawn = Move::double_pawn_push(Square(1, 4), Square(3, 4));
+    let double_pawn = Move::double_pawn_push(Square::new(1, 4), Square::new(3, 4));
     assert!(double_pawn.is_quiet());
     assert!(double_pawn.is_double_pawn_push());
 
-    let capture = Move::capture(Square(3, 3), Square(4, 4));
+    let capture = Move::capture(Square::new(3, 3), Square::new(4, 4));
     assert!(!capture.is_quiet());
     assert!(capture.is_capture());
     assert!(!capture.is_promotion());
     assert!(capture.is_tactical());
 
-    let promo = Move::new_promotion(Square(6, 0), Square(7, 0), Piece::Queen);
+    let promo = Move::new_promotion(Square::new(6, 0), Square::new(7, 0), Piece::Queen);
     assert!(!promo.is_quiet());
     assert!(!promo.is_capture());
     assert!(promo.is_promotion());
     assert!(promo.is_tactical());
     assert_eq!(promo.promotion(), Some(Piece::Queen));
 
-    let promo_cap = Move::new_promotion_capture(Square(6, 0), Square(7, 1), Piece::Queen);
+    let promo_cap = Move::new_promotion_capture(Square::new(6, 0), Square::new(7, 1), Piece::Queen);
     assert!(!promo_cap.is_quiet());
     assert!(promo_cap.is_capture());
     assert!(promo_cap.is_promotion());
     assert!(promo_cap.is_tactical());
 
-    let castle = Move::castle_kingside(Square(0, 4), Square(0, 6));
+    let castle = Move::castle_kingside(Square::new(0, 4), Square::new(0, 6));
     assert!(!castle.is_quiet());
     assert!(!castle.is_capture());
     assert!(castle.is_castling());
     assert!(castle.is_castle_kingside());
 
-    let ep = Move::en_passant(Square(4, 4), Square(5, 5));
+    let ep = Move::en_passant(Square::new(4, 4), Square::new(5, 5));
     assert!(!ep.is_quiet());
     assert!(ep.is_capture());
     assert!(ep.is_en_passant());

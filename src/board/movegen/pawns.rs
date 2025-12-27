@@ -17,8 +17,8 @@ impl Board {
         moves: &mut MoveList,
     ) {
         let dir: isize = if color == Color::White { 1 } else { -1 };
-        let r = from.0 as isize;
-        let f = from.1 as isize;
+        let r = from.rank() as isize;
+        let f = from.file() as isize;
         let forward_r = r + dir;
 
         if !(0..8).contains(&forward_r) {
@@ -31,11 +31,11 @@ impl Board {
                 continue;
             }
 
-            let target_sq = Square(forward_r as usize, capture_f as usize);
+            let target_sq = Square::new(forward_r as usize, capture_f as usize);
 
             if let Some((target_color, _)) = self.piece_at(target_sq) {
                 if target_color != color {
-                    if target_sq.0 == promotion_rank {
+                    if target_sq.rank() == promotion_rank {
                         self.add_promotions(from, target_sq, moves);
                     } else {
                         moves.push(self.create_move(from, target_sq, None, false, false, false));
@@ -58,22 +58,22 @@ impl Board {
         let start_rank = if color == Color::White { 1 } else { 6 };
         let promotion_rank = if color == Color::White { 7 } else { 0 };
 
-        let r = from.0 as isize;
-        let f = from.1 as isize;
+        let r = from.rank() as isize;
+        let f = from.file() as isize;
 
         // Forward moves
         let forward_r = r + dir;
         if (0..8).contains(&forward_r) {
-            let forward_sq = Square(forward_r as usize, f as usize);
+            let forward_sq = Square::new(forward_r as usize, f as usize);
             if self.is_empty(forward_sq) {
-                if forward_sq.0 == promotion_rank {
+                if forward_sq.rank() == promotion_rank {
                     self.add_promotions(from, forward_sq, &mut moves);
                 } else {
                     moves.push(self.create_move(from, forward_sq, None, false, false, false));
                     // Double push from starting rank
                     if r == start_rank as isize {
                         let double_forward_r = r + 2 * dir;
-                        let double_forward_sq = Square(double_forward_r as usize, f as usize);
+                        let double_forward_sq = Square::new(double_forward_r as usize, f as usize);
                         if self.is_empty(double_forward_sq) {
                             moves.push(self.create_move(
                                 from,
@@ -100,14 +100,14 @@ impl Board {
         let dir: isize = if color == Color::White { 1 } else { -1 };
         let promotion_rank = if color == Color::White { 7 } else { 0 };
 
-        let r = from.0 as isize;
-        let f = from.1 as isize;
+        let r = from.rank() as isize;
+        let f = from.file() as isize;
         let forward_r = r + dir;
 
         // Forward promotion (non-capture)
         if (0..8).contains(&forward_r) {
-            let forward_sq = Square(forward_r as usize, f as usize);
-            if forward_sq.0 == promotion_rank && self.is_empty(forward_sq) {
+            let forward_sq = Square::new(forward_r as usize, f as usize);
+            if forward_sq.rank() == promotion_rank && self.is_empty(forward_sq) {
                 self.add_promotions(from, forward_sq, moves);
             }
         }

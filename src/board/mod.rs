@@ -50,7 +50,6 @@ pub use search::{
 
 // Internal types exposed for advanced usage (but not in prelude)
 pub use state::{NullMoveInfo, UnmakeInfo};
-pub use types::SquareIdx;
 
 // Re-export search internals for users who need fine-grained control
 pub use search::{SearchParams, SearchStats, SearchTables};

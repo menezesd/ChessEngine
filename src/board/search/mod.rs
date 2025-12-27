@@ -118,15 +118,15 @@ impl HistoryTable {
 
     #[must_use]
     pub fn score(&self, mv: &Move) -> i32 {
-        let from = mv.from().index().as_usize();
-        let to = mv.to().index().as_usize();
+        let from = mv.from().index();
+        let to = mv.to().index();
         let idx = from * 64 + to;
         self.entries.get(idx).copied().unwrap_or(0)
     }
 
     pub fn update(&mut self, mv: &Move, depth: u32) {
-        let from = mv.from().index().as_usize();
-        let to = mv.to().index().as_usize();
+        let from = mv.from().index();
+        let to = mv.to().index();
         let idx = from * 64 + to;
         if let Some(entry) = self.entries.get_mut(idx) {
             *entry = entry.saturating_add((depth * depth * depth) as i32);

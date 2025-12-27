@@ -115,8 +115,8 @@ impl Move {
     /// Create a move with a specific flag
     #[inline]
     const fn with_flag(from: Square, to: Square, flag: u16) -> Self {
-        let from_idx = (from.0 * 8 + from.1) as u16;
-        let to_idx = (to.0 * 8 + to.1) as u16;
+        let from_idx = from.as_index() as u16;
+        let to_idx = to.as_index() as u16;
         Move(from_idx | (to_idx << 6) | (flag << 12))
     }
 
@@ -125,7 +125,7 @@ impl Move {
     #[must_use]
     pub const fn from(self) -> Square {
         let idx = (self.0 & 0x3F) as usize;
-        Square(idx / 8, idx % 8)
+        Square::from_index(idx)
     }
 
     /// Get the destination square
@@ -133,7 +133,7 @@ impl Move {
     #[must_use]
     pub const fn to(self) -> Square {
         let idx = ((self.0 >> 6) & 0x3F) as usize;
-        Square(idx / 8, idx % 8)
+        Square::from_index(idx)
     }
 
     /// Get the flag bits

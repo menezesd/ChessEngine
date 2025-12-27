@@ -37,9 +37,9 @@
 //!
 //! // Using the builder
 //! let board = BoardBuilder::new()
-//!     .piece(Square(0, 4), Color::White, Piece::King)
-//!     .piece(Square(7, 4), Color::Black, Piece::King)
-//!     .piece(Square(1, 0), Color::White, Piece::Pawn)
+//!     .piece(Square::new(0, 4), Color::White, Piece::King)
+//!     .piece(Square::new(7, 4), Color::Black, Piece::King)
+//!     .piece(Square::new(1, 0), Color::White, Piece::Pawn)
 //!     .side_to_move(Color::White)
 //!     .build();
 //! ```

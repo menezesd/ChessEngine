@@ -33,7 +33,7 @@ fn test_fifty_move_rule_draw() {
 #[test]
 fn test_halfmove_resets_on_pawn_move() {
     let mut board = Board::from_fen("8/8/8/8/8/8/4P3/K1k5 w - - 99 1");
-    let mv = find_move(&mut board, Square(1, 4), Square(3, 4), None);
+    let mv = find_move(&mut board, Square::new(1, 4), Square::new(3, 4), None);
     board.make_move(mv);
     assert_eq!(board.halfmove_clock(), 0);
     assert!(!board.is_draw());
@@ -69,7 +69,7 @@ fn test_unmake_restores_state() {
     let original_halfmove = board.halfmove_clock();
     let original_rep = board.repetition_counts.get(original_hash);
 
-    let mv = find_move(&mut board, Square(1, 4), Square(3, 4), None);
+    let mv = find_move(&mut board, Square::new(1, 4), Square::new(3, 4), None);
     let info = board.make_move(mv);
     board.unmake_move(mv, info);
 
