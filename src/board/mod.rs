@@ -27,7 +27,7 @@ mod movegen;
 pub mod prelude;
 mod pst;
 mod san;
-mod search;
+pub mod search;
 mod see;
 mod state;
 mod types;

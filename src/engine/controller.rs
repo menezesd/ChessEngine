@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use crate::board::{
     search, Board, SearchClock, SearchConfig, SearchInfoCallback, SearchResult, SearchState,
 };
+use crate::board::search::smp::{smp_search, SmpConfig};
 
 /// Search thread stack size (32 MB)
 const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
@@ -111,6 +112,8 @@ pub struct EngineController {
     current_job: Option<SearchJob>,
     /// Optional callback for per-iteration search info
     info_callback: Option<SearchInfoCallback>,
+    /// Number of search threads for SMP (1 = single-threaded)
+    num_threads: usize,
 }
 
 impl EngineController {
@@ -122,7 +125,19 @@ impl EngineController {
             search_state: Arc::new(Mutex::new(SearchState::new(tt_mb))),
             current_job: None,
             info_callback: None,
+            num_threads: 1,
         }
+    }
+
+    /// Set the number of search threads for SMP
+    pub fn set_threads(&mut self, num_threads: usize) {
+        self.num_threads = num_threads.max(1);
+    }
+
+    /// Get current thread count
+    #[must_use]
+    pub fn num_threads(&self) -> usize {
+        self.num_threads
     }
 
     /// Get a reference to the current board
@@ -275,9 +290,6 @@ impl EngineController {
         let clock = Arc::new(SearchClock::new(start, soft_deadline, hard_deadline));
         let pondering = Arc::new(AtomicBool::new(params.ponder));
 
-        // Build unified search config
-        let config = self.build_search_config(&params, node_limit);
-
         // Spawn timer thread for hard deadline
         let timer_handle = if !params.infinite
             && !params.ponder
@@ -290,38 +302,83 @@ impl EngineController {
         };
 
         // Clone for the search thread
-        let mut search_board = self.board.clone();
+        let search_board = self.board.clone();
         let search_state = Arc::clone(&self.search_state);
         let stop_clone = Arc::clone(&stop);
         let pondering_clone = Arc::clone(&pondering);
+        let num_threads = self.num_threads;
+        let info_callback = self.info_callback.clone();
 
-        let handle = thread::Builder::new()
-            .name("search".to_string())
-            .stack_size(SEARCH_STACK_SIZE)
-            .spawn(move || {
-                let mut guard = search_state.lock();
-                let result: SearchResult =
-                    search(&mut search_board, &mut guard, config, &stop_clone);
+        // Build config based on thread count
+        if num_threads > 1 {
+            // Use SMP search with multiple threads
+            let smp_config = SmpConfig {
+                num_threads,
+                max_depth: params.depth.unwrap_or(64),
+                time_limit_ms: if params.infinite || params.ponder { 0 } else { params.soft_time_ms },
+                node_limit,
+                info_callback,
+            };
 
-                // Wait while pondering (unless stopped)
-                while pondering_clone.load(Ordering::Relaxed) && !stop_clone.load(Ordering::Relaxed)
-                {
-                    thread::sleep(Duration::from_millis(10));
-                }
+            let handle = thread::Builder::new()
+                .name("search-main".to_string())
+                .stack_size(SEARCH_STACK_SIZE)
+                .spawn(move || {
+                    let mut guard = search_state.lock();
+                    let result = smp_search(&search_board, &mut guard, smp_config, stop_clone.clone());
 
-                on_complete(result);
-            })
-            .expect("failed to spawn search thread");
+                    // Wait while pondering (unless stopped)
+                    while pondering_clone.load(Ordering::Relaxed) && !stop_clone.load(Ordering::Relaxed)
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
 
-        self.current_job = Some(SearchJob {
-            stop,
-            clock,
-            pondering,
-            planned_soft_time_ms: params.soft_time_ms,
-            planned_hard_time_ms: params.hard_time_ms,
-            handle,
-            timer_handle,
-        });
+                    on_complete(result);
+                })
+                .expect("failed to spawn search thread");
+
+            self.current_job = Some(SearchJob {
+                stop,
+                clock,
+                pondering,
+                planned_soft_time_ms: params.soft_time_ms,
+                planned_hard_time_ms: params.hard_time_ms,
+                handle,
+                timer_handle,
+            });
+        } else {
+            // Single-threaded search
+            let config = self.build_search_config(&params, node_limit);
+            let mut search_board = search_board;
+
+            let handle = thread::Builder::new()
+                .name("search".to_string())
+                .stack_size(SEARCH_STACK_SIZE)
+                .spawn(move || {
+                    let mut guard = search_state.lock();
+                    let result: SearchResult =
+                        search(&mut search_board, &mut guard, config, &stop_clone);
+
+                    // Wait while pondering (unless stopped)
+                    while pondering_clone.load(Ordering::Relaxed) && !stop_clone.load(Ordering::Relaxed)
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+
+                    on_complete(result);
+                })
+                .expect("failed to spawn search thread");
+
+            self.current_job = Some(SearchJob {
+                stop,
+                clock,
+                pondering,
+                planned_soft_time_ms: params.soft_time_ms,
+                planned_hard_time_ms: params.hard_time_ms,
+                handle,
+                timer_handle,
+            });
+        }
     }
 
     /// Execute a closure with mutable access to the search state.

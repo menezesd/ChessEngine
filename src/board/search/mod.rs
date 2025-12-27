@@ -6,11 +6,13 @@
 //! - Quiescence search with stand-pat
 //! - Move ordering (TT move, killers, MVV-LVA, history)
 //! - Transposition table for move ordering and cutoffs
+//! - Lazy SMP parallel search support
 
 mod constants;
 mod move_order;
 mod params;
 mod simple;
+pub mod smp;
 
 use parking_lot::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -179,9 +181,13 @@ impl CounterMoveTable {
 
 /// Tables used during search (TT, killers, history, counter moves)
 pub struct SearchTables {
-    pub tt: TranspositionTable,
+    /// Shared transposition table (thread-safe, can be shared across workers)
+    pub tt: Arc<TranspositionTable>,
+    /// Per-thread killer move table
     pub killer_moves: KillerTable,
+    /// Per-thread history heuristic table
     pub history: HistoryTable,
+    /// Per-thread counter move table
     pub counter_moves: CounterMoveTable,
 }
 
@@ -248,7 +254,7 @@ impl SearchState {
                 tt_hits: 0,
             },
             tables: SearchTables {
-                tt: TranspositionTable::new(tt_mb),
+                tt: Arc::new(TranspositionTable::new(tt_mb)),
                 killer_moves: KillerTable::new(),
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
@@ -259,6 +265,38 @@ impl SearchState {
             params: SearchParams::default(),
             trace: false,
         }
+    }
+
+    /// Create a new SearchState with a shared transposition table.
+    /// Used for SMP workers that share a TT but have separate local tables.
+    #[must_use]
+    pub fn with_shared_tt(tt: Arc<TranspositionTable>, generation: u16) -> Self {
+        SearchState {
+            stats: SearchStats {
+                nodes: 0,
+                seldepth: 0,
+                total_nodes: 0,
+                max_nodes: 0,
+                tt_hits: 0,
+            },
+            tables: SearchTables {
+                tt,
+                killer_moves: KillerTable::new(),
+                history: HistoryTable::new(),
+                counter_moves: CounterMoveTable::new(),
+            },
+            generation,
+            last_move: super::EMPTY_MOVE,
+            hard_stop_at: None,
+            params: SearchParams::default(),
+            trace: false,
+        }
+    }
+
+    /// Get a clone of the shared TT Arc for use by SMP workers
+    #[must_use]
+    pub fn shared_tt(&self) -> Arc<TranspositionTable> {
+        Arc::clone(&self.tables.tt)
     }
 
     pub fn new_search(&mut self) {
@@ -303,7 +341,7 @@ impl SearchState {
     }
 
     pub fn reset_tables(&mut self, tt_mb: usize) {
-        self.tables.tt = TranspositionTable::new(tt_mb);
+        self.tables.tt = Arc::new(TranspositionTable::new(tt_mb));
         self.stats.reset_search();
     }
 

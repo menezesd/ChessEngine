@@ -2,10 +2,12 @@ use crate::board::{SearchParams, SearchState, DEFAULT_TT_MB};
 
 pub enum UciOptionAction {
     ReinitHash(usize),
+    SetThreads(usize),
 }
 
 pub struct UciOptions {
     pub hash_mb: usize,
+    pub threads: usize,
     pub default_max_nodes: u64,
     pub move_overhead_ms: u64,
     pub soft_time_percent: u64,
@@ -19,6 +21,7 @@ impl UciOptions {
     pub fn new(hash_mb: usize) -> Self {
         UciOptions {
             hash_mb,
+            threads: 1,
             default_max_nodes: 0,
             move_overhead_ms: 50,
             soft_time_percent: 70,
@@ -34,6 +37,10 @@ impl UciOptions {
         println!(
             "option name Hash type spin default {} min 1 max 65536",
             self.hash_mb
+        );
+        println!(
+            "option name Threads type spin default {} min 1 max 256",
+            self.threads
         );
         println!(
             "option name Move Overhead type spin default {} min 0 max 1000",
@@ -78,6 +85,16 @@ impl UciOptions {
                 if mb != self.hash_mb {
                     self.hash_mb = mb;
                     return Some(UciOptionAction::ReinitHash(mb));
+                }
+            }
+            "threads" => {
+                let threads = value
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 256);
+                if threads != self.threads {
+                    self.threads = threads;
+                    return Some(UciOptionAction::SetThreads(threads));
                 }
             }
             "move overhead" => {

@@ -198,15 +198,19 @@ impl UciSession {
         self.engine.stop_search();
         let parts_ref = parts_as_strs(parts);
         if let Some((name, value)) = parse_setoption(&parts_ref) {
-            self.engine.with_search_state(|state| {
-                if let Some(action) = self.options.apply_setoption(&name, value.as_deref(), state) {
-                    match action {
-                        UciOptionAction::ReinitHash(new_mb) => {
-                            state.reset_tables(new_mb);
-                        }
+            let action = self.engine.with_search_state(|state| {
+                self.options.apply_setoption(&name, value.as_deref(), state)
+            });
+            if let Some(Some(action)) = action {
+                match action {
+                    UciOptionAction::ReinitHash(new_mb) => {
+                        self.engine.resize_hash(new_mb);
+                    }
+                    UciOptionAction::SetThreads(threads) => {
+                        self.engine.set_threads(threads);
                     }
                 }
-            });
+            }
         }
     }
 

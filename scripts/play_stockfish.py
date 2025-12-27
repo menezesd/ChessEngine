@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--pgn-out", type=pathlib.Path, help="Optional PGN output file (append)")
     parser.add_argument("--weplay", choices=["white", "black"], default="white", help="Side for our engine")
     parser.add_argument("--max-plies", type=int, default=200, help="Maximum plies before adjudicating a draw")
+    parser.add_argument("--threads", type=int, default=1, help="Number of threads for our engine")
+    parser.add_argument("--sf-elo", type=int, default=None, help="Limit Stockfish to this ELO (optional)")
     args = parser.parse_args()
 
     game = chess.pgn.Game()
@@ -39,7 +41,14 @@ def main():
     node = game
 
     our = chess.engine.SimpleEngine.popen_uci(args.engine)
+    # Set threads for our engine
+    if args.threads > 1:
+        our.configure({"Threads": args.threads})
+
     sf = chess.engine.SimpleEngine.popen_uci(args.stockfish)
+    # Optionally limit Stockfish strength
+    if args.sf_elo is not None:
+        sf.configure({"UCI_LimitStrength": True, "UCI_Elo": args.sf_elo})
     limit = chess.engine.Limit(time=args.movetime / 1000.0)
 
     def pick_engine(turn_white: bool):
