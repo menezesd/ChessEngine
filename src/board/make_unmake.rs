@@ -1,3 +1,5 @@
+#![allow(clippy::trivially_copy_pass_by_ref)] // &Move is preferred for consistency
+
 use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
 };

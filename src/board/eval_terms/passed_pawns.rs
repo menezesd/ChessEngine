@@ -2,6 +2,8 @@
 //!
 //! Evaluates passed pawns with bonuses based on advancement and control of stop square.
 
+#![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
+
 use crate::board::masks::{
     relative_rank, PASSED_PAWN_BONUS_EG, PASSED_PAWN_BONUS_MG, PASSED_PAWN_MASK,
 };

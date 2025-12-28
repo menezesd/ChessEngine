@@ -1,6 +1,6 @@
 //! Protocol trait for chess engine communication.
 //!
-//! Defines a common interface for different chess protocols (UCI, XBoard).
+//! Defines a common interface for different chess protocols (UCI, `XBoard`).
 
 use crate::board::SearchResult;
 
@@ -15,7 +15,7 @@ pub enum CommandResult {
     Unknown(String),
 }
 
-/// Trait for chess engine protocols (UCI, XBoard, etc.)
+/// Trait for chess engine protocols (UCI, `XBoard`, etc.)
 pub trait Protocol {
     /// Process a single command line and return the result
     fn process_command(&mut self, line: &str) -> CommandResult;

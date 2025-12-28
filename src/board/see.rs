@@ -47,9 +47,8 @@ impl Board {
         };
 
         // Get the attacking piece
-        let attacker = match self.piece_at(from) {
-            Some((_, piece)) => piece,
-            None => return 0,
+        let Some((_, attacker)) = self.piece_at(from) else {
+            return 0;
         };
 
         self.see_impl(from, to, attacker, captured)

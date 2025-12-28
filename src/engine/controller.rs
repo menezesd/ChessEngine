@@ -77,6 +77,7 @@ impl SearchJob {
 }
 
 /// Search parameters for starting a new search
+#[derive(Default)]
 pub struct SearchParams {
     /// Maximum depth to search (None = unlimited)
     pub depth: Option<u32>,
@@ -90,17 +91,6 @@ pub struct SearchParams {
     pub infinite: bool,
 }
 
-impl Default for SearchParams {
-    fn default() -> Self {
-        SearchParams {
-            depth: None,
-            soft_time_ms: 0,
-            hard_time_ms: 0,
-            ponder: false,
-            infinite: false,
-        }
-    }
-}
 
 /// Engine controller managing search and game state
 pub struct EngineController {
@@ -268,6 +258,7 @@ impl EngineController {
     /// Start a search with the given parameters
     ///
     /// The `on_complete` callback is called when the search finishes with the result.
+    #[allow(clippy::needless_pass_by_value)] // Params is small and intentionally consumed
     pub fn start_search<F>(&mut self, params: SearchParams, on_complete: F)
     where
         F: FnOnce(SearchResult) + Send + 'static,

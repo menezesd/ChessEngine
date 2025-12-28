@@ -44,7 +44,7 @@ impl StopFlag {
         self.0.store(false, Ordering::Relaxed);
     }
 
-    /// Get a reference to the underlying AtomicBool.
+    /// Get a reference to the underlying `AtomicBool`.
     /// Useful for compatibility with existing code.
     #[inline]
     #[must_use]

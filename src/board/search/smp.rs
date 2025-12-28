@@ -1,4 +1,4 @@
-//! Lazy SMP (Symmetric MultiProcessing) parallel search.
+//! Lazy SMP (Symmetric `MultiProcessing`) parallel search.
 //!
 //! Implements parallel search where multiple threads search the same position
 //! independently with different depth offsets. All threads share a common
@@ -113,6 +113,7 @@ impl Default for SmpConfig {
 
 impl SmpConfig {
     /// Create config with specified thread count
+    #[must_use]
     pub fn with_threads(num_threads: usize) -> Self {
         SmpConfig {
             num_threads: num_threads.max(1),
@@ -121,24 +122,28 @@ impl SmpConfig {
     }
 
     /// Set max depth
+    #[must_use]
     pub fn depth(mut self, max_depth: u32) -> Self {
         self.max_depth = max_depth;
         self
     }
 
     /// Set time limit
+    #[must_use]
     pub fn time(mut self, time_limit_ms: u64) -> Self {
         self.time_limit_ms = time_limit_ms;
         self
     }
 
     /// Set node limit
+    #[must_use]
     pub fn nodes(mut self, node_limit: u64) -> Self {
         self.node_limit = node_limit;
         self
     }
 
     /// Set info callback
+    #[must_use]
     pub fn with_callback(mut self, callback: SearchInfoCallback) -> Self {
         self.info_callback = Some(callback);
         self
@@ -153,6 +158,8 @@ impl SmpConfig {
 /// Thread 3: searches at depth + 1
 /// etc.
 fn worker_depth_offset(worker_id: usize) -> i32 {
+    // Odd workers search deeper, even workers search at target depth
+    #[allow(clippy::match_same_arms)]
     match worker_id % 4 {
         0 => 0,  // Main worker: target depth
         1 => 1,  // Search deeper
@@ -170,6 +177,7 @@ const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
 /// This spawns multiple worker threads that search the same position
 /// independently. Workers share a transposition table but have separate
 /// move ordering tables (killers, history, counter moves).
+#[allow(clippy::needless_pass_by_value)] // Arc is cloned for thread sharing
 pub fn smp_search(
     board: &Board,
     state: &mut SearchState,
@@ -221,7 +229,7 @@ pub fn smp_search(
         };
 
         let handle = thread::Builder::new()
-            .name(format!("search-{}", worker_id))
+            .name(format!("search-{worker_id}"))
             .stack_size(SEARCH_STACK_SIZE)
             .spawn(move || {
                 run_worker(
@@ -285,6 +293,7 @@ pub fn smp_search(
 }
 
 /// Run a single worker thread
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn run_worker(
     worker_id: usize,
     mut board: Board,

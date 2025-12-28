@@ -50,7 +50,7 @@ impl ColorIndex {
     }
 
     /// Iterate over both colors
-    #[must_use]
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn iter() -> impl Iterator<Item = ColorIndex> {
         [Self::WHITE, Self::BLACK].into_iter()
     }
@@ -134,7 +134,7 @@ impl PieceIndex {
     }
 
     /// Iterate over all piece types
-    #[must_use]
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn iter() -> impl Iterator<Item = PieceIndex> {
         Self::ALL.into_iter()
     }

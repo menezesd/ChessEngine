@@ -1,6 +1,6 @@
 //! Engine controller for managing search and game state.
 //!
-//! This module provides a unified interface for both UCI and XBoard protocols,
+//! This module provides a unified interface for both UCI and `XBoard` protocols,
 //! abstracting away the common logic of search management, pondering, and
 //! time control.
 

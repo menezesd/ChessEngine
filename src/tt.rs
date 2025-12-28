@@ -48,18 +48,22 @@ pub struct TTEntry {
 }
 
 impl TTEntry {
+    #[must_use]
     pub fn depth(&self) -> u32 {
         self.depth as u32
     }
 
+    #[must_use]
     pub fn score(&self) -> i32 {
         self.score as i32
     }
 
+    #[must_use]
     pub fn bound_type(&self) -> BoundType {
         self.bound_type
     }
 
+    #[must_use]
     pub fn best_move(&self) -> Option<Move> {
         self.best_move
     }
@@ -79,7 +83,7 @@ fn pack_entry(
     best_move: Option<Move>,
     generation: u8,
 ) -> u64 {
-    let mv: u16 = best_move.map(|m| m.as_u16()).unwrap_or(0);
+    let mv: u16 = best_move.map_or(0, Move::as_u16);
     let sc: u16 = score as u16;
     let bound_gen: u8 = (bound_type.to_u8() & 0x3) | ((generation & 0x3F) << 2);
 
@@ -115,14 +119,14 @@ fn unpack_entry(data: u64) -> TTEntry {
 
 /// A single TT slot using lockless hashing.
 ///
-/// Uses the XOR technique: stores (key ^ data) and data separately.
-/// On read, we verify by checking if (stored_key ^ data) equals the probe key.
+/// Uses the XOR technique: stores `(key ^ data)` and data separately.
+/// On read, we verify by checking if `(stored_key ^ data)` equals the probe key.
 /// This detects torn reads from concurrent writes.
 #[repr(C)]
 struct TTSlot {
-    /// Stores: hash_key ^ packed_data
+    /// Stores: `hash_key ^ packed_data`
     key_xor: AtomicU64,
-    /// Stores: packed_data
+    /// Stores: `packed_data`
     data: AtomicU64,
 }
 
@@ -234,6 +238,7 @@ impl TranspositionTable {
 
     /// Probe the table for an entry matching the given hash.
     /// Returns None if no valid entry is found.
+    #[must_use]
     pub fn probe(&self, hash: u64) -> Option<TTEntry> {
         let bucket = &self.buckets[self.index(hash)];
         for slot in &bucket.slots {
@@ -273,7 +278,7 @@ impl TranspositionTable {
                 return;
             }
             // Check if this slot has the same position (update it)
-            if let Some(_) = slot.probe(hash) {
+            if slot.probe(hash).is_some() {
                 slot.store(hash, packed);
                 return;
             }

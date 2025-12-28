@@ -84,7 +84,7 @@ impl Square {
         Square(idx as u8)
     }
 
-    /// Alias for as_index, returns the internal index directly
+    /// Alias for `as_index`, returns the internal index directly
     #[inline]
     #[must_use]
     pub(crate) const fn index(self) -> usize {

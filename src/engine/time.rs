@@ -1,7 +1,7 @@
-//! Unified time management for UCI and XBoard protocols.
+//! Unified time management for UCI and `XBoard` protocols.
 //!
 //! This module provides a protocol-agnostic time control abstraction that both
-//! UCI and XBoard handlers can use to compute search time limits.
+//! UCI and `XBoard` handlers can use to compute search time limits.
 
 use std::time::Duration;
 
@@ -16,10 +16,12 @@ const MIN_MOVES_TO_GO: u64 = 10;
 
 /// Time control settings for a search.
 ///
-/// This enum unifies different time control modes used by UCI and XBoard protocols.
+/// This enum unifies different time control modes used by UCI and `XBoard` protocols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TimeControl {
     /// Infinite search - no time limit
+    #[default]
     Infinite,
     /// Fixed depth search - no time limit, depth controlled externally
     Depth,
@@ -62,7 +64,7 @@ impl TimeControl {
     // XBoard-specific constructors (XBoard uses centiseconds)
     // =========================================================================
 
-    /// Create time control from XBoard's "st" command (seconds per move).
+    /// Create time control from `XBoard`'s "st" command (seconds per move).
     #[must_use]
     pub fn from_xboard_st(seconds: u32) -> Self {
         TimeControl::MoveTime {
@@ -70,9 +72,9 @@ impl TimeControl {
         }
     }
 
-    /// Create time control from XBoard's "time" command (centiseconds remaining).
+    /// Create time control from `XBoard`'s "time" command (centiseconds remaining).
     ///
-    /// XBoard sends time in centiseconds. This converts to an incremental time control.
+    /// `XBoard` sends time in centiseconds. This converts to an incremental time control.
     #[must_use]
     pub fn from_xboard_time(
         engine_time_cs: u64,
@@ -126,13 +128,9 @@ impl TimeControl {
     }
 }
 
-impl Default for TimeControl {
-    fn default() -> Self {
-        TimeControl::Infinite
-    }
-}
 
 /// Compute soft and hard time limits for incremental time control.
+#[allow(clippy::cast_precision_loss)]
 fn compute_incremental_limits(
     time_left_ms: u64,
     inc_ms: u64,
@@ -162,7 +160,7 @@ fn compute_incremental_limits(
 
     // Estimate moves to go if not provided
     let moves_to_go = movestogo
-        .unwrap_or_else(|| {
+        .unwrap_or({
             // Assume game is roughly in middle if we have decent time
             // Use more conservative estimate when time is lower
             if safe_ms > 300_000 {
@@ -229,6 +227,7 @@ pub struct SearchRequest {
 
 /// Build a search request from a time control and constraints.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn build_search_request(
     time_control: TimeControl,
     depth: Option<u32>,

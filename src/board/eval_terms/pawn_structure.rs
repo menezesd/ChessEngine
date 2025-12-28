@@ -2,6 +2,8 @@
 //!
 //! Evaluates doubled, isolated, backward pawns and phalanx/defended pawns.
 
+#![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
+
 use crate::board::masks::{fill_forward, relative_rank, ADJACENT_FILES, PAWN_SUPPORT_MASK};
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece};

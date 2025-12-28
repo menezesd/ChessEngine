@@ -2,6 +2,8 @@
 //!
 //! Evaluates rook placement on open files, 7th rank, and trapped rooks.
 
+#![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
+
 use crate::board::masks::{FILES, RANK_7TH};
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Piece};

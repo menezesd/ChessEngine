@@ -1,7 +1,10 @@
 //! Attack tables for move generation.
 //!
 //! Uses Hyperbola Quintessence for sliding piece attacks (bishop, rook, queen).
-//! This is a fast, branch-free algorithm that uses the o^(o-2r) trick.
+//! This is a fast, branch-free algorithm that uses the `o^(o-2r)` trick.
+
+#![allow(clippy::needless_range_loop)] // Index loops are clearer for board coordinates
+#![allow(clippy::inline_always)] // Performance-critical hot path functions
 
 mod tables;
 
@@ -76,7 +79,7 @@ static FILE_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
     masks
 });
 
-/// Rank attack lookup table: [8 * occupancy_6bit + file] -> attacks on that rank
+/// Rank attack lookup table: `[8 * occupancy_6bit + file]` -> attacks on that rank
 /// Only stores attacks for file positions, shifted to rank 0
 static RANK_ATTACKS: LazyLock<[u64; 512]> = LazyLock::new(|| {
     let mut attacks = [0u64; 512];
@@ -87,7 +90,7 @@ static RANK_ATTACKS: LazyLock<[u64; 512]> = LazyLock::new(|| {
             for f in (file + 1)..8 {
                 attack |= 1u64 << f;
                 // Check if blocked (occupancy is bits 1-6, representing files b-g)
-                if f >= 1 && f <= 6 && (occ_6bit & (1 << (f - 1))) != 0 {
+                if (1..=6).contains(&f) && (occ_6bit & (1 << (f - 1))) != 0 {
                     break;
                 }
             }
@@ -95,7 +98,7 @@ static RANK_ATTACKS: LazyLock<[u64; 512]> = LazyLock::new(|| {
             for f in (0..file).rev() {
                 attack |= 1u64 << f;
                 // Check if blocked
-                if f >= 1 && f <= 6 && (occ_6bit & (1 << (f - 1))) != 0 {
+                if (1..=6).contains(&f) && (occ_6bit & (1 << (f - 1))) != 0 {
                     break;
                 }
             }

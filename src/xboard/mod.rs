@@ -409,6 +409,7 @@ impl XBoardHandler {
     }
 
     /// Think and return the search result with best move and ponder move.
+    #[allow(clippy::unnecessary_wraps)]
     fn think(&mut self) -> Option<SearchResult> {
         // Stop any ongoing ponder
         self.stop_ponder();

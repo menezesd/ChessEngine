@@ -2,6 +2,8 @@
 //!
 //! Evaluates king safety using attack units and pawn shield.
 
+#![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
+
 use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS};
 use crate::board::masks::{FILES, KING_ATTACK_TABLE, KING_ZONE_EXTENDED, PAWN_SHIELD_MASK};
 use crate::board::state::Board;

@@ -285,7 +285,7 @@ fn print_uci_info(info: &SearchIterationInfo) {
 }
 
 fn default_info_callback() -> Arc<dyn Fn(&SearchIterationInfo) + Send + Sync> {
-    Arc::new(|info| print_uci_info(info))
+    Arc::new(print_uci_info)
 }
 
 /// Protocol to use for communication

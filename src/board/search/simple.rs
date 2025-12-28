@@ -52,6 +52,7 @@ pub struct SimpleSearchContext<'a> {
 }
 
 #[derive(Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 struct NodeContext {
     ply: usize,
     is_pv: bool,
@@ -71,15 +72,16 @@ struct MovePruning {
 
 impl SimpleSearchContext<'_> {
     /// Precomputed LMR table
+    #[allow(clippy::cast_precision_loss)]
     fn lmr_table() -> &'static [[u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH] {
         use std::sync::OnceLock;
         static TABLE: OnceLock<[[u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH]> = OnceLock::new();
         TABLE.get_or_init(|| {
             let mut t = [[0u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH];
-            for depth in 1..LMR_TABLE_MAX_DEPTH {
-                for idx in 1..LMR_TABLE_MAX_IDX {
+            for (depth, row) in t.iter_mut().enumerate().skip(1) {
+                for (idx, cell) in row.iter_mut().enumerate().skip(1) {
                     let val = (0.53 + (depth as f64).ln() * (idx as f64).ln() / 2.44).floor();
-                    t[depth][idx] = val.max(0.0) as u32;
+                    *cell = val.max(0.0) as u32;
                 }
             }
             t
@@ -92,17 +94,15 @@ impl SimpleSearchContext<'_> {
         let mut pv = Vec::with_capacity(max_len);
         // Use fixed array instead of HashSet - max_len is bounded by MAX_PLY
         let mut seen_hashes = [0u64; MAX_PLY];
-        let mut seen_count = 0usize;
         let mut unmake_infos = Vec::with_capacity(max_len);
 
-        for _ in 0..max_len {
+        for (seen_count, _) in (0..max_len).enumerate() {
             // Avoid infinite loops from TT collisions - linear scan is faster for small N
             let hash = self.board.hash;
             if seen_hashes[..seen_count].contains(&hash) {
                 break;
             }
             seen_hashes[seen_count] = hash;
-            seen_count += 1;
 
             // Get best move from TT
             let tt_move = if let Some(entry) = self.state.tables.tt.probe(self.board.hash) {
@@ -143,6 +143,7 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Search the ordered move list and return the best score.
+    #[allow(clippy::too_many_lines)]
     fn search_moves(
         &mut self,
         node: &NodeContext,
@@ -208,7 +209,7 @@ impl SimpleSearchContext<'_> {
                 reduction: 0,
             };
 
-            pruning.reduction = self.compute_lmr_reduction(
+            pruning.reduction = Self::compute_lmr_reduction(
                 i,
                 move_count,
                 move_score,
@@ -298,7 +299,7 @@ impl SimpleSearchContext<'_> {
         if self.node_limit > 0 && self.nodes >= self.node_limit {
             return true;
         }
-        if self.time_limit_ms > 0 && (self.nodes & 1023) == 0 {
+        if self.time_limit_ms > 0 && self.nodes.trailing_zeros() >= 10 {
             let elapsed = self.start_time.elapsed().as_millis() as u64;
             if elapsed >= self.time_limit_ms {
                 return true;
@@ -346,12 +347,12 @@ impl SimpleSearchContext<'_> {
         prev_move: Move,
     ) -> ScoredMoveList {
         // Get counter move for the previous move (if any)
-        let counter = if prev_move != EMPTY_MOVE {
+        let counter = if prev_move == EMPTY_MOVE {
+            EMPTY_MOVE
+        } else {
             let from = prev_move.from().index();
             let to = prev_move.to().index();
             self.state.tables.counter_moves.get(from, to)
-        } else {
-            EMPTY_MOVE
         };
 
         let mut scored = ScoredMoveList::new();
@@ -428,7 +429,7 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Probe TT and check for cutoff.
-    /// Returns (tt_move, tt_score, tt_bound, Option<cutoff_score>)
+    /// Returns (`tt_move`, `tt_score`, `tt_bound`, `Option<cutoff_score>`)
     fn probe_tt_for_cutoff(
         &self,
         depth: u32,
@@ -478,8 +479,8 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Compute LMR reduction for a move.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn compute_lmr_reduction(
-        &self,
         move_idx: usize,
         move_count: usize,
         move_score: i32,

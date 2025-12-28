@@ -66,7 +66,14 @@ pub struct KillerTable {
     slots: [[Move; 2]; MAX_PLY],
 }
 
+impl Default for KillerTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KillerTable {
+    #[must_use]
     pub fn new() -> Self {
         KillerTable {
             slots: [[super::EMPTY_MOVE; 2]; MAX_PLY],
@@ -77,16 +84,14 @@ impl KillerTable {
     pub fn primary(&self, ply: usize) -> Move {
         self.slots
             .get(ply)
-            .map(|row| row[0])
-            .unwrap_or(super::EMPTY_MOVE)
+            .map_or(super::EMPTY_MOVE, |row| row[0])
     }
 
     #[must_use]
     pub fn secondary(&self, ply: usize) -> Move {
         self.slots
             .get(ply)
-            .map(|row| row[1])
-            .unwrap_or(super::EMPTY_MOVE)
+            .map_or(super::EMPTY_MOVE, |row| row[1])
     }
 
     pub fn update(&mut self, ply: usize, mv: Move) {
@@ -100,7 +105,7 @@ impl KillerTable {
     }
 
     pub fn reset(&mut self) {
-        for killers in self.slots.iter_mut() {
+        for killers in &mut self.slots {
             killers[0] = super::EMPTY_MOVE;
             killers[1] = super::EMPTY_MOVE;
         }
@@ -111,7 +116,14 @@ pub struct HistoryTable {
     entries: [i32; 4096],
 }
 
+impl Default for HistoryTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HistoryTable {
+    #[must_use]
     pub fn new() -> Self {
         HistoryTable { entries: [0; 4096] }
     }
@@ -134,7 +146,7 @@ impl HistoryTable {
     }
 
     pub fn decay(&mut self) {
-        for entry in self.entries.iter_mut() {
+        for entry in &mut self.entries {
             *entry >>= 2;
         }
     }
@@ -148,7 +160,14 @@ pub struct CounterMoveTable {
     entries: [[Move; 64]; 64],
 }
 
+impl Default for CounterMoveTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CounterMoveTable {
+    #[must_use]
     pub fn new() -> Self {
         CounterMoveTable {
             entries: [[super::EMPTY_MOVE; 64]; 64],
@@ -171,8 +190,8 @@ impl CounterMoveTable {
     }
 
     pub fn reset(&mut self) {
-        for counters in self.entries.iter_mut() {
-            for mv in counters.iter_mut() {
+        for counters in &mut self.entries {
+            for mv in counters {
                 *mv = super::EMPTY_MOVE;
             }
         }
@@ -273,7 +292,7 @@ impl SearchState {
         }
     }
 
-    /// Create a new SearchState with a shared transposition table.
+    /// Create a new `SearchState` with a shared transposition table.
     /// Used for SMP workers that share a TT but have separate local tables.
     #[must_use]
     pub fn with_shared_tt(tt: Arc<TranspositionTable>, generation: u16) -> Self {
@@ -465,7 +484,7 @@ impl SearchConfig {
         }
     }
 
-    /// Create a config from SearchLimits
+    /// Create a config from `SearchLimits`
     #[must_use]
     pub fn from_limits(limits: &SearchLimits) -> Self {
         let (_, soft_deadline, _) = limits.clock.snapshot();
@@ -547,6 +566,7 @@ fn extract_ponder_move(board: &mut Board, state: &SearchState, best_move: Move) 
 /// let config = SearchConfig::depth(10).with_ponder(true);
 /// let result = search(board, state, config, &stop);
 /// ```
+#[allow(clippy::needless_pass_by_value)] // Config is intentionally consumed
 pub fn search(
     board: &mut Board,
     state: &mut SearchState,
