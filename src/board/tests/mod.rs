@@ -6,9 +6,13 @@
 //! - `make_unmake.rs` - Make/unmake move correctness
 //! - `edge_cases.rs` - Special positions and edge cases
 //! - `proptest.rs` - Property-based tests
+//! - `search_tables.rs` - Killer moves, history, counter moves, MVV-LVA
+//! - `eval.rs` - Evaluation term tests
 
 mod draw;
 mod edge_cases;
+mod eval;
 mod make_unmake;
 mod perft;
 mod proptest;
+mod search_tables;

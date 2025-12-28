@@ -332,6 +332,10 @@ impl TranspositionTable {
 mod tests {
     use super::*;
 
+    // ========================================================================
+    // Pack/Unpack Tests
+    // ========================================================================
+
     #[test]
     fn test_pack_unpack_roundtrip() {
         let test_cases = [
@@ -351,6 +355,29 @@ mod tests {
             assert_eq!(unpacked.generation, gen);
         }
     }
+
+    #[test]
+    fn test_pack_unpack_extreme_values() {
+        // Test extreme score values
+        let packed = pack_entry(100, i16::MAX, BoundType::Exact, None, 30);
+        let unpacked = unpack_entry(packed);
+        assert_eq!(unpacked.score, i16::MAX);
+
+        let packed = pack_entry(100, i16::MIN, BoundType::Exact, None, 30);
+        let unpacked = unpack_entry(packed);
+        assert_eq!(unpacked.score, i16::MIN);
+    }
+
+    #[test]
+    fn test_bound_type_conversion() {
+        assert_eq!(BoundType::from_u8(BoundType::Exact.to_u8()), BoundType::Exact);
+        assert_eq!(BoundType::from_u8(BoundType::LowerBound.to_u8()), BoundType::LowerBound);
+        assert_eq!(BoundType::from_u8(BoundType::UpperBound.to_u8()), BoundType::UpperBound);
+    }
+
+    // ========================================================================
+    // Store and Probe Tests
+    // ========================================================================
 
     #[test]
     fn test_store_and_probe() {
@@ -374,5 +401,214 @@ mod tests {
         tt.store(hash1, 10, 500, BoundType::Exact, None, 1);
 
         assert!(tt.probe(hash2).is_none());
+    }
+
+    #[test]
+    fn test_store_with_move() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0xABCDEF0123456789;
+        let mv = Move::from_u16(0x1234);
+
+        tt.store(hash, 5, 100, BoundType::LowerBound, Some(mv), 1);
+
+        let entry = tt.probe(hash).expect("should find entry");
+        assert_eq!(entry.best_move.map(|m| m.as_u16()), Some(0x1234));
+    }
+
+    #[test]
+    fn test_store_overwrites_same_hash() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x123456789ABCDEF0;
+
+        tt.store(hash, 5, 100, BoundType::Exact, None, 1);
+        tt.store(hash, 10, 200, BoundType::LowerBound, None, 1);
+
+        let entry = tt.probe(hash).expect("should find entry");
+        assert_eq!(entry.depth, 10);
+        assert_eq!(entry.score, 200);
+    }
+
+    #[test]
+    fn test_multiple_entries_different_hashes() {
+        let tt = TranspositionTable::new(1);
+
+        let hash1 = 0x1111111111111111;
+        let hash2 = 0x2222222222222222;
+        let hash3 = 0x3333333333333333;
+
+        tt.store(hash1, 5, 100, BoundType::Exact, None, 1);
+        tt.store(hash2, 10, 200, BoundType::LowerBound, None, 1);
+        tt.store(hash3, 15, 300, BoundType::UpperBound, None, 1);
+
+        let entry1 = tt.probe(hash1).expect("should find entry1");
+        assert_eq!(entry1.score, 100);
+
+        let entry2 = tt.probe(hash2).expect("should find entry2");
+        assert_eq!(entry2.score, 200);
+
+        let entry3 = tt.probe(hash3).expect("should find entry3");
+        assert_eq!(entry3.score, 300);
+    }
+
+    // ========================================================================
+    // Replacement Strategy Tests
+    // ========================================================================
+
+    #[test]
+    fn test_deeper_entry_preferred() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x123456789ABCDEF0;
+
+        // Store shallow entry
+        tt.store(hash, 3, 100, BoundType::Exact, None, 1);
+        // Store deeper entry
+        tt.store(hash, 10, 500, BoundType::Exact, None, 1);
+
+        let entry = tt.probe(hash).expect("should find entry");
+        assert_eq!(entry.depth, 10);
+    }
+
+    #[test]
+    fn test_newer_generation_preferred() {
+        let tt = TranspositionTable::new(1);
+
+        // Fill a bucket with old generation entries
+        for i in 0..4 {
+            let hash = 0x1000000000000000u64 + i;
+            tt.store(hash, 5, 100, BoundType::Exact, None, 0);
+        }
+
+        // Store with newer generation - should replace oldest
+        let new_hash = 0x1000000000000004u64;
+        tt.store(new_hash, 5, 200, BoundType::Exact, None, 10);
+
+        let entry = tt.probe(new_hash).expect("should find new entry");
+        assert_eq!(entry.score, 200);
+    }
+
+    // ========================================================================
+    // Clear and Hashfull Tests
+    // ========================================================================
+
+    #[test]
+    fn test_clear() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x123456789ABCDEF0;
+
+        tt.store(hash, 10, 500, BoundType::Exact, None, 1);
+        assert!(tt.probe(hash).is_some());
+
+        tt.clear();
+        assert!(tt.probe(hash).is_none());
+    }
+
+    #[test]
+    fn test_hashfull_empty() {
+        let tt = TranspositionTable::new(1);
+        assert_eq!(tt.hashfull_per_mille(), 0);
+    }
+
+    #[test]
+    fn test_hashfull_increases() {
+        let tt = TranspositionTable::new(1);
+
+        // Store some entries
+        for i in 0..100 {
+            tt.store(i as u64 * 0x123456789, 5, 100, BoundType::Exact, None, 1);
+        }
+
+        let hashfull = tt.hashfull_per_mille();
+        assert!(hashfull > 0, "hashfull should be > 0 after storing entries");
+    }
+
+    // ========================================================================
+    // Score Clamping Tests
+    // ========================================================================
+
+    #[test]
+    fn test_score_clamping() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x123456789ABCDEF0;
+
+        // Store with score outside i16 range
+        tt.store(hash, 10, 100000, BoundType::Exact, None, 1);
+
+        let entry = tt.probe(hash).expect("should find entry");
+        assert_eq!(entry.score, i16::MAX);
+    }
+
+    #[test]
+    fn test_depth_clamping() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x123456789ABCDEF0;
+
+        // Store with very high depth
+        tt.store(hash, 1000, 500, BoundType::Exact, None, 1);
+
+        let entry = tt.probe(hash).expect("should find entry");
+        assert_eq!(entry.depth, 255); // Clamped to u8::MAX
+    }
+
+    // ========================================================================
+    // TTEntry Accessor Tests
+    // ========================================================================
+
+    #[test]
+    fn test_entry_accessors() {
+        let entry = TTEntry {
+            depth: 10,
+            score: 500,
+            bound_type: BoundType::Exact,
+            best_move: Some(Move::from_u16(0x1234)),
+            generation: 5,
+        };
+
+        assert_eq!(entry.depth(), 10);
+        assert_eq!(entry.score(), 500);
+        assert_eq!(entry.bound_type(), BoundType::Exact);
+        assert!(entry.best_move().is_some());
+    }
+
+    // ========================================================================
+    // Edge Case Tests
+    // ========================================================================
+
+    #[test]
+    fn test_zero_hash() {
+        let tt = TranspositionTable::new(1);
+
+        // Hash of 0 should still work
+        tt.store(0, 10, 500, BoundType::Exact, None, 1);
+
+        // Note: probing 0 may fail if data is 0 (empty check)
+        // This is expected behavior
+    }
+
+    #[test]
+    fn test_all_ones_hash() {
+        let tt = TranspositionTable::new(1);
+        let hash = u64::MAX;
+
+        tt.store(hash, 10, 500, BoundType::Exact, None, 1);
+
+        let entry = tt.probe(hash).expect("should find entry");
+        assert_eq!(entry.score, 500);
+    }
+
+    #[test]
+    fn test_generation_wraps() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x123456789ABCDEF0;
+
+        // Generation uses 6 bits (0-63)
+        tt.store(hash, 10, 500, BoundType::Exact, None, 63);
+        let entry = tt.probe(hash).expect("should find entry");
+        assert_eq!(entry.generation, 63);
+
+        // Higher generation gets masked
+        tt.store(hash, 10, 600, BoundType::Exact, None, 100);
+        let entry = tt.probe(hash).expect("should find entry");
+        // 100 & 0x3F = 36
+        assert_eq!(entry.generation, 36);
     }
 }
