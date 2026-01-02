@@ -227,7 +227,9 @@ impl SimpleSearchContext<'_> {
                 continue;
             }
 
-            let new_depth = if move_count == 1 { depth } else { depth - 1 };
+            // Check extension: search one ply deeper when giving check
+            let extension = if gives_check { 1 } else { 0 };
+            let new_depth = if move_count == 1 { depth + extension } else { depth - 1 + extension };
 
             let mut score: i32;
 
@@ -620,8 +622,14 @@ impl SimpleSearchContext<'_> {
             }
         }
 
-        // Internal Iterative Reduction disabled for now
+        // Internal Iterative Reduction (IIR)
+        // If we have no TT move at high depth, reduce depth to find a move faster
+        let search_depth = if tt_move == EMPTY_MOVE && depth >= 4 && !excluded_move_active {
+            depth - 1
+        } else {
+            depth
+        };
 
-        self.search_moves(&node, depth, alpha, beta, &moves)
+        self.search_moves(&node, search_depth, alpha, beta, &moves)
     }
 }
