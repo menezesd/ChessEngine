@@ -198,6 +198,71 @@ impl CounterMoveTable {
     }
 }
 
+/// Continuation history table - tracks what moves work well after previous moves.
+/// Indexed by [prev_piece][prev_to][curr_from][curr_to] simplified to [prev_piece * 64 + prev_to][curr_from * 64 + curr_to]
+/// We use 6 piece types * 64 squares = 384 outer slots, each with 4096 inner entries.
+pub struct ContinuationHistory {
+    /// [piece * 64 + to] -> [from * 64 + to] -> score
+    entries: Box<[[i16; 4096]; 384]>,
+}
+
+impl Default for ContinuationHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContinuationHistory {
+    #[must_use]
+    pub fn new() -> Self {
+        ContinuationHistory {
+            entries: Box::new([[0i16; 4096]; 384]),
+        }
+    }
+
+    /// Get continuation history score for a move following a previous move
+    #[must_use]
+    pub fn score(&self, prev_piece: Piece, prev_to: usize, mv: &Move) -> i32 {
+        let outer_idx = prev_piece as usize * 64 + prev_to;
+        let inner_idx = mv.from().index() * 64 + mv.to().index();
+        if outer_idx < 384 {
+            i32::from(self.entries[outer_idx][inner_idx])
+        } else {
+            0
+        }
+    }
+
+    /// Update continuation history on beta cutoff
+    pub fn update(&mut self, prev_piece: Piece, prev_to: usize, mv: &Move, depth: u32) {
+        let outer_idx = prev_piece as usize * 64 + prev_to;
+        let inner_idx = mv.from().index() * 64 + mv.to().index();
+        if outer_idx < 384 {
+            let bonus = (depth * depth) as i16;
+            let entry = &mut self.entries[outer_idx][inner_idx];
+            // Saturating add with clamping to prevent overflow
+            *entry = entry.saturating_add(bonus).min(16000);
+        }
+    }
+
+    /// Decay all entries
+    pub fn decay(&mut self) {
+        for outer in self.entries.iter_mut() {
+            for entry in outer.iter_mut() {
+                *entry >>= 2;
+            }
+        }
+    }
+
+    /// Reset all entries
+    pub fn reset(&mut self) {
+        for outer in self.entries.iter_mut() {
+            for entry in outer.iter_mut() {
+                *entry = 0;
+            }
+        }
+    }
+}
+
 /// Tables used during search (TT, killers, history, counter moves)
 pub struct SearchTables {
     /// Shared transposition table (thread-safe, can be shared across workers)
@@ -208,6 +273,8 @@ pub struct SearchTables {
     pub history: HistoryTable,
     /// Per-thread counter move table
     pub counter_moves: CounterMoveTable,
+    /// Per-thread continuation history table
+    pub continuation_history: ContinuationHistory,
 }
 
 impl SearchTables {
@@ -283,6 +350,7 @@ impl SearchState {
                 killer_moves: KillerTable::new(),
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
+                continuation_history: ContinuationHistory::new(),
             },
             generation: 0,
             last_move: super::EMPTY_MOVE,
@@ -309,6 +377,7 @@ impl SearchState {
                 killer_moves: KillerTable::new(),
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
+                continuation_history: ContinuationHistory::new(),
             },
             generation,
             last_move: super::EMPTY_MOVE,
@@ -331,6 +400,7 @@ impl SearchState {
         self.hard_stop_at = None;
         // Decay history and clear tactical helpers to avoid stale biases.
         self.tables.history.decay();
+        self.tables.continuation_history.decay();
         self.tables.killer_moves.reset();
         self.tables.counter_moves.reset();
     }

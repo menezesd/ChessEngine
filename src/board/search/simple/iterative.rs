@@ -6,10 +6,18 @@ use crate::board::{Move, SearchIterationInfo, SearchState, EMPTY_MOVE, MAX_PLY};
 use std::sync::atomic::AtomicBool;
 
 impl SimpleSearchContext<'_> {
-    /// Iterative deepening with aspiration windows
+    /// Iterative deepening with aspiration windows and time management
     pub fn iterative_deepening(&mut self, max_depth: u32) -> Option<Move> {
         let mut best_move: Option<Move> = None;
         let mut score = self.evaluate();
+
+        // Time management state
+        let mut previous_best_move: Option<Move> = None;
+        let mut previous_score = score;
+        let mut stability_count = 0u32;
+
+        // Soft time limit is ~40% of hard limit (can be exceeded for good reasons)
+        let soft_time_ms = self.time_limit_ms * 40 / 100;
 
         // Reset history at start of search
         self.state.tables.reset_history();
@@ -21,6 +29,31 @@ impl SimpleSearchContext<'_> {
                 break;
             }
 
+            // Soft time check: if we've used enough time and have a stable best move, stop
+            if depth > 4 && self.time_limit_ms > 0 {
+                let elapsed = self.start_time.elapsed().as_millis() as u64;
+
+                // Base soft time check
+                let mut adjusted_soft_time = soft_time_ms;
+
+                // Extend time if best move changed recently (unstable)
+                if stability_count < 3 {
+                    adjusted_soft_time = adjusted_soft_time.saturating_mul(130) / 100;
+                } else if stability_count >= 5 {
+                    // Reduce time if very stable
+                    adjusted_soft_time = adjusted_soft_time.saturating_mul(80) / 100;
+                }
+
+                // Extend time if score dropped significantly
+                if score < previous_score - 30 {
+                    adjusted_soft_time = adjusted_soft_time.saturating_mul(140) / 100;
+                }
+
+                if elapsed >= adjusted_soft_time {
+                    break;
+                }
+            }
+
             self.initial_depth = depth;
 
             // Aspiration window
@@ -29,7 +62,7 @@ impl SimpleSearchContext<'_> {
             let mut beta = score + delta;
 
             loop {
-                let new_score = self.alphabeta(depth, alpha, beta, true, 0, false);
+                let new_score = self.alphabeta(depth, alpha, beta, true, 0, crate::board::EMPTY_MOVE);
 
                 if self.should_stop() {
                     break;
@@ -71,6 +104,15 @@ impl SimpleSearchContext<'_> {
                     }
                 }
             }
+
+            // Update stability tracking for time management
+            if best_move == previous_best_move && best_move.is_some() {
+                stability_count = stability_count.saturating_add(1);
+            } else {
+                stability_count = 0;
+            }
+            previous_best_move = best_move;
+            previous_score = score;
 
             // Extract PV from TT
             let pv = self.extract_pv(depth as usize);
@@ -133,6 +175,7 @@ pub fn simple_search(
         initial_depth: 1,
         static_eval: [0; MAX_PLY],
         previous_move: [EMPTY_MOVE; MAX_PLY],
+        previous_piece: [None; MAX_PLY],
         info_callback,
     };
 

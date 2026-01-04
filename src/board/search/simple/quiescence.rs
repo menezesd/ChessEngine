@@ -1,9 +1,13 @@
 use super::super::constants::{MATE_THRESHOLD, MAX_QSEARCH_DEPTH};
+use super::super::move_order::piece_value;
 use super::SimpleSearchContext;
 use crate::board::ScoredMoveList;
 
+/// Delta pruning safety margin (centipawns)
+const DELTA_MARGIN: i32 = 200;
+
 impl SimpleSearchContext<'_> {
-    /// Quiescence search for tactical stability with SEE pruning
+    /// Quiescence search for tactical stability with SEE and delta pruning
     pub fn quiesce(&mut self, mut alpha: i32, beta: i32, qdepth: i32) -> i32 {
         let stand_pat = self.evaluate_simple();
 
@@ -45,6 +49,22 @@ impl SimpleSearchContext<'_> {
 
         for scored in sorted_moves.iter() {
             let m = scored.mv;
+
+            // Skip non-capture moves in quiescence (shouldn't happen but be safe)
+            if !in_check && !m.is_capture() && !m.is_promotion() {
+                continue;
+            }
+
+            // Delta pruning: if even winning the captured piece + margin won't raise alpha, skip
+            if !in_check && m.is_capture() {
+                if let Some((_, captured)) = self.board.piece_at(m.to()) {
+                    let delta = piece_value(captured) + DELTA_MARGIN;
+                    if stand_pat + delta < alpha {
+                        continue;
+                    }
+                }
+            }
+
             // SEE pruning: skip bad captures unless we are in check
             if !in_check {
                 let see_score = self.board.see(m.from(), m.to());

@@ -33,6 +33,8 @@ use super::constants::{
 use super::{SearchInfoCallback, SearchState, MATE_SCORE};
 use crate::board::{Board, Move, MoveList, ScoredMoveList, EMPTY_MOVE, MAX_PLY};
 
+use super::super::Piece;
+
 /// Search context for a single search
 pub struct SimpleSearchContext<'a> {
     pub board: &'a mut Board,
@@ -47,6 +49,8 @@ pub struct SimpleSearchContext<'a> {
     pub static_eval: [i32; MAX_PLY],
     /// Previous move at each ply for counter-move heuristic
     pub previous_move: [Move; MAX_PLY],
+    /// Previous piece type at each ply for continuation history
+    pub previous_piece: [Option<Piece>; MAX_PLY],
     /// Optional callback for reporting iteration info
     pub info_callback: Option<SearchInfoCallback>,
 }
@@ -58,10 +62,12 @@ struct NodeContext {
     is_pv: bool,
     in_check: bool,
     improving: bool,
-    excluded_move_active: bool,
+    excluded_move: Move,
     tt_move: Move,
     tt_score: i32,
     tt_bound: BoundType,
+    /// Extension for the TT move (from singular extension search)
+    singular_extension: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -186,11 +192,19 @@ impl SimpleSearchContext<'_> {
                 break;
             }
 
+            // Skip excluded move (for singular extension search)
+            if m == node.excluded_move {
+                continue;
+            }
+
             // Track if this is a quiet move
             let is_quiet = !m.is_capture() && !m.is_promotion();
             if is_quiet {
                 _quiet_moves_tried += 1;
             }
+
+            // Get the piece that's moving for continuation history (before make_move)
+            let moving_piece = self.board.piece_at(m.from()).map(|(_, p)| p);
 
             // Make move first (we'll check for check after)
             let info = self.board.make_move(m);
@@ -200,6 +214,7 @@ impl SimpleSearchContext<'_> {
 
             if ply < MAX_PLY {
                 self.previous_move[ply] = m;
+                self.previous_piece[ply] = moving_piece;
             }
 
             moves_tried += 1;
@@ -227,8 +242,16 @@ impl SimpleSearchContext<'_> {
                 continue;
             }
 
-            // Check extension: search one ply deeper when giving check
-            let extension = if gives_check { 1 } else { 0 };
+            // Extensions:
+            // 1. Check extension: search one ply deeper when giving check
+            // 2. Singular extension: extend TT move if it's singular
+            let mut extension = 0u32;
+            if gives_check {
+                extension += 1;
+            }
+            if m == node.tt_move && node.singular_extension > 0 {
+                extension += node.singular_extension;
+            }
             let new_depth = if move_count == 1 { depth + extension } else { depth - 1 + extension };
 
             let mut score: i32;
@@ -241,21 +264,21 @@ impl SimpleSearchContext<'_> {
                     -alpha,
                     true,
                     ply + 1,
-                    false,
+                    EMPTY_MOVE,
                 );
 
                 // Re-search at full depth if reduced search found something
                 if pruning.reduction > 0 && score > alpha {
-                    score = -self.alphabeta(new_depth, -alpha - 1, -alpha, true, ply + 1, false);
+                    score = -self.alphabeta(new_depth, -alpha - 1, -alpha, true, ply + 1, EMPTY_MOVE);
                 }
 
                 // Re-search with full window if PVS found improvement
                 if score > alpha && score < beta {
-                    score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, false);
+                    score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, EMPTY_MOVE);
                 }
             } else {
                 // First move: full window search
-                score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, false);
+                score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, EMPTY_MOVE);
             }
 
             self.board.unmake_move(m, info);
@@ -340,7 +363,7 @@ impl SimpleSearchContext<'_> {
         }
     }
 
-    /// Order moves for better pruning (TT move > killers > counter > captures > history)
+    /// Order moves for better pruning (TT move > killers > counter > captures > history + continuation)
     fn order_moves(
         &mut self,
         moves: &MoveList,
@@ -357,6 +380,18 @@ impl SimpleSearchContext<'_> {
             self.state.tables.counter_moves.get(from, to)
         };
 
+        // Get previous piece for continuation history
+        let prev_piece = if ply > 0 && ply < MAX_PLY {
+            self.previous_piece[ply - 1]
+        } else {
+            None
+        };
+        let prev_to = if prev_move != EMPTY_MOVE {
+            prev_move.to().index()
+        } else {
+            0
+        };
+
         let mut scored = ScoredMoveList::new();
         for m in moves {
             let score = if *m == tt_move {
@@ -370,14 +405,21 @@ impl SimpleSearchContext<'_> {
             } else if m.is_capture() {
                 self.state.tables.mvv_lva_score(self.board, m)
             } else {
-                self.state.tables.history_score(m)
+                // Combine history and continuation history for quiet moves
+                let hist = self.state.tables.history_score(m);
+                let cont_hist = if let Some(piece) = prev_piece {
+                    self.state.tables.continuation_history.score(piece, prev_to, m)
+                } else {
+                    0
+                };
+                hist + cont_hist
             };
             scored.push(*m, score);
         }
         scored
     }
 
-    /// Handle beta cutoff: update killers, history, counter moves, and TT
+    /// Handle beta cutoff: update killers, history, counter moves, continuation history, and TT
     fn handle_beta_cutoff(&mut self, m: Move, ply: usize, depth: u32, score: i32, best_move: Move) {
         // Update killers for quiet moves
         if !m.is_capture() && ply < MAX_PLY {
@@ -390,6 +432,14 @@ impl SimpleSearchContext<'_> {
                     let from = prev.from().index();
                     let to = prev.to().index();
                     self.state.tables.counter_moves.set(from, to, m);
+                }
+            }
+
+            // Update continuation history
+            if ply > 0 {
+                if let Some(prev_piece) = self.previous_piece[ply - 1] {
+                    let prev_to = self.previous_move[ply - 1].to().index();
+                    self.state.tables.continuation_history.update(prev_piece, prev_to, &m, depth);
                 }
             }
         }
@@ -522,19 +572,21 @@ impl SimpleSearchContext<'_> {
         mut beta: i32,
         allow_null: bool,
         ply: usize,
-        excluded_move_active: bool,
+        excluded_move: Move,
     ) -> i32 {
         let is_root = ply == 0;
         let is_pv = beta > alpha + 1;
+        let excluded_move_active = excluded_move != EMPTY_MOVE;
         let mut node = NodeContext {
             ply,
             is_pv,
             in_check: false,
             improving: false,
-            excluded_move_active,
+            excluded_move,
             tt_move: EMPTY_MOVE,
             tt_score: 0,
             tt_bound: BoundType::Exact,
+            singular_extension: 0,
         };
 
         // Repetition check
@@ -619,6 +671,34 @@ impl SimpleSearchContext<'_> {
                 self.prune_before_move_loop(depth, alpha, beta, eval, &node, allow_null)
             {
                 return score;
+            }
+        }
+
+        // ========================================================================
+        // SINGULAR EXTENSION
+        // ========================================================================
+        // If we have a reliable TT move, check if it's singular (much better than
+        // alternatives). If so, extend its search by 1 ply.
+        const SINGULAR_MIN_DEPTH: u32 = 8;
+        const SINGULAR_MARGIN: i32 = 3; // margin per depth
+
+        if !excluded_move_active
+            && !is_root
+            && depth >= SINGULAR_MIN_DEPTH
+            && tt_move != EMPTY_MOVE
+            && tt_score.abs() < MATE_THRESHOLD
+            && matches!(tt_bound, BoundType::LowerBound | BoundType::Exact)
+        {
+            let singular_beta = tt_score - SINGULAR_MARGIN * depth as i32;
+            let singular_depth = (depth - 1) / 2;
+
+            // Search with TT move excluded
+            let singular_score =
+                self.alphabeta(singular_depth, singular_beta - 1, singular_beta, false, ply, tt_move);
+
+            if singular_score < singular_beta {
+                // TT move is singular - extend it
+                node.singular_extension = 1;
             }
         }
 
