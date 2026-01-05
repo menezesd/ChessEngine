@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 
 impl SimpleSearchContext<'_> {
     /// Iterative deepening with aspiration windows and time management
+    #[allow(clippy::too_many_lines)]
     pub fn iterative_deepening(&mut self, max_depth: u32) -> Option<Move> {
         let mut best_move: Option<Move> = None;
         let mut score = self.evaluate();

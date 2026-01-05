@@ -1,0 +1,4 @@
+[env]
+# Set 16MB stack size for tests to prevent stack overflow in debug builds
+# The recursive alpha-beta search uses large stack-allocated move lists
+RUST_MIN_STACK = "16777216"

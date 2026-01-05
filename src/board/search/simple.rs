@@ -386,10 +386,10 @@ impl SimpleSearchContext<'_> {
         } else {
             None
         };
-        let prev_to = if prev_move != EMPTY_MOVE {
-            prev_move.to().index()
-        } else {
+        let prev_to = if prev_move == EMPTY_MOVE {
             0
+        } else {
+            prev_move.to().index()
         };
 
         let mut scored = ScoredMoveList::new();
@@ -574,6 +574,10 @@ impl SimpleSearchContext<'_> {
         ply: usize,
         excluded_move: Move,
     ) -> i32 {
+        // Singular extension constants
+        const SINGULAR_MIN_DEPTH: u32 = 8;
+        const SINGULAR_MARGIN: i32 = 3; // margin per depth
+
         let is_root = ply == 0;
         let is_pv = beta > alpha + 1;
         let excluded_move_active = excluded_move != EMPTY_MOVE;
@@ -679,9 +683,6 @@ impl SimpleSearchContext<'_> {
         // ========================================================================
         // If we have a reliable TT move, check if it's singular (much better than
         // alternatives). If so, extend its search by 1 ply.
-        const SINGULAR_MIN_DEPTH: u32 = 8;
-        const SINGULAR_MARGIN: i32 = 3; // margin per depth
-
         if !excluded_move_active
             && !is_root
             && depth >= SINGULAR_MIN_DEPTH

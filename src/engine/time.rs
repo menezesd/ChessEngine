@@ -445,7 +445,7 @@ mod tests {
             movestogo: Some(20), // 20 moves to go
         };
 
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, _hard) = tc.compute_limits(50, 5, 20);
 
         // Should allocate roughly 60000/20 = 3000ms per move
         assert!(soft > 0);
@@ -461,7 +461,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, _hard) = tc.compute_limits(50, 5, 20);
 
         // Should be very small but non-zero
         assert!(soft > 0);
@@ -477,7 +477,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, _hard) = tc.compute_limits(50, 5, 20);
 
         // Should be conservative
         assert!(soft > 0);
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn compute_time_limits_with_movestogo() {
-        let (soft, hard) = compute_time_limits(
+        let (soft, _hard) = compute_time_limits(
             Duration::from_secs(60),
             Duration::from_secs(0),
             None,
@@ -661,7 +661,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, _hard) = tc.compute_limits(50, 5, 20);
 
         // Should use the increment
         assert!(soft > 0);

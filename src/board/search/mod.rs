@@ -199,7 +199,9 @@ impl CounterMoveTable {
 }
 
 /// Continuation history table - tracks what moves work well after previous moves.
-/// Indexed by [prev_piece][prev_to][curr_from][curr_to] simplified to [prev_piece * 64 + prev_to][curr_from * 64 + curr_to]
+///
+/// Indexed by `[prev_piece][prev_to][curr_from][curr_to]` simplified to
+/// `[prev_piece * 64 + prev_to][curr_from * 64 + curr_to]`.
 /// We use 6 piece types * 64 squares = 384 outer slots, each with 4096 inner entries.
 pub struct ContinuationHistory {
     /// [piece * 64 + to] -> [from * 64 + to] -> score
