@@ -259,3 +259,445 @@ pub fn build_search_request(
         (soft_ms, hard_ms),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // ========================================================================
+    // TimeControl enum tests
+    // ========================================================================
+
+    #[test]
+    fn time_control_infinite_is_unlimited() {
+        let tc = TimeControl::Infinite;
+        assert!(tc.is_unlimited());
+    }
+
+    #[test]
+    fn time_control_depth_is_unlimited() {
+        let tc = TimeControl::Depth;
+        assert!(tc.is_unlimited());
+    }
+
+    #[test]
+    fn time_control_movetime_is_not_unlimited() {
+        let tc = TimeControl::MoveTime { time_ms: 5000 };
+        assert!(!tc.is_unlimited());
+    }
+
+    #[test]
+    fn time_control_incremental_is_not_unlimited() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 300000,
+            inc_ms: 3000,
+            movestogo: None,
+        };
+        assert!(!tc.is_unlimited());
+    }
+
+    // ========================================================================
+    // TimeControl constructors
+    // ========================================================================
+
+    #[test]
+    fn time_control_incremental_from_duration() {
+        let tc = TimeControl::incremental(
+            Duration::from_secs(300),
+            Duration::from_secs(3),
+            Some(40),
+        );
+
+        match tc {
+            TimeControl::Incremental {
+                time_left_ms,
+                inc_ms,
+                movestogo,
+            } => {
+                assert_eq!(time_left_ms, 300000);
+                assert_eq!(inc_ms, 3000);
+                assert_eq!(movestogo, Some(40));
+            }
+            _ => panic!("Expected Incremental"),
+        }
+    }
+
+    #[test]
+    fn time_control_move_time_from_duration() {
+        let tc = TimeControl::move_time(Duration::from_secs(5));
+
+        match tc {
+            TimeControl::MoveTime { time_ms } => {
+                assert_eq!(time_ms, 5000);
+            }
+            _ => panic!("Expected MoveTime"),
+        }
+    }
+
+    #[test]
+    fn time_control_move_time_ms() {
+        let tc = TimeControl::move_time_ms(7500);
+
+        match tc {
+            TimeControl::MoveTime { time_ms } => {
+                assert_eq!(time_ms, 7500);
+            }
+            _ => panic!("Expected MoveTime"),
+        }
+    }
+
+    #[test]
+    fn time_control_from_xboard_st() {
+        let tc = TimeControl::from_xboard_st(10);
+
+        match tc {
+            TimeControl::MoveTime { time_ms } => {
+                assert_eq!(time_ms, 10000);
+            }
+            _ => panic!("Expected MoveTime"),
+        }
+    }
+
+    #[test]
+    fn time_control_from_xboard_time() {
+        // XBoard sends time in centiseconds
+        let tc = TimeControl::from_xboard_time(30000, 3, Some(40)); // 300 seconds, 3 sec inc
+
+        match tc {
+            TimeControl::Incremental {
+                time_left_ms,
+                inc_ms,
+                movestogo,
+            } => {
+                assert_eq!(time_left_ms, 300000); // 30000 cs * 10 = 300000 ms
+                assert_eq!(inc_ms, 3000); // 3 sec * 1000 = 3000 ms
+                assert_eq!(movestogo, Some(40));
+            }
+            _ => panic!("Expected Incremental"),
+        }
+    }
+
+    // ========================================================================
+    // compute_limits tests
+    // ========================================================================
+
+    #[test]
+    fn compute_limits_infinite() {
+        let tc = TimeControl::Infinite;
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        assert_eq!(soft, u64::MAX);
+        assert_eq!(hard, u64::MAX);
+    }
+
+    #[test]
+    fn compute_limits_depth() {
+        let tc = TimeControl::Depth;
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        assert_eq!(soft, u64::MAX);
+        assert_eq!(hard, u64::MAX);
+    }
+
+    #[test]
+    fn compute_limits_movetime() {
+        let tc = TimeControl::MoveTime { time_ms: 5000 };
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // For movetime, both should equal the specified time
+        assert_eq!(soft, 5000);
+        assert_eq!(hard, 5000);
+    }
+
+    #[test]
+    fn compute_limits_movetime_zero() {
+        let tc = TimeControl::MoveTime { time_ms: 0 };
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // Should be capped at minimum 1ms
+        assert_eq!(soft, 1);
+        assert_eq!(hard, 1);
+    }
+
+    #[test]
+    fn compute_limits_incremental_normal() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 300000, // 5 minutes
+            inc_ms: 3000,         // 3 second increment
+            movestogo: None,
+        };
+
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // Should produce reasonable values
+        assert!(soft > 0);
+        assert!(hard >= soft);
+        assert!(soft < 300000);
+        assert!(hard < 300000);
+    }
+
+    #[test]
+    fn compute_limits_incremental_with_movestogo() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 60000, // 1 minute
+            inc_ms: 0,
+            movestogo: Some(20), // 20 moves to go
+        };
+
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // Should allocate roughly 60000/20 = 3000ms per move
+        assert!(soft > 0);
+        assert!(soft <= 60000);
+    }
+
+    #[test]
+    fn compute_limits_critical_time() {
+        // Very low time - should trigger critical time handling
+        let tc = TimeControl::Incremental {
+            time_left_ms: 100, // Only 100ms left
+            inc_ms: 0,
+            movestogo: None,
+        };
+
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // Should be very small but non-zero
+        assert!(soft > 0);
+        assert!(soft <= 100);
+    }
+
+    #[test]
+    fn compute_limits_panic_mode() {
+        // Low time - should trigger panic mode
+        let tc = TimeControl::Incremental {
+            time_left_ms: 3000, // Only 3 seconds
+            inc_ms: 0,
+            movestogo: None,
+        };
+
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // Should be conservative
+        assert!(soft > 0);
+        assert!(soft < 3000);
+    }
+
+    #[test]
+    fn compute_limits_long_time_control() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 600000, // 10 minutes
+            inc_ms: 5000,         // 5 second increment
+            movestogo: None,
+        };
+
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // With lots of time, should use more time per move
+        assert!(soft > 5000); // Should use more than just the increment
+        assert!(hard > soft);
+    }
+
+    // ========================================================================
+    // compute_time_limits legacy API tests
+    // ========================================================================
+
+    #[test]
+    fn compute_time_limits_with_movetime() {
+        let (soft, hard) = compute_time_limits(
+            Duration::from_secs(300),
+            Duration::from_secs(0),
+            Some(Duration::from_secs(5)), // movetime takes priority
+            None,
+            50,
+            5,
+            20,
+        );
+
+        assert_eq!(soft, 5000);
+        assert_eq!(hard, 5000);
+    }
+
+    #[test]
+    fn compute_time_limits_without_movetime() {
+        let (soft, hard) = compute_time_limits(
+            Duration::from_secs(300),
+            Duration::from_secs(3),
+            None,
+            None,
+            50,
+            5,
+            20,
+        );
+
+        assert!(soft > 0);
+        assert!(hard >= soft);
+    }
+
+    #[test]
+    fn compute_time_limits_with_movestogo() {
+        let (soft, hard) = compute_time_limits(
+            Duration::from_secs(60),
+            Duration::from_secs(0),
+            None,
+            Some(10), // 10 moves to go
+            50,
+            5,
+            20,
+        );
+
+        // Should allocate roughly 60s / 10 = 6s per move
+        assert!(soft > 0);
+        assert!(soft <= 60000);
+    }
+
+    // ========================================================================
+    // build_search_request tests
+    // ========================================================================
+
+    #[test]
+    fn build_search_request_infinite() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 300000,
+            inc_ms: 3000,
+            movestogo: None,
+        };
+
+        let (req, _) = build_search_request(tc, None, None, false, true, 0, 50, 5, 20);
+
+        assert!(req.infinite);
+        assert_eq!(req.soft_time_ms, 0);
+        assert_eq!(req.hard_time_ms, 0);
+    }
+
+    #[test]
+    fn build_search_request_ponder() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 300000,
+            inc_ms: 3000,
+            movestogo: None,
+        };
+
+        let (req, _) = build_search_request(tc, None, None, true, false, 0, 50, 5, 20);
+
+        assert!(req.ponder);
+        assert_eq!(req.soft_time_ms, 0);
+        assert_eq!(req.hard_time_ms, 0);
+    }
+
+    #[test]
+    fn build_search_request_with_depth() {
+        let tc = TimeControl::Infinite;
+        let (req, _) = build_search_request(tc, Some(10), None, false, false, 0, 50, 5, 20);
+
+        assert_eq!(req.depth, Some(10));
+    }
+
+    #[test]
+    fn build_search_request_with_nodes() {
+        let tc = TimeControl::Infinite;
+        let (req, _) = build_search_request(tc, None, Some(1000000), false, false, 0, 50, 5, 20);
+
+        assert_eq!(req.max_nodes, 1000000);
+    }
+
+    #[test]
+    fn build_search_request_default_nodes() {
+        let tc = TimeControl::Infinite;
+        let (req, _) = build_search_request(tc, None, None, false, false, 500000, 50, 5, 20);
+
+        assert_eq!(req.max_nodes, 500000);
+    }
+
+    #[test]
+    fn build_search_request_normal() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 300000,
+            inc_ms: 3000,
+            movestogo: None,
+        };
+
+        let (req, (soft, hard)) = build_search_request(tc, None, None, false, false, 0, 50, 5, 20);
+
+        assert!(!req.infinite);
+        assert!(!req.ponder);
+        assert!(req.soft_time_ms > 0);
+        assert!(req.hard_time_ms > 0);
+        assert_eq!(req.soft_time_ms, soft);
+        assert_eq!(req.hard_time_ms, hard);
+    }
+
+    // ========================================================================
+    // Edge case tests
+    // ========================================================================
+
+    #[test]
+    fn time_control_default_is_infinite() {
+        let tc = TimeControl::default();
+        assert!(matches!(tc, TimeControl::Infinite));
+    }
+
+    #[test]
+    fn incremental_zero_time_left() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 0,
+            inc_ms: 0,
+            movestogo: None,
+        };
+
+        let (soft, hard) = tc.compute_limits(0, 5, 20);
+
+        // Should handle gracefully
+        assert!(soft >= 1);
+        assert!(hard >= 1);
+    }
+
+    #[test]
+    fn incremental_only_increment() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 100, // Very little base time
+            inc_ms: 10000,     // But large increment
+            movestogo: None,
+        };
+
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // Should use the increment
+        assert!(soft > 0);
+    }
+
+    #[test]
+    fn incremental_movestogo_one() {
+        let tc = TimeControl::Incremental {
+            time_left_ms: 60000,
+            inc_ms: 0,
+            movestogo: Some(1), // Last move before time control
+        };
+
+        let (soft, hard) = tc.compute_limits(50, 5, 20);
+
+        // Should use most of the remaining time
+        assert!(soft > 0);
+        assert!(hard > 0);
+    }
+
+    #[test]
+    fn search_request_fields() {
+        let req = SearchRequest {
+            soft_time_ms: 5000,
+            hard_time_ms: 10000,
+            max_nodes: 1000000,
+            depth: Some(20),
+            ponder: false,
+            infinite: false,
+        };
+
+        assert_eq!(req.soft_time_ms, 5000);
+        assert_eq!(req.hard_time_ms, 10000);
+        assert_eq!(req.max_nodes, 1000000);
+        assert_eq!(req.depth, Some(20));
+        assert!(!req.ponder);
+        assert!(!req.infinite);
+    }
+}

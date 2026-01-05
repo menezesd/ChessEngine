@@ -8,6 +8,7 @@
 //! - `proptest.rs` - Property-based tests
 //! - `search_tables.rs` - Killer moves, history, counter moves, MVV-LVA
 //! - `eval.rs` - Evaluation term tests
+//! - `search.rs` - Search algorithm tests (alpha-beta, quiescence, pruning)
 
 mod draw;
 mod edge_cases;
@@ -15,4 +16,5 @@ mod eval;
 mod make_unmake;
 mod perft;
 mod proptest;
+mod search;
 mod search_tables;
