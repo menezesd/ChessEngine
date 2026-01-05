@@ -44,6 +44,27 @@ impl SimpleSearchContext<'_> {
         None
     }
 
+    /// Reverse futility pruning (RFP) / Static null move pruning.
+    /// If static eval is significantly better than beta, we assume this node
+    /// will fail high and we can prune it.
+    pub(super) fn try_reverse_futility_pruning(
+        &self,
+        depth: u32,
+        beta: i32,
+        eval: i32,
+    ) -> Option<i32> {
+        if depth >= 8 {
+            return None;
+        }
+
+        let margin = self.state.params.rfp_margin * depth as i32;
+        if eval - margin >= beta {
+            return Some(beta);
+        }
+
+        None
+    }
+
     /// Run static/null-move pruning that can exit before generating moves.
     pub(super) fn prune_before_move_loop(
         &mut self,
@@ -56,6 +77,10 @@ impl SimpleSearchContext<'_> {
     ) -> Option<i32> {
         if node.is_pv || node.in_check || node.excluded_move != crate::board::EMPTY_MOVE {
             return None;
+        }
+
+        if let Some(score) = self.try_reverse_futility_pruning(depth, beta, eval) {
+            return Some(score);
         }
 
         if allow_null {
