@@ -27,7 +27,7 @@ use std::time::Instant;
 use crate::tt::BoundType;
 
 use super::constants::{
-    COUNTER_SCORE, KILLER1_SCORE, KILLER2_SCORE, LMR_IDX_BASE, LMR_SCORE_THRESHOLD,
+    COUNTER_SCORE, KILLER1_SCORE, KILLER2_SCORE, KILLER3_SCORE, LMR_IDX_BASE, LMR_SCORE_THRESHOLD,
     LMR_TABLE_MAX_DEPTH, LMR_TABLE_MAX_IDX, MATE_THRESHOLD, TT_MOVE_SCORE,
 };
 use super::{SearchInfoCallback, SearchState, MATE_SCORE};
@@ -185,6 +185,10 @@ impl SimpleSearchContext<'_> {
         let mut moves_tried = 0;
         let mut _quiet_moves_tried = 0;
 
+        // Track quiet moves for negative history on beta cutoff
+        let mut quiets_tried: [Move; 64] = [EMPTY_MOVE; 64];
+        let mut quiets_count = 0usize;
+
         for (i, scored) in scored_moves.iter().enumerate() {
             let m = scored.mv;
             let move_score = scored.score;
@@ -199,8 +203,25 @@ impl SimpleSearchContext<'_> {
 
             // Track if this is a quiet move
             let is_quiet = !m.is_capture() && !m.is_promotion();
+
+            // Late Move Pruning: DISABLED - even threshold 30 causes regression
+            // The engine's tactical strength relies on searching all moves at shallow depths
+            // if !is_pv
+            //     && !in_check
+            //     && is_quiet
+            //     && depth == 1
+            //     && _quiet_moves_tried >= 30
+            // {
+            //     continue;
+            // }
+
             if is_quiet {
                 _quiet_moves_tried += 1;
+                // Track for negative history (only if not the cutoff move)
+                if quiets_count < 64 {
+                    quiets_tried[quiets_count] = m;
+                    quiets_count += 1;
+                }
             }
 
             // Get the piece that's moving for continuation history (before make_move)
@@ -245,6 +266,7 @@ impl SimpleSearchContext<'_> {
             // Extensions:
             // 1. Check extension: search one ply deeper when giving check
             // 2. Singular extension: extend TT move if it's singular
+            // 3. Recapture extension: extend when recapturing on the same square
             let mut extension = 0u32;
             if gives_check {
                 extension += 1;
@@ -252,6 +274,8 @@ impl SimpleSearchContext<'_> {
             if m == node.tt_move && node.singular_extension > 0 {
                 extension += node.singular_extension;
             }
+            // Recapture extension: DISABLED - causes regression on WAC
+            // Passed pawn extension: DISABLED - causes regression on WAC
             let new_depth = if move_count == 1 { depth + extension } else { depth - 1 + extension };
 
             let mut score: i32;
@@ -293,6 +317,14 @@ impl SimpleSearchContext<'_> {
 
                 if score > alpha {
                     if score >= beta {
+                        // Penalize quiet moves that didn't cause the cutoff (negative history)
+                        // Don't penalize the cutoff move itself
+                        for i in 0..quiets_count {
+                            let quiet_mv = quiets_tried[i];
+                            if quiet_mv != m && quiet_mv != EMPTY_MOVE {
+                                self.state.tables.history.penalize(&quiet_mv, depth);
+                            }
+                        }
                         self.handle_beta_cutoff(m, ply, depth, score, best_move);
                         return score;
                     }
@@ -400,6 +432,8 @@ impl SimpleSearchContext<'_> {
                 KILLER1_SCORE
             } else if ply < MAX_PLY && *m == self.state.tables.killer_moves.secondary(ply) {
                 KILLER2_SCORE
+            } else if ply < MAX_PLY && *m == self.state.tables.killer_moves.tertiary(ply) {
+                KILLER3_SCORE
             } else if *m == counter {
                 COUNTER_SCORE
             } else if m.is_capture() {
@@ -441,6 +475,19 @@ impl SimpleSearchContext<'_> {
                     let prev_to = self.previous_move[ply - 1].to().index();
                     self.state.tables.continuation_history.update(prev_piece, prev_to, &m, depth);
                 }
+            }
+        } else if m.is_capture() {
+            // Update capture history for captures
+            // Board is back to original state after unmake_move
+            if let Some((_, attacker)) = self.board.piece_at(m.from()) {
+                let victim = if m.is_en_passant() {
+                    Piece::Pawn
+                } else if let Some((_, piece)) = self.board.piece_at(m.to()) {
+                    piece
+                } else {
+                    Piece::Pawn // Fallback, shouldn't happen
+                };
+                self.state.tables.capture_history.update(attacker, victim, depth);
             }
         }
 
@@ -575,7 +622,7 @@ impl SimpleSearchContext<'_> {
         excluded_move: Move,
     ) -> i32 {
         // Singular extension constants
-        const SINGULAR_MIN_DEPTH: u32 = 8;
+        const SINGULAR_MIN_DEPTH: u32 = 6;
         const SINGULAR_MARGIN: i32 = 3; // margin per depth
 
         let is_root = ply == 0;

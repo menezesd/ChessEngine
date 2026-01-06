@@ -63,7 +63,7 @@ impl SearchStats {
 }
 
 pub struct KillerTable {
-    slots: [[Move; 2]; MAX_PLY],
+    slots: [[Move; 3]; MAX_PLY],
 }
 
 impl Default for KillerTable {
@@ -76,7 +76,7 @@ impl KillerTable {
     #[must_use]
     pub fn new() -> Self {
         KillerTable {
-            slots: [[super::EMPTY_MOVE; 2]; MAX_PLY],
+            slots: [[super::EMPTY_MOVE; 3]; MAX_PLY],
         }
     }
 
@@ -94,11 +94,19 @@ impl KillerTable {
             .map_or(super::EMPTY_MOVE, |row| row[1])
     }
 
+    #[must_use]
+    pub fn tertiary(&self, ply: usize) -> Move {
+        self.slots
+            .get(ply)
+            .map_or(super::EMPTY_MOVE, |row| row[2])
+    }
+
     pub fn update(&mut self, ply: usize, mv: Move) {
         if ply >= MAX_PLY {
             return;
         }
         if self.slots[ply][0] != mv {
+            self.slots[ply][2] = self.slots[ply][1];
             self.slots[ply][1] = self.slots[ply][0];
             self.slots[ply][0] = mv;
         }
@@ -108,6 +116,7 @@ impl KillerTable {
         for killers in &mut self.slots {
             killers[0] = super::EMPTY_MOVE;
             killers[1] = super::EMPTY_MOVE;
+            killers[2] = super::EMPTY_MOVE;
         }
     }
 }
@@ -142,6 +151,17 @@ impl HistoryTable {
         let idx = from * 64 + to;
         if let Some(entry) = self.entries.get_mut(idx) {
             *entry = entry.saturating_add((depth * depth * depth) as i32);
+        }
+    }
+
+    /// Penalize a move that failed to cause a cutoff (negative history)
+    pub fn penalize(&mut self, mv: &Move, depth: u32) {
+        let from = mv.from().index();
+        let to = mv.to().index();
+        let idx = from * 64 + to;
+        if let Some(entry) = self.entries.get_mut(idx) {
+            // Use depth^2 for penalty (less aggressive than depth^3 bonus)
+            *entry = entry.saturating_sub((depth * depth) as i32);
         }
     }
 
@@ -265,6 +285,55 @@ impl ContinuationHistory {
     }
 }
 
+/// Capture history table - tracks which captures historically cause cutoffs.
+/// Indexed by [attacker_piece][victim_piece] for a 6x6 = 36 entry table.
+pub struct CaptureHistory {
+    entries: [[i32; 6]; 6],
+}
+
+impl Default for CaptureHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CaptureHistory {
+    #[must_use]
+    pub fn new() -> Self {
+        CaptureHistory {
+            entries: [[0; 6]; 6],
+        }
+    }
+
+    /// Get capture history score for a capture move
+    #[must_use]
+    pub fn score(&self, attacker: Piece, victim: Piece) -> i32 {
+        self.entries[attacker as usize][victim as usize]
+    }
+
+    /// Update capture history on beta cutoff
+    pub fn update(&mut self, attacker: Piece, victim: Piece, depth: u32) {
+        let bonus = (depth * depth * depth) as i32;
+        let entry = &mut self.entries[attacker as usize][victim as usize];
+        // Saturating add with clamping to prevent overflow
+        *entry = entry.saturating_add(bonus).min(50000);
+    }
+
+    /// Decay all entries
+    pub fn decay(&mut self) {
+        for row in &mut self.entries {
+            for entry in row {
+                *entry >>= 2;
+            }
+        }
+    }
+
+    /// Reset all entries
+    pub fn reset(&mut self) {
+        self.entries = [[0; 6]; 6];
+    }
+}
+
 /// Tables used during search (TT, killers, history, counter moves)
 pub struct SearchTables {
     /// Shared transposition table (thread-safe, can be shared across workers)
@@ -277,35 +346,53 @@ pub struct SearchTables {
     pub counter_moves: CounterMoveTable,
     /// Per-thread continuation history table
     pub continuation_history: ContinuationHistory,
+    /// Per-thread capture history table
+    pub capture_history: CaptureHistory,
 }
 
 impl SearchTables {
-    /// MVV-LVA score for a capture move
-    /// Prioritizes capturing high-value pieces with low-value attackers
+    /// MVV-LVA score for a capture move, enhanced with capture history
+    /// Prioritizes capturing high-value pieces with low-value attackers,
+    /// with capture history as a secondary factor
     #[must_use]
     pub fn mvv_lva_score(&self, board: &Board, mv: &Move) -> i32 {
         if !mv.is_capture() {
             return 0;
         }
 
-        // Get attacker piece value
-        let attacker = match board.piece_at(mv.from()) {
-            Some((_, piece)) => move_order::piece_value(piece),
+        // Get attacker piece
+        let attacker_piece = match board.piece_at(mv.from()) {
+            Some((_, piece)) => piece,
             None => return 0,
         };
+        let attacker = move_order::piece_value(attacker_piece);
 
         // For en passant, captured piece is always a pawn
         if mv.is_en_passant() {
-            return move_order::piece_value(Piece::Pawn) * 10 - attacker;
+            let mvv_lva = move_order::piece_value(Piece::Pawn) * 10 - attacker;
+            let see_score = board.see(mv.from(), mv.to()) / 10;
+            let cap_hist = self.capture_history.score(attacker_piece, Piece::Pawn) / 100;
+            return mvv_lva + see_score + cap_hist;
         }
 
         // Look up what piece is on the target square
-        let captured = match board.piece_at(mv.to()) {
-            Some((_, piece)) => move_order::piece_value(piece),
+        let victim_piece = match board.piece_at(mv.to()) {
+            Some((_, piece)) => piece,
             None => return 0,
         };
+        let captured = move_order::piece_value(victim_piece);
+
         // MVV-LVA: prioritize high-value victims captured by low-value attackers
-        captured * 10 - attacker
+        let mvv_lva = captured * 10 - attacker;
+
+        // Add SEE as a factor for more accurate ordering
+        // SEE is scaled down so it doesn't dominate MVV-LVA
+        let see_score = board.see(mv.from(), mv.to()) / 10;
+
+        // Add capture history as a tie-breaker
+        let cap_hist = self.capture_history.score(attacker_piece, victim_piece) / 100;
+
+        mvv_lva + see_score + cap_hist
     }
 
     /// Get history score for a move
@@ -353,6 +440,7 @@ impl SearchState {
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
                 continuation_history: ContinuationHistory::new(),
+                capture_history: CaptureHistory::new(),
             },
             generation: 0,
             last_move: super::EMPTY_MOVE,
@@ -380,6 +468,7 @@ impl SearchState {
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
                 continuation_history: ContinuationHistory::new(),
+                capture_history: CaptureHistory::new(),
             },
             generation,
             last_move: super::EMPTY_MOVE,
