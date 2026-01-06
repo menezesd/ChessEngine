@@ -16,6 +16,7 @@ impl SimpleSearchContext<'_> {
         let mut previous_best_move: Option<Move> = None;
         let mut previous_score = score;
         let mut stability_count = 0u32;
+        let mut prev_iter_nodes = 0u64;
 
         // Soft time limit is ~40% of hard limit (can be exceeded for good reasons)
         let soft_time_ms = self.time_limit_ms * 40 / 100;
@@ -29,6 +30,8 @@ impl SimpleSearchContext<'_> {
             if self.should_stop() {
                 break;
             }
+
+            let iter_start_nodes = self.nodes;
 
             // Soft time check: if we've used enough time and have a stable best move, stop
             if depth > 4 && self.time_limit_ms > 0 {
@@ -48,6 +51,23 @@ impl SimpleSearchContext<'_> {
                 // Extend time if score dropped significantly
                 if score < previous_score - 30 {
                     adjusted_soft_time = adjusted_soft_time.saturating_mul(140) / 100;
+                }
+
+                // Node-based time check: estimate if we can complete the next depth
+                // Only apply after we have reliable node counts (depth > 5, prev_iter > 5000)
+                if elapsed > 0 && prev_iter_nodes > 5000 && depth > 5 {
+                    let nps = self.nodes * 1000 / elapsed;
+                    if nps > 0 {
+                        // Estimate nodes for this depth (branching factor ~2.5 typically)
+                        let estimated_nodes = prev_iter_nodes.saturating_mul(25) / 10;
+                        let estimated_time = estimated_nodes * 1000 / nps;
+                        let remaining = self.time_limit_ms.saturating_sub(elapsed);
+
+                        // Only abort if we're very confident we can't finish (need 2x remaining time)
+                        if estimated_time > remaining * 2 {
+                            break;
+                        }
+                    }
                 }
 
                 if elapsed >= adjusted_soft_time {
@@ -114,6 +134,9 @@ impl SimpleSearchContext<'_> {
             }
             previous_best_move = best_move;
             previous_score = score;
+
+            // Track nodes for this iteration (for node-based time scaling)
+            prev_iter_nodes = self.nodes.saturating_sub(iter_start_nodes);
 
             // Extract PV from TT
             let pv = self.extract_pv(depth as usize);

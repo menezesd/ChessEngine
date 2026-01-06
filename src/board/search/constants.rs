@@ -26,6 +26,9 @@ pub const KILLER1_SCORE: i32 = 20000;
 /// Second killer move (replaced killer)
 pub const KILLER2_SCORE: i32 = 10000;
 
+/// Third killer move
+pub const KILLER3_SCORE: i32 = 7500;
+
 /// Counter move (quiet that refuted opponent's previous move)
 pub const COUNTER_SCORE: i32 = 5000;
 
