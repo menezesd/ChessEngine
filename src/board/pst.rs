@@ -5,10 +5,12 @@
 
 // Values mirrored from the PeSTO tables for parity.
 /// Material values for middlegame (indexed by `Piece::index()`)
-pub(crate) const MATERIAL_MG: [i32; 6] = [82, 337, 365, 477, 1025, 20000];
+/// Tuned via Texel tuning on CCRL games (v2 with PST features)
+pub(crate) const MATERIAL_MG: [i32; 6] = [50, 282, 319, 400, 1046, 20000];
 
 /// Material values for endgame (indexed by `Piece::index()`)
-pub(crate) const MATERIAL_EG: [i32; 6] = [94, 281, 297, 512, 936, 20000];
+/// Tuned via Texel tuning on CCRL games (v2 with PST features)
+pub(crate) const MATERIAL_EG: [i32; 6] = [83, 258, 257, 450, 925, 20000];
 
 /// Phase contribution per piece type (for tapered eval)
 pub(crate) const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];

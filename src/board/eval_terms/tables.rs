@@ -32,13 +32,13 @@ pub const QUEEN_MOB_EG: [i32; 28] = [
 // PAWN STRUCTURE CONSTANTS
 // ============================================================================
 
-/// Doubled pawn penalty
-pub const DOUBLED_PAWN_MG: i32 = -9;
-pub const DOUBLED_PAWN_EG: i32 = -9;
+/// Doubled pawn penalty (Texel tuned v2)
+pub const DOUBLED_PAWN_MG: i32 = -10;
+pub const DOUBLED_PAWN_EG: i32 = 0;
 
-/// Isolated pawn penalty
-pub const ISOLATED_PAWN_MG: i32 = -10;
-pub const ISOLATED_PAWN_EG: i32 = -18;
+/// Isolated pawn penalty (Texel tuned v2)
+pub const ISOLATED_PAWN_MG: i32 = -7;
+pub const ISOLATED_PAWN_EG: i32 = -9;
 
 /// Extra penalty for isolated pawn on open file
 pub const ISOLATED_OPEN_MG: i32 = -9;
@@ -90,17 +90,17 @@ pub const KING_SEMI_OPEN_FILE_MG: i32 = -15;
 // ROOK ACTIVITY CONSTANTS
 // ============================================================================
 
-/// Rook on open file (no pawns)
-pub const ROOK_OPEN_FILE_MG: i32 = 18;
-pub const ROOK_OPEN_FILE_EG: i32 = 18;
+/// Rook on open file (no pawns) (Texel tuned v2)
+pub const ROOK_OPEN_FILE_MG: i32 = 50;
+pub const ROOK_OPEN_FILE_EG: i32 = 22;
 
-/// Rook on semi-open file (only enemy pawns)
-pub const ROOK_SEMI_OPEN_MG: i32 = 12;
-pub const ROOK_SEMI_OPEN_EG: i32 = 12;
+/// Rook on semi-open file (only enemy pawns) (Texel tuned v2)
+pub const ROOK_SEMI_OPEN_MG: i32 = 14;
+pub const ROOK_SEMI_OPEN_EG: i32 = 24;
 
-/// Rook on 7th rank
-pub const ROOK_7TH_MG: i32 = 12;
-pub const ROOK_7TH_EG: i32 = 30;
+/// Rook on 7th rank (Texel tuned v2)
+pub const ROOK_7TH_MG: i32 = 29;
+pub const ROOK_7TH_EG: i32 = 42;
 
 /// Rook trapped by uncastled king
 pub const TRAPPED_ROOK_MG: i32 = -40;

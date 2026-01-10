@@ -14,11 +14,11 @@
 
 use super::{Board, Color, Piece};
 
-/// Bishop pair bonus in centipawns
-const BISHOP_PAIR_BONUS: i32 = 37;
+/// Bishop pair bonus in centipawns (Texel tuned v2)
+const BISHOP_PAIR_BONUS: i32 = 18;
 
-/// Tempo bonus (side to move advantage)
-const TEMPO_BONUS: i32 = 11;
+/// Tempo bonus (side to move advantage) (Texel tuned v2)
+const TEMPO_BONUS: i32 = 19;
 
 /// Total phase value (sum of all pieces' phase weights at game start)
 const PHASE_TOTAL: i32 = 24;
@@ -26,7 +26,8 @@ const PHASE_TOTAL: i32 = 24;
 /// Bishop vs Knight imbalance bonus per pawn difference from 8.
 /// Bishops are worth more in open positions (fewer pawns).
 /// Formula: bishop_bonus = (8 - total_pawns) * BISHOP_OPEN_BONUS per bishop advantage
-const BISHOP_OPEN_BONUS: i32 = 4;
+/// (Texel tuned v2)
+const BISHOP_OPEN_BONUS: i32 = 12;
 
 /// Phase factors for tapered evaluation.
 ///
