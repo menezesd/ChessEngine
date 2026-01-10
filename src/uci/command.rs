@@ -201,7 +201,9 @@ mod tests {
 
     #[test]
     fn parse_uci_command_position_fen() {
-        let cmd = parse_uci_command("position fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let cmd = parse_uci_command(
+            "position fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        );
         match cmd {
             Some(UciCommand::Position(parts)) => {
                 assert_eq!(parts[0], "position");
@@ -406,7 +408,9 @@ mod tests {
 
     #[test]
     fn parse_go_params_with_increment() {
-        let parts: Vec<&str> = vec!["go", "wtime", "300000", "btime", "300000", "winc", "3000", "binc", "3000"];
+        let parts: Vec<&str> = vec![
+            "go", "wtime", "300000", "btime", "300000", "winc", "3000", "binc", "3000",
+        ];
         let params = parse_go_params(&parts);
 
         assert_eq!(params.wtime, Some(300000));
@@ -442,7 +446,8 @@ mod tests {
     #[test]
     fn parse_go_params_complex() {
         let parts: Vec<&str> = vec![
-            "go", "wtime", "300000", "btime", "300000", "winc", "3000", "binc", "3000", "depth", "20",
+            "go", "wtime", "300000", "btime", "300000", "winc", "3000", "binc", "3000", "depth",
+            "20",
         ];
         let params = parse_go_params(&parts);
 

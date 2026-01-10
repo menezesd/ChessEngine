@@ -70,8 +70,7 @@ impl Board {
 
             // Knight attacks on king zone
             for sq_idx in self.pieces[enemy_idx][Piece::Knight.index()].iter() {
-                let attacks =
-                    crate::board::Bitboard(KNIGHT_ATTACKS[sq_idx.index()] & king_zone.0);
+                let attacks = crate::board::Bitboard(KNIGHT_ATTACKS[sq_idx.index()] & king_zone.0);
                 if !attacks.is_empty() {
                     let defended = (attacks.0 & our_pawn_attacks.0).count_ones() as i32;
                     let undefended = attacks.popcount() as i32 - defended;

@@ -215,7 +215,7 @@ mod tests {
         assert!(attacks & (1u64 << 55) != 0); // h7 - on diagonal
         assert!(attacks & (1u64 << 7) != 0); // h1 - on anti-diagonal
         assert!(attacks & (1u64 << 56) != 0); // a8 - on anti-diagonal
-        // e4 itself should not be in attacks
+                                              // e4 itself should not be in attacks
         assert!(attacks & (1u64 << 28) == 0);
     }
 

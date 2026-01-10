@@ -1,12 +1,14 @@
 //! Pawn structure evaluation.
 //!
 //! Evaluates doubled, isolated, backward pawns and phalanx/defended pawns.
+//! Supports caching via pawn hash table for improved performance.
 
 #![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
 
 use crate::board::masks::{fill_forward, relative_rank, ADJACENT_FILES, PAWN_SUPPORT_MASK};
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece};
+use crate::pawn_hash::PawnHashTable;
 
 use super::tables::{
     BACKWARD_OPEN_EG, BACKWARD_OPEN_MG, BACKWARD_PAWN_EG, BACKWARD_PAWN_MG, DEFENDED_BONUS_EG,
@@ -105,6 +107,25 @@ impl Board {
                 }
             }
         }
+
+        (mg, eg)
+    }
+
+    /// Evaluate pawn structure with caching via pawn hash table.
+    /// Returns `(middlegame_score, endgame_score)` from white's perspective.
+    /// Uses the pawn hash table to cache results for improved performance.
+    #[must_use]
+    pub fn eval_pawn_structure_cached(&self, pawn_hash_table: &PawnHashTable) -> (i32, i32) {
+        let pawn_hash = self.pawn_hash();
+
+        // Try cache first
+        if let Some(entry) = pawn_hash_table.probe(pawn_hash) {
+            return (entry.mg, entry.eg);
+        }
+
+        // Cache miss - compute and store
+        let (mg, eg) = self.eval_pawn_structure();
+        pawn_hash_table.store(pawn_hash, mg, eg);
 
         (mg, eg)
     }

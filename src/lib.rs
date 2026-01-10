@@ -84,6 +84,7 @@
 
 pub mod board;
 pub mod engine;
+pub mod pawn_hash;
 pub mod sync;
 pub mod timer;
 pub mod tt;

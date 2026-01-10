@@ -112,7 +112,7 @@ fn test_history_update_increases_score() {
     let mut table = HistoryTable::new();
     let mv = make_move((1, 4), (3, 4));
 
-    table.update(&mv, 3);
+    table.update(&mv, 3, 0);
     assert!(table.score(&mv) > 0);
 }
 
@@ -122,8 +122,8 @@ fn test_history_higher_depth_higher_bonus() {
     let mv1 = make_move((1, 4), (3, 4));
     let mv2 = make_move((1, 3), (3, 3));
 
-    table.update(&mv1, 2); // depth 2: bonus = 8
-    table.update(&mv2, 4); // depth 4: bonus = 64
+    table.update(&mv1, 2, 0); // depth 2: bonus = 8
+    table.update(&mv2, 4, 0); // depth 4: bonus = 64
 
     assert!(table.score(&mv2) > table.score(&mv1));
 }
@@ -133,9 +133,9 @@ fn test_history_accumulates() {
     let mut table = HistoryTable::new();
     let mv = make_move((1, 4), (3, 4));
 
-    table.update(&mv, 2);
+    table.update(&mv, 2, 0);
     let score1 = table.score(&mv);
-    table.update(&mv, 2);
+    table.update(&mv, 2, 0);
     let score2 = table.score(&mv);
 
     assert!(score2 > score1);
@@ -146,7 +146,7 @@ fn test_history_decay_reduces_scores() {
     let mut table = HistoryTable::new();
     let mv = make_move((1, 4), (3, 4));
 
-    table.update(&mv, 5);
+    table.update(&mv, 5, 0);
     let before = table.score(&mv);
     table.decay();
     let after = table.score(&mv);
@@ -159,7 +159,7 @@ fn test_history_reset_clears() {
     let mut table = HistoryTable::new();
     let mv = make_move((1, 4), (3, 4));
 
-    table.update(&mv, 5);
+    table.update(&mv, 5, 0);
     table.reset();
 
     assert_eq!(table.score(&mv), 0);

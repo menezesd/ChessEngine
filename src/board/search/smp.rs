@@ -18,15 +18,14 @@ use crate::board::{Board, Move};
 use crate::tt::TranspositionTable;
 
 use super::simple::simple_search;
-use super::{
-    SearchConfig, SearchInfoCallback, SearchParams, SearchResult,
-    SearchState,
-};
+use super::{SearchConfig, SearchInfoCallback, SearchParams, SearchResult, SearchState};
 
 /// Shared state across all worker threads
 pub struct SharedSearchState {
     /// Thread-safe transposition table
     pub tt: Arc<TranspositionTable>,
+    /// Thread-safe pawn hash table
+    pub pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
     /// Stop flag checked by all workers
     pub stop: Arc<AtomicBool>,
     /// Global node counter (sum of all workers)
@@ -40,10 +39,16 @@ pub struct SharedSearchState {
 }
 
 impl SharedSearchState {
-    /// Create with a specific TT
-    pub fn new(tt: Arc<TranspositionTable>, stop: Arc<AtomicBool>, generation: u16) -> Self {
+    /// Create with a specific TT and pawn hash table
+    pub fn new(
+        tt: Arc<TranspositionTable>,
+        pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
+        stop: Arc<AtomicBool>,
+        generation: u16,
+    ) -> Self {
         SharedSearchState {
             tt,
+            pawn_hash,
             stop,
             total_nodes: Arc::new(AtomicU64::new(0)),
             max_seldepth: Arc::new(AtomicU64::new(0)),
@@ -161,10 +166,10 @@ fn worker_depth_offset(worker_id: usize) -> i32 {
     // Odd workers search deeper, even workers search at target depth
     #[allow(clippy::match_same_arms)]
     match worker_id % 4 {
-        0 => 0,  // Main worker: target depth
-        1 => 1,  // Search deeper
-        2 => 0,  // Same depth, different ordering
-        3 => 1,  // Search deeper
+        0 => 0, // Main worker: target depth
+        1 => 1, // Search deeper
+        2 => 0, // Same depth, different ordering
+        3 => 1, // Search deeper
         _ => 0,
     }
 }
@@ -203,9 +208,10 @@ pub fn smp_search(
     state.generation = state.generation.wrapping_add(1);
     state.stats.reset_search();
 
-    // Create shared state with the TT from SearchState
+    // Create shared state with the TT and pawn hash from SearchState
     let shared = Arc::new(SharedSearchState::new(
         state.shared_tt(),
+        state.shared_pawn_hash(),
         Arc::clone(&stop),
         state.generation,
     ));
@@ -262,7 +268,9 @@ pub fn smp_search(
 
     // Select best result: prefer main worker (worker 0) as its search is most complete.
     // Only use helper results if main worker has no result.
-    let main_result = results.iter().find(|r| r.worker_id == 0 && r.best_move.is_some());
+    let main_result = results
+        .iter()
+        .find(|r| r.worker_id == 0 && r.best_move.is_some());
     let best_result = main_result.or_else(|| {
         results
             .iter()
@@ -304,9 +312,10 @@ fn run_worker(
     info_callback: Option<SearchInfoCallback>,
     _start_time: Instant,
 ) -> WorkerResult {
-    // Create local SearchState for this worker with shared TT
+    // Create local SearchState for this worker with shared TT and pawn hash
     let mut local_state = SearchState::with_shared_tt(
         Arc::clone(&shared.tt),
+        Arc::clone(&shared.pawn_hash),
         shared.generation,
     );
     local_state.params = shared.params.clone();
@@ -353,4 +362,3 @@ fn run_worker(
         nodes: local_state.stats.total_nodes,
     }
 }
-

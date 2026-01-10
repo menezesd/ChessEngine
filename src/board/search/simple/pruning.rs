@@ -30,7 +30,14 @@ impl SimpleSearchContext<'_> {
         let reduced_depth = depth.saturating_sub(r);
 
         let info = self.board.make_null_move();
-        let score = -self.alphabeta(reduced_depth, -beta, -beta + 1, false, node.ply + 1, crate::board::EMPTY_MOVE);
+        let score = -self.alphabeta(
+            reduced_depth,
+            -beta,
+            -beta + 1,
+            false,
+            node.ply + 1,
+            crate::board::EMPTY_MOVE,
+        );
         self.board.unmake_null_move(info);
 
         if self.should_stop() {

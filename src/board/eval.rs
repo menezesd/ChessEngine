@@ -97,7 +97,8 @@ impl Board {
         // Net bishop advantage (bishops - knights for each side)
         let white_bishop_adv = white_bishops as i32 - white_knights as i32;
         let black_bishop_adv = black_bishops as i32 - black_knights as i32;
-        let bishop_imbalance = (white_bishop_adv - black_bishop_adv) * openness * BISHOP_OPEN_BONUS / 8;
+        let bishop_imbalance =
+            (white_bishop_adv - black_bishop_adv) * openness * BISHOP_OPEN_BONUS / 8;
 
         let bishop_bonus = bishop_pair_bonus + bishop_imbalance;
 

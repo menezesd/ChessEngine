@@ -92,18 +92,16 @@ impl Board {
             {
                 // Diagonal x-ray
                 let diag_attackers = self.diagonal_sliders();
-                let new_diag = Bitboard(
-                    slider_attacks(to.index(), occupancy, true) & diag_attackers.0,
-                );
+                let new_diag =
+                    Bitboard(slider_attacks(to.index(), occupancy, true) & diag_attackers.0);
                 attackers = Bitboard(attackers.0 | (new_diag.0 & occupancy));
             }
 
             if current_attacker == Piece::Rook || current_attacker == Piece::Queen {
                 // Straight x-ray
                 let straight_attackers = self.straight_sliders();
-                let new_straight = Bitboard(
-                    slider_attacks(to.index(), occupancy, false) & straight_attackers.0,
-                );
+                let new_straight =
+                    Bitboard(slider_attacks(to.index(), occupancy, false) & straight_attackers.0);
                 attackers = Bitboard(attackers.0 | (new_straight.0 & occupancy));
             }
 
@@ -251,6 +249,74 @@ impl Board {
     #[must_use]
     pub fn see_ge(&self, from: Square, to: Square, threshold: i32) -> bool {
         self.see(from, to) >= threshold
+    }
+
+    /// Check if a quiet move is safe using SEE.
+    ///
+    /// Returns true if moving the piece to the destination is unlikely to lose material.
+    /// This evaluates what happens if the opponent captures our piece after we move it.
+    ///
+    /// # Arguments
+    /// * `from` - Source square of the moving piece
+    /// * `to` - Target square (empty, since it's a quiet move)
+    #[must_use]
+    pub fn see_quiet_safe(&self, from: Square, to: Square) -> bool {
+        // Get the piece that's moving
+        let Some((color, piece)) = self.piece_at(from) else {
+            return true; // No piece, shouldn't happen
+        };
+
+        // Get enemy color index
+        let enemy_idx = 1 - color.index();
+        let enemy_pawns = self.pieces[enemy_idx][Piece::Pawn.index()];
+
+        // Quick check: if destination is attacked by enemy pawn and we're moving a non-pawn, it's unsafe
+        let pawn_attack_idx = 1 - enemy_idx; // White pawns attack "up", black "down"
+        let pawn_attacks_to_sq = PAWN_ATTACKS[pawn_attack_idx][to.index()];
+        if (pawn_attacks_to_sq & enemy_pawns.0) != 0 && piece != Piece::Pawn {
+            return false;
+        }
+
+        // For non-pawn attackers, check if any enemy piece attacks the square
+        // and is less valuable than our piece
+        let piece_value = SEE_VALUES[piece.index()];
+
+        // Check enemy knights
+        let enemy_knights = self.pieces[enemy_idx][Piece::Knight.index()];
+        if (KNIGHT_ATTACKS[to.index()] & enemy_knights.0) != 0
+            && SEE_VALUES[Piece::Knight.index()] < piece_value
+        {
+            return false;
+        }
+
+        // For simplicity, if our piece is valuable (bishop+), also check sliders
+        if piece_value >= SEE_VALUES[Piece::Bishop.index()] {
+            let occupancy = self.all_occupied.0;
+
+            // Check enemy bishops/queens on diagonals
+            let enemy_bishops = self.pieces[enemy_idx][Piece::Bishop.index()];
+            let enemy_queens = self.pieces[enemy_idx][Piece::Queen.index()];
+            let diag_attacks = slider_attacks(to.index(), occupancy, true);
+            if (diag_attacks & (enemy_bishops.0 | enemy_queens.0)) != 0 {
+                // There's a diagonal attacker - check if it's less valuable
+                if (diag_attacks & enemy_bishops.0) != 0
+                    && SEE_VALUES[Piece::Bishop.index()] < piece_value
+                {
+                    return false;
+                }
+            }
+
+            // Check enemy rooks/queens on files/ranks (for rook+ value pieces)
+            if piece_value >= SEE_VALUES[Piece::Rook.index()] {
+                let enemy_rooks = self.pieces[enemy_idx][Piece::Rook.index()];
+                let straight_attacks = slider_attacks(to.index(), occupancy, false);
+                if (straight_attacks & enemy_rooks.0) != 0 {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 }
 

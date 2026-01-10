@@ -149,6 +149,27 @@ impl Board {
         self.hash
     }
 
+    /// Compute a Zobrist hash of only the pawn positions.
+    /// Used for pawn hash table lookups.
+    #[must_use]
+    pub fn pawn_hash(&self) -> u64 {
+        use crate::zobrist::ZOBRIST;
+
+        let mut hash = 0u64;
+
+        // Hash white pawns
+        for sq in self.pieces[0][Piece::Pawn.index()].iter() {
+            hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][0][sq.index()];
+        }
+
+        // Hash black pawns
+        for sq in self.pieces[1][Piece::Pawn.index()].iter() {
+            hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][1][sq.index()];
+        }
+
+        hash
+    }
+
     #[must_use]
     pub fn white_to_move(&self) -> bool {
         self.white_to_move

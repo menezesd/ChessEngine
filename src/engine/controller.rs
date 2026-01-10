@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use crate::board::search::smp::{smp_search, SmpConfig};
 use crate::board::{
     search, Board, SearchClock, SearchConfig, SearchInfoCallback, SearchResult, SearchState,
 };
-use crate::board::search::smp::{smp_search, SmpConfig};
 
 /// Search thread stack size (32 MB)
 const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
@@ -90,7 +90,6 @@ pub struct SearchParams {
     /// Whether to search infinitely
     pub infinite: bool,
 }
-
 
 /// Engine controller managing search and game state
 pub struct EngineController {
@@ -306,7 +305,11 @@ impl EngineController {
             let smp_config = SmpConfig {
                 num_threads,
                 max_depth: params.depth.unwrap_or(64),
-                time_limit_ms: if params.infinite || params.ponder { 0 } else { params.soft_time_ms },
+                time_limit_ms: if params.infinite || params.ponder {
+                    0
+                } else {
+                    params.soft_time_ms
+                },
                 node_limit,
                 info_callback,
             };
@@ -316,10 +319,12 @@ impl EngineController {
                 .stack_size(SEARCH_STACK_SIZE)
                 .spawn(move || {
                     let mut guard = search_state.lock();
-                    let result = smp_search(&search_board, &mut guard, smp_config, stop_clone.clone());
+                    let result =
+                        smp_search(&search_board, &mut guard, smp_config, stop_clone.clone());
 
                     // Wait while pondering (unless stopped)
-                    while pondering_clone.load(Ordering::Relaxed) && !stop_clone.load(Ordering::Relaxed)
+                    while pondering_clone.load(Ordering::Relaxed)
+                        && !stop_clone.load(Ordering::Relaxed)
                     {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -351,7 +356,8 @@ impl EngineController {
                         search(&mut search_board, &mut guard, config, &stop_clone);
 
                     // Wait while pondering (unless stopped)
-                    while pondering_clone.load(Ordering::Relaxed) && !stop_clone.load(Ordering::Relaxed)
+                    while pondering_clone.load(Ordering::Relaxed)
+                        && !stop_clone.load(Ordering::Relaxed)
                     {
                         thread::sleep(Duration::from_millis(10));
                     }
