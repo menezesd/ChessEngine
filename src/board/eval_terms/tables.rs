@@ -121,3 +121,41 @@ pub const HANGING_PENALTY: [i32; 6] = [
 
 /// Minor piece attacking minor piece bonus
 pub const MINOR_ON_MINOR: i32 = 8;
+
+// ============================================================================
+// MINOR PIECE CONSTANTS
+// ============================================================================
+
+/// Knight outpost bonus (protected by pawn, can't be attacked by enemy pawns)
+pub const KNIGHT_OUTPOST_MG: i32 = 20;
+pub const KNIGHT_OUTPOST_EG: i32 = 15;
+
+/// Bishop outpost bonus (smaller than knight - bishops prefer open diagonals)
+pub const BISHOP_OUTPOST_MG: i32 = 10;
+pub const BISHOP_OUTPOST_EG: i32 = 8;
+
+/// Bad bishop penalty per blocking pawn (bishop blocked by own pawns on same color)
+pub const BAD_BISHOP_MG: i32 = -5;
+pub const BAD_BISHOP_EG: i32 = -8;
+
+// ============================================================================
+// CONNECTED ROOKS & ROOK BEHIND PASSED PAWN
+// ============================================================================
+
+/// Connected rooks bonus (rooks on same rank/file defending each other)
+pub const CONNECTED_ROOKS_MG: i32 = 10;
+pub const CONNECTED_ROOKS_EG: i32 = 8;
+
+/// Rook behind passed pawn bonus (supporting or blocking)
+pub const ROOK_BEHIND_PASSER_MG: i32 = 15;
+pub const ROOK_BEHIND_PASSER_EG: i32 = 25;
+
+// ============================================================================
+// KING TROPISM (piece proximity to enemy king)
+// ============================================================================
+
+/// Queen tropism bonus per square closer to enemy king
+pub const QUEEN_TROPISM_MG: i32 = 2;
+
+/// Rook tropism bonus per square closer to enemy king
+pub const ROOK_TROPISM_MG: i32 = 1;

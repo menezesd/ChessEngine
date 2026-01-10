@@ -13,11 +13,13 @@ mod drawish;
 mod hanging;
 mod helpers;
 mod king_safety;
+mod minor_pieces;
 mod mobility;
 mod passed_pawns;
 mod pawn_structure;
 mod rooks;
 pub mod tables;
+mod tropism;
 
 #[cfg(test)]
 mod tests {

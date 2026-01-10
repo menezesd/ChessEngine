@@ -8,9 +8,11 @@ use crate::board::masks::{FILES, RANK_7TH};
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Piece};
 
+use crate::board::attack_tables::slider_attacks;
+
 use super::tables::{
-    ROOK_7TH_EG, ROOK_7TH_MG, ROOK_OPEN_FILE_EG, ROOK_OPEN_FILE_MG, ROOK_SEMI_OPEN_EG,
-    ROOK_SEMI_OPEN_MG, TRAPPED_ROOK_MG,
+    CONNECTED_ROOKS_EG, CONNECTED_ROOKS_MG, ROOK_7TH_EG, ROOK_7TH_MG, ROOK_OPEN_FILE_EG,
+    ROOK_OPEN_FILE_MG, ROOK_SEMI_OPEN_EG, ROOK_SEMI_OPEN_MG, TRAPPED_ROOK_MG,
 };
 
 impl Board {
@@ -84,6 +86,34 @@ impl Board {
                                 mg += sign * TRAPPED_ROOK_MG;
                             }
                         }
+                    }
+                }
+            }
+
+            // Connected rooks bonus
+            let rooks = self.pieces[color_idx][Piece::Rook.index()];
+            if rooks.popcount() >= 2 {
+                let mut rook_squares: [usize; 2] = [0; 2];
+                let mut count = 0;
+                for sq in rooks.iter() {
+                    if count < 2 {
+                        rook_squares[count] = sq.as_index();
+                        count += 1;
+                    }
+                }
+
+                if count == 2 {
+                    // Check if rooks can see each other (on same rank or file with no pieces between)
+                    let r1 = rook_squares[0];
+                    let r2 = rook_squares[1];
+
+                    // Get rook attacks from first rook position
+                    let rook1_attacks = slider_attacks(r1, self.all_occupied.0, false);
+
+                    // If rook 1 can attack rook 2's square, they're connected
+                    if (rook1_attacks & (1u64 << r2)) != 0 {
+                        mg += sign * CONNECTED_ROOKS_MG;
+                        eg += sign * CONNECTED_ROOKS_EG;
                     }
                 }
             }
