@@ -97,27 +97,29 @@ impl Board {
             for sq in self.pieces[color_idx][Piece::Bishop.index()].iter() {
                 let sq_bb = Bitboard::from_square(sq);
 
-                if (sq_bb.0 & OUTPOST_RANKS[color_idx].0) != 0 {
-                    if (sq_bb.0 & our_pawn_attacks.0) != 0 {
-                        let file = sq.file();
-                        let adj_files = ADJACENT_FILES[file];
-                        let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+                if (sq_bb.0 & OUTPOST_RANKS[color_idx].0) != 0
+                    && (sq_bb.0 & our_pawn_attacks.0) != 0
+                {
+                    let file = sq.file();
+                    let adj_files = ADJACENT_FILES[file];
+                    let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
 
-                        let can_be_attacked = match color {
-                            Color::White => {
-                                let mask = adj_files.0 & !Bitboard(0xFFFF_FFFF_FFFF_FFFF << (sq.rank() * 8)).0;
-                                (enemy_pawns.0 & mask) != 0
-                            }
-                            Color::Black => {
-                                let mask = adj_files.0 & (Bitboard(0xFFFF_FFFF_FFFF_FFFF << ((sq.rank() + 1) * 8)).0);
-                                (enemy_pawns.0 & mask) != 0
-                            }
-                        };
-
-                        if !can_be_attacked {
-                            mg += sign * BISHOP_OUTPOST_MG;
-                            eg += sign * BISHOP_OUTPOST_EG;
+                    let can_be_attacked = match color {
+                        Color::White => {
+                            let mask = adj_files.0
+                                & !Bitboard(0xFFFF_FFFF_FFFF_FFFF << (sq.rank() * 8)).0;
+                            (enemy_pawns.0 & mask) != 0
                         }
+                        Color::Black => {
+                            let mask = adj_files.0
+                                & (Bitboard(0xFFFF_FFFF_FFFF_FFFF << ((sq.rank() + 1) * 8)).0);
+                            (enemy_pawns.0 & mask) != 0
+                        }
+                    };
+
+                    if !can_be_attacked {
+                        mg += sign * BISHOP_OUTPOST_MG;
+                        eg += sign * BISHOP_OUTPOST_EG;
                     }
                 }
 

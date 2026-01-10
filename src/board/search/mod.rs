@@ -286,7 +286,7 @@ impl ContinuationHistory {
 }
 
 /// Capture history table - tracks which captures historically cause cutoffs.
-/// Indexed by [attacker_piece][victim_piece] for a 6x6 = 36 entry table.
+/// Indexed by `[attacker_piece][victim_piece]` for a 6x6 = 36 entry table.
 pub struct CaptureHistory {
     entries: [[i32; 6]; 6],
 }
@@ -361,9 +361,8 @@ impl SearchTables {
         }
 
         // Get attacker piece
-        let attacker_piece = match board.piece_at(mv.from()) {
-            Some((_, piece)) => piece,
-            None => return 0,
+        let Some((_, attacker_piece)) = board.piece_at(mv.from()) else {
+            return 0;
         };
         let attacker = move_order::piece_value(attacker_piece);
 
@@ -376,9 +375,8 @@ impl SearchTables {
         }
 
         // Look up what piece is on the target square
-        let victim_piece = match board.piece_at(mv.to()) {
-            Some((_, piece)) => piece,
-            None => return 0,
+        let Some((_, victim_piece)) = board.piece_at(mv.to()) else {
+            return 0;
         };
         let captured = move_order::piece_value(victim_piece);
 
