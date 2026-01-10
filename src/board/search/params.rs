@@ -62,7 +62,7 @@ impl SearchParams {
 impl Default for SearchParams {
     fn default() -> Self {
         let style = env::var("SEARCH_STYLE")
-            .unwrap_or_else(|_| "".to_string())
+            .unwrap_or_else(|_| String::new())
             .trim()
             .to_ascii_lowercase();
         if style == "baseline" {

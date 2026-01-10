@@ -25,7 +25,7 @@ const PHASE_TOTAL: i32 = 24;
 
 /// Bishop vs Knight imbalance bonus per pawn difference from 8.
 /// Bishops are worth more in open positions (fewer pawns).
-/// Formula: bishop_bonus = (8 - total_pawns) * BISHOP_OPEN_BONUS per bishop advantage
+/// Formula: `bishop_bonus` = (8 - `total_pawns`) * `BISHOP_OPEN_BONUS` per bishop advantage
 /// (Texel tuned v2)
 const BISHOP_OPEN_BONUS: i32 = 12;
 

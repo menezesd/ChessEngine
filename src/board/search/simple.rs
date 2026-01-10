@@ -309,10 +309,9 @@ impl SimpleSearchContext<'_> {
                     if score >= beta {
                         // Penalize quiet moves that didn't cause the cutoff (negative history)
                         // Don't penalize the cutoff move itself
-                        for i in 0..quiets_count {
-                            let quiet_mv = quiets_tried[i];
-                            if quiet_mv != m && quiet_mv != EMPTY_MOVE {
-                                self.state.tables.history.penalize(&quiet_mv, depth);
+                        for quiet_mv in quiets_tried.iter().take(quiets_count) {
+                            if *quiet_mv != m && *quiet_mv != EMPTY_MOVE {
+                                self.state.tables.history.penalize(quiet_mv, depth);
                             }
                         }
                         self.handle_beta_cutoff(m, ply, depth, score, best_move);
@@ -378,10 +377,10 @@ impl SimpleSearchContext<'_> {
     /// Check if the position is improving (eval better than 2 plies ago)
     #[inline]
     fn is_improving(&self, ply: usize, eval: i32) -> bool {
-        if ply < 2 || ply >= MAX_PLY {
-            true
-        } else {
+        if (2..MAX_PLY).contains(&ply) {
             eval > self.static_eval[ply - 2]
+        } else {
+            true
         }
     }
 
