@@ -79,10 +79,12 @@ impl SimpleSearchContext<'_> {
             return None;
         }
 
+        // Reverse futility pruning (static null move)
         if let Some(score) = self.try_reverse_futility_pruning(depth, beta, eval) {
             return Some(score);
         }
 
+        // Null move pruning
         if allow_null {
             if let Some(score) = self.try_null_move_pruning(depth, beta, eval, node) {
                 return Some(score);
