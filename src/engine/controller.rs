@@ -89,6 +89,8 @@ pub struct SearchParams {
     pub ponder: bool,
     /// Whether to search infinitely
     pub infinite: bool,
+    /// Number of principal variations to search (1 = normal, >1 = `MultiPV`)
+    pub multi_pv: u32,
 }
 
 /// Engine controller managing search and game state
@@ -230,6 +232,9 @@ impl EngineController {
         }
         if let Some(cb) = &self.info_callback {
             config = config.with_info_callback(cb.clone());
+        }
+        if params.multi_pv > 1 {
+            config = config.with_multi_pv(params.multi_pv);
         }
         config
     }

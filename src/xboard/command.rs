@@ -86,6 +86,10 @@ pub enum XBoardCommand {
     Analyze,
     /// Exit analyze mode
     ExitAnalyze,
+    /// Pause thinking
+    Pause,
+    /// Resume thinking
+    Resume,
     /// Quit the program
     Quit,
     /// Unknown command
@@ -116,6 +120,8 @@ fn parse_basic_command(cmd_str: &str) -> Option<XBoardCommand> {
         "easy" => Some(XBoardCommand::Easy),
         "analyze" => Some(XBoardCommand::Analyze),
         "exit" => Some(XBoardCommand::ExitAnalyze),
+        "pause" => Some(XBoardCommand::Pause),
+        "resume" => Some(XBoardCommand::Resume),
         "quit" => Some(XBoardCommand::Quit),
         "?" => Some(XBoardCommand::MoveNow),
         _ => None,

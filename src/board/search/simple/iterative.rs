@@ -6,9 +6,15 @@ use crate::board::{Move, SearchIterationInfo, SearchState, EMPTY_MOVE, MAX_PLY};
 use std::sync::atomic::AtomicBool;
 
 impl SimpleSearchContext<'_> {
-    /// Iterative deepening with aspiration windows and time management
+    /// Iterative deepening with aspiration windows and time management.
+    /// Uses `self.root_moves` for the moves to consider at root.
+    /// `multipv_index`: which PV line this is (1 = best, 2 = second best, etc.)
     #[allow(clippy::too_many_lines)]
-    pub fn iterative_deepening(&mut self, max_depth: u32) -> Option<Move> {
+    pub fn iterative_deepening_multipv(
+        &mut self,
+        max_depth: u32,
+        multipv_index: u32,
+    ) -> Option<Move> {
         let mut best_move: Option<Move> = None;
         let mut score = self.evaluate();
 
@@ -121,9 +127,8 @@ impl SimpleSearchContext<'_> {
             if let Some(entry) = self.state.tables.tt.probe(self.board.hash) {
                 if let Some(mv) = entry.best_move() {
                     if mv != EMPTY_MOVE {
-                        // Verify move is legal
-                        let moves = self.board.generate_moves();
-                        if moves.iter().any(|m| *m == mv) {
+                        // Verify move is in our root_moves (already filtered for MultiPV)
+                        if self.root_moves.contains(&mv) {
                             best_move = Some(mv);
                         }
                     }
@@ -142,8 +147,12 @@ impl SimpleSearchContext<'_> {
             // Track nodes for this iteration (for node-based time scaling)
             prev_iter_nodes = self.nodes.saturating_sub(iter_start_nodes);
 
-            // Extract PV from TT
-            let pv = self.extract_pv(depth as usize);
+            // Extract PV from TT, ensuring first move is our best_move
+            let pv = if let Some(bm) = best_move {
+                self.extract_pv_with_first_move(bm, depth as usize)
+            } else {
+                self.extract_pv(depth as usize)
+            };
             let pv_str = Self::format_pv(&pv);
 
             if let Some(cb) = &self.info_callback {
@@ -170,7 +179,7 @@ impl SimpleSearchContext<'_> {
                     pv: pv_str,
                     seldepth: self.state.stats.seldepth,
                     tt_hits: self.state.stats.tt_hits,
-                    multipv: 1, // TODO: implement full MultiPV support
+                    multipv: multipv_index,
                 };
                 cb(&info);
             }
@@ -190,8 +199,53 @@ pub fn simple_search(
     stop: &AtomicBool,
     info_callback: Option<SearchInfoCallback>,
 ) -> Option<Move> {
-    // Increment generation for TT aging
-    state.generation = state.generation.wrapping_add(1);
+    simple_search_multipv(
+        board,
+        state,
+        max_depth,
+        time_limit_ms,
+        node_limit,
+        stop,
+        info_callback,
+        &[],
+        1,
+    )
+}
+
+/// Run the main search algorithm with `MultiPV` support
+#[allow(clippy::too_many_arguments)]
+pub fn simple_search_multipv(
+    board: &mut crate::board::Board,
+    state: &mut SearchState,
+    max_depth: u32,
+    time_limit_ms: u64,
+    node_limit: u64,
+    stop: &AtomicBool,
+    info_callback: Option<SearchInfoCallback>,
+    excluded_moves: &[Move],
+    multipv_index: u32,
+) -> Option<Move> {
+    // Increment generation for TT aging (only on first PV line)
+    if multipv_index == 1 {
+        state.generation = state.generation.wrapping_add(1);
+    }
+
+    // Check for single legal move
+    let moves = board.generate_moves();
+
+    // Filter out excluded moves (for MultiPV)
+    let available_moves: Vec<Move> = moves
+        .iter()
+        .filter(|m| !excluded_moves.contains(m))
+        .copied()
+        .collect();
+
+    if available_moves.is_empty() {
+        return None;
+    }
+    if available_moves.len() == 1 {
+        return Some(available_moves[0]);
+    }
 
     let mut ctx = SimpleSearchContext {
         board,
@@ -206,17 +260,10 @@ pub fn simple_search(
         previous_move: [EMPTY_MOVE; MAX_PLY],
         previous_piece: [None; MAX_PLY],
         info_callback,
+        root_moves: available_moves,
     };
 
-    // Check for single legal move
-    let moves = ctx.board.generate_moves();
-    let result = if moves.is_empty() {
-        None
-    } else if moves.len() == 1 {
-        moves.first()
-    } else {
-        ctx.iterative_deepening(max_depth)
-    };
+    let result = ctx.iterative_deepening_multipv(max_depth, multipv_index);
 
     ctx.state.stats.nodes = ctx.nodes;
     ctx.state.stats.total_nodes = ctx.state.stats.total_nodes.saturating_add(ctx.nodes);
