@@ -43,6 +43,7 @@ struct PonderState {
 }
 
 /// `XBoard` protocol handler state
+#[allow(clippy::struct_excessive_bools)]
 pub struct XBoardHandler {
     board: Board,
     state: Arc<Mutex<SearchState>>,
@@ -62,6 +63,16 @@ pub struct XBoardHandler {
     opponent_name: Option<String>,
     /// Active ponder search state
     ponder: Option<PonderState>,
+    /// Whether we're in edit mode
+    edit_mode: bool,
+    /// Side to move in edit mode (true = white)
+    edit_white_to_move: bool,
+    /// Whether we're in analyze mode
+    analyze_mode: bool,
+    /// Active analyze search state
+    analyze_handle: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
+    /// Whether the engine is paused
+    paused: bool,
 }
 
 impl Default for XBoardHandler {
@@ -232,29 +243,90 @@ impl XBoardHandler {
                     None
                 }
             }
-
             XBoardCommand::Ping(n) => Some(format_pong(*n)),
             XBoardCommand::Name(name) => {
                 self.opponent_name = Some(name.clone());
                 None
             }
+            XBoardCommand::Random | XBoardCommand::Computer => {
+                // Random and Computer modes: acknowledge silently (no-op)
+                None
+            }
+            XBoardCommand::Pause => {
+                self.paused = true;
+                self.stop_ponder();
+                self.stop_analyze();
+                None
+            }
+            XBoardCommand::Resume => {
+                self.paused = false;
+                // If in analyze mode, restart analysis
+                if self.analyze_mode {
+                    self.start_analyze();
+                }
+                None
+            }
             XBoardCommand::Quit => {
+                self.stop_ponder();
+                self.stop_analyze();
                 std::process::exit(0);
             }
-            XBoardCommand::Edit
-            | XBoardCommand::EditDone
-            | XBoardCommand::ClearBoard
-            | XBoardCommand::EditPiece(_)
-            | XBoardCommand::EditColor(_) => {
-                // Edit mode not fully implemented
-                None
-            }
-            XBoardCommand::Analyze | XBoardCommand::ExitAnalyze => {
-                // Analyze mode not implemented
-                None
-            }
             XBoardCommand::Unknown(s) => Some(format_error(s, "unknown command")),
-            _ => None, // This should catch any remaining commands that haven't been moved
+            _ => None,
+        }
+    }
+
+    fn handle_edit_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
+        match cmd {
+            XBoardCommand::Edit => {
+                self.edit_mode = true;
+                self.edit_white_to_move = true;
+                None
+            }
+            XBoardCommand::EditDone => {
+                self.edit_mode = false;
+                // Set side to move based on edit_white_to_move
+                if self.edit_white_to_move != self.board.white_to_move() {
+                    self.board.flip_side_to_move();
+                }
+                None
+            }
+            XBoardCommand::ClearBoard => {
+                if self.edit_mode {
+                    self.board.clear();
+                }
+                None
+            }
+            XBoardCommand::EditColor(c) => {
+                if self.edit_mode {
+                    self.edit_white_to_move = *c == 'w' || *c == 'W';
+                }
+                None
+            }
+            XBoardCommand::EditPiece(piece_str) => {
+                if self.edit_mode {
+                    self.place_piece(piece_str);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_analyze_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
+        match cmd {
+            XBoardCommand::Analyze => {
+                self.analyze_mode = true;
+                self.force_mode = true; // In analyze mode, don't auto-play
+                self.start_analyze();
+                None
+            }
+            XBoardCommand::ExitAnalyze => {
+                self.analyze_mode = false;
+                self.stop_analyze();
+                None
+            }
+            _ => None,
         }
     }
 
@@ -279,6 +351,11 @@ impl XBoardHandler {
             move_history: Vec::new(),
             opponent_name: None,
             ponder: None,
+            edit_mode: false,
+            edit_white_to_move: true,
+            analyze_mode: false,
+            analyze_handle: None,
+            paused: false,
         }
     }
 
@@ -287,6 +364,112 @@ impl XBoardHandler {
         if let Some(ponder) = self.ponder.take() {
             ponder.stop.store(true, Ordering::Relaxed);
             let _ = ponder.handle.join();
+        }
+    }
+
+    /// Stop any active analyze search
+    fn stop_analyze(&mut self) {
+        if let Some((stop, handle)) = self.analyze_handle.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+
+    /// Start analyze mode (continuous search with output)
+    fn start_analyze(&mut self) {
+        self.stop_analyze();
+
+        if self.paused {
+            return;
+        }
+
+        let board = self.board.clone();
+        let state = Arc::clone(&self.state);
+        let max_depth = self.max_depth;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let post_thinking = self.post_thinking;
+
+        let handle = thread::spawn(move || {
+            let mut board = board;
+            let mut guard = state.lock();
+            guard.new_search();
+
+            // Iterative deepening with output
+            for depth in 1..=max_depth {
+                if stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let start_time = Instant::now();
+                let result = find_best_move(&mut board, &mut guard, depth, &stop_clone);
+
+                if stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                if let Some(mv) = result {
+                    let elapsed_cs = start_time.elapsed().as_millis() as u64 / 10;
+                    let nodes = guard.stats.nodes;
+                    let score = 0; // We don't have easy access to score here
+
+                    if post_thinking {
+                        // XBoard analyze output format: depth score time nodes pv
+                        let san = board.move_to_san(&mv);
+                        println!("{depth} {score} {elapsed_cs} {nodes} {san}");
+                    }
+                }
+            }
+        });
+
+        self.analyze_handle = Some((stop, handle));
+    }
+
+    /// Place a piece on the board in edit mode (e.g., "Pa2", "Ke1", "x" to remove)
+    fn place_piece(&mut self, piece_str: &str) {
+        if piece_str.is_empty() {
+            return;
+        }
+
+        let chars: Vec<char> = piece_str.chars().collect();
+
+        // Handle "x" prefix for removing pieces (e.g., "xa2")
+        if chars[0] == 'x' && chars.len() >= 3 {
+            let file = chars[1];
+            let rank = chars[2];
+            if let Some(sq) = parse_square(file, rank) {
+                self.board.remove_piece_at(sq);
+            }
+            return;
+        }
+
+        // Normal piece placement: "Pa2", "Ke1", etc.
+        if chars.len() < 3 {
+            return;
+        }
+
+        let piece_char = chars[0];
+        let file = chars[1];
+        let rank = chars[2];
+
+        let color = if self.edit_white_to_move {
+            Color::White
+        } else {
+            Color::Black
+        };
+
+        let piece = match piece_char {
+            'P' => Some(crate::board::Piece::Pawn),
+            'N' => Some(crate::board::Piece::Knight),
+            'B' => Some(crate::board::Piece::Bishop),
+            'R' => Some(crate::board::Piece::Rook),
+            'Q' => Some(crate::board::Piece::Queen),
+            'K' => Some(crate::board::Piece::King),
+            _ => None,
+        };
+
+        if let (Some(piece), Some(sq)) = (piece, parse_square(file, rank)) {
+            self.board.place_piece(sq, color, piece);
         }
     }
 
@@ -369,17 +552,26 @@ impl XBoardHandler {
             return Some(response);
         }
 
+        if let Some(response) = self.handle_edit_command(cmd) {
+            return Some(response);
+        }
+
+        if let Some(response) = self.handle_analyze_command(cmd) {
+            return Some(response);
+        }
+
         if let Some(response) = self.handle_protocol_misc_command(cmd) {
             return Some(response);
         }
 
-        None // All commands should now be handled by one of the helper functions
+        None
     }
 
     /// Handle a user move (in SAN or coordinate notation).
     fn handle_user_move(&mut self, mv_str: &str) -> Option<String> {
-        // Stop any ongoing ponder
+        // Stop any ongoing ponder or analyze
         self.stop_ponder();
+        self.stop_analyze();
 
         // Try SAN first, then coordinate notation
         let mv = self
@@ -391,6 +583,10 @@ impl XBoardHandler {
             Ok(mv) => {
                 let info = self.board.make_move(mv);
                 self.move_history.push((mv, info));
+                // Restart analysis if in analyze mode
+                if self.analyze_mode && !self.paused {
+                    self.start_analyze();
+                }
                 None
             }
             Err(_) => Some(format_illegal_move(mv_str)),
@@ -399,7 +595,7 @@ impl XBoardHandler {
 
     /// Check if the engine should think now.
     fn should_think(&self) -> bool {
-        if self.force_mode {
+        if self.force_mode || self.paused || self.analyze_mode {
             return false;
         }
         match self.engine_color {
@@ -488,6 +684,21 @@ pub fn run_xboard() {
     handler.run();
 }
 
+/// Parse a square from file and rank characters (e.g., 'e', '4' -> e4)
+fn parse_square(file: char, rank: char) -> Option<crate::board::Square> {
+    let file_idx = match file {
+        'a'..='h' => file as u8 - b'a',
+        _ => return None,
+    };
+    let rank_idx = match rank {
+        '1'..='8' => rank as u8 - b'1',
+        _ => return None,
+    };
+    Some(crate::board::Square::from_index(
+        (rank_idx * 8 + file_idx) as usize,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +750,52 @@ mod tests {
         ));
         assert!(result.is_none());
         assert!(!handler.board.white_to_move());
+    }
+
+    #[test]
+    fn test_pause_resume() {
+        let mut handler = XBoardHandler::new();
+        assert!(!handler.paused);
+        handler.handle_command(&XBoardCommand::Pause);
+        assert!(handler.paused);
+        handler.handle_command(&XBoardCommand::Resume);
+        assert!(!handler.paused);
+    }
+
+    #[test]
+    fn test_edit_mode() {
+        let mut handler = XBoardHandler::new();
+        assert!(!handler.edit_mode);
+        handler.handle_command(&XBoardCommand::Edit);
+        assert!(handler.edit_mode);
+        handler.handle_command(&XBoardCommand::EditDone);
+        assert!(!handler.edit_mode);
+    }
+
+    #[test]
+    fn test_analyze_mode() {
+        let mut handler = XBoardHandler::new();
+        assert!(!handler.analyze_mode);
+        handler.handle_command(&XBoardCommand::Analyze);
+        assert!(handler.analyze_mode);
+        assert!(handler.force_mode); // Analyze mode sets force mode
+        handler.handle_command(&XBoardCommand::ExitAnalyze);
+        assert!(!handler.analyze_mode);
+    }
+
+    #[test]
+    fn test_random_noop() {
+        let mut handler = XBoardHandler::new();
+        let result = handler.handle_command(&XBoardCommand::Random);
+        assert!(result.is_none()); // Should be silent no-op
+    }
+
+    #[test]
+    fn test_result() {
+        let mut handler = XBoardHandler::new();
+        handler.handle_command(&XBoardCommand::New);
+        assert!(!handler.force_mode);
+        handler.handle_command(&XBoardCommand::Result("1-0 {White wins}".to_string()));
+        assert!(handler.force_mode); // Result sets force mode
     }
 }

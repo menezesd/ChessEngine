@@ -200,6 +200,7 @@ pub fn smp_search(
             node_limit: config.node_limit,
             extract_ponder: true,
             info_callback: config.info_callback,
+            multi_pv: 1, // SMP currently only supports single PV
         };
         return super::search(&mut board_clone, state, search_config, &stop);
     }

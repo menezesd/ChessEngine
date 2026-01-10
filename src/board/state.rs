@@ -105,6 +105,89 @@ impl Board {
         board
     }
 
+    /// Clear all pieces from the board (for edit mode)
+    pub fn clear(&mut self) {
+        self.pieces = [[Bitboard(0); 6]; 2];
+        self.occupied = [Bitboard(0); 2];
+        self.all_occupied = Bitboard(0);
+        self.castling_rights = 0;
+        self.en_passant_target = None;
+        self.halfmove_clock = 0;
+        self.eval_mg = [0, 0];
+        self.eval_eg = [0, 0];
+        self.game_phase = [0, 0];
+        self.hash = 0;
+    }
+
+    /// Flip the side to move (for edit mode)
+    pub fn flip_side_to_move(&mut self) {
+        use crate::zobrist::ZOBRIST;
+        self.white_to_move = !self.white_to_move;
+        self.hash ^= ZOBRIST.black_to_move_key;
+    }
+
+    /// Place a piece on the board (for edit mode)
+    /// This updates bitboards, hash, and incremental eval
+    pub fn place_piece(&mut self, sq: Square, color: Color, piece: Piece) {
+        use crate::zobrist::ZOBRIST;
+
+        // First remove any existing piece at this square
+        if let Some((old_color, old_piece)) = self.piece_at(sq) {
+            self.remove_piece(sq, old_color, old_piece);
+            self.hash ^= ZOBRIST.piece_keys[old_piece.index()][old_color.index()][sq.index()];
+            // Update incremental eval for removed piece
+            let c_idx = old_color.index();
+            let p_idx = old_piece.index();
+            let pst_sq = if old_color == Color::White {
+                sq.index()
+            } else {
+                sq.index() ^ 56
+            };
+            self.eval_mg[c_idx] -= MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
+            self.eval_eg[c_idx] -= MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
+            self.game_phase[c_idx] -= PHASE_WEIGHTS[p_idx];
+        }
+
+        // Now add the new piece
+        self.set_piece(sq, color, piece);
+        self.hash ^= ZOBRIST.piece_keys[piece.index()][color.index()][sq.index()];
+
+        // Update incremental eval
+        let c_idx = color.index();
+        let p_idx = piece.index();
+        let pst_sq = if color == Color::White {
+            sq.index()
+        } else {
+            sq.index() ^ 56
+        };
+        self.eval_mg[c_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
+        self.eval_eg[c_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
+        self.game_phase[c_idx] += PHASE_WEIGHTS[p_idx];
+    }
+
+    /// Remove a piece from the board by square (for edit mode)
+    /// This updates bitboards, hash, and incremental eval
+    pub fn remove_piece_at(&mut self, sq: Square) {
+        use crate::zobrist::ZOBRIST;
+
+        if let Some((color, piece)) = self.piece_at(sq) {
+            self.remove_piece(sq, color, piece);
+            self.hash ^= ZOBRIST.piece_keys[piece.index()][color.index()][sq.index()];
+
+            // Update incremental eval
+            let c_idx = color.index();
+            let p_idx = piece.index();
+            let pst_sq = if color == Color::White {
+                sq.index()
+            } else {
+                sq.index() ^ 56
+            };
+            self.eval_mg[c_idx] -= MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
+            self.eval_eg[c_idx] -= MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
+            self.game_phase[c_idx] -= PHASE_WEIGHTS[p_idx];
+        }
+    }
+
     /// Recalculate incremental evaluation from scratch (used after FEN parsing or initialization)
     pub(crate) fn recalculate_incremental_eval(&mut self) {
         self.eval_mg = [0, 0];

@@ -145,6 +145,7 @@ impl UciSession {
             hard_time_ms: request.hard_time_ms,
             ponder: request.ponder,
             infinite: request.infinite,
+            multi_pv: self.options.multi_pv,
         };
 
         GoSearchPlan {

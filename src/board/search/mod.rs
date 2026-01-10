@@ -698,6 +698,8 @@ pub struct SearchConfig {
     pub extract_ponder: bool,
     /// Optional callback for iteration info
     pub info_callback: Option<SearchInfoCallback>,
+    /// Number of principal variations to search (1 = normal, >1 = `MultiPV`)
+    pub multi_pv: u32,
 }
 
 impl Default for SearchConfig {
@@ -708,6 +710,7 @@ impl Default for SearchConfig {
             node_limit: 0,
             extract_ponder: true,
             info_callback: None,
+            multi_pv: 1,
         }
     }
 }
@@ -762,6 +765,13 @@ impl SearchConfig {
     #[must_use]
     pub fn with_info_callback(mut self, callback: SearchInfoCallback) -> Self {
         self.info_callback = Some(callback);
+        self
+    }
+
+    /// Set number of principal variations to search (`MultiPV`)
+    #[must_use]
+    pub fn with_multi_pv(mut self, multi_pv: u32) -> Self {
+        self.multi_pv = multi_pv.max(1);
         self
     }
 }
@@ -825,24 +835,72 @@ pub fn search(
 ) -> SearchResult {
     let max_depth = config.max_depth.unwrap_or(64);
     let info_callback = config.info_callback.clone();
-    let best_move = simple::simple_search(
-        board,
-        state,
-        max_depth,
-        config.time_limit_ms,
-        config.node_limit,
-        stop,
-        info_callback,
-    );
+    let multi_pv = config.multi_pv.max(1);
+
+    // For single PV, use the simple path
+    if multi_pv == 1 {
+        let best_move = simple::simple_search(
+            board,
+            state,
+            max_depth,
+            config.time_limit_ms,
+            config.node_limit,
+            stop,
+            info_callback,
+        );
+
+        let ponder_move = if config.extract_ponder {
+            best_move.and_then(|mv| extract_ponder_move(board, state, mv))
+        } else {
+            None
+        };
+
+        return SearchResult {
+            best_move,
+            ponder_move,
+        };
+    }
+
+    // MultiPV: search multiple principal variations
+    let mut excluded_moves: Vec<Move> = Vec::new();
+    let mut first_best_move: Option<Move> = None;
+
+    for pv_index in 1..=multi_pv {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
+        let best_move = simple::simple_search_multipv(
+            board,
+            state,
+            max_depth,
+            config.time_limit_ms,
+            config.node_limit,
+            stop,
+            info_callback.clone(),
+            &excluded_moves,
+            pv_index,
+        );
+
+        if let Some(mv) = best_move {
+            if pv_index == 1 {
+                first_best_move = Some(mv);
+            }
+            excluded_moves.push(mv);
+        } else {
+            // No more moves available
+            break;
+        }
+    }
 
     let ponder_move = if config.extract_ponder {
-        best_move.and_then(|mv| extract_ponder_move(board, state, mv))
+        first_best_move.and_then(|mv| extract_ponder_move(board, state, mv))
     } else {
         None
     };
 
     SearchResult {
-        best_move,
+        best_move: first_best_move,
         ponder_move,
     }
 }

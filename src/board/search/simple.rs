@@ -19,7 +19,7 @@ mod iterative;
 mod pruning;
 mod quiescence;
 
-pub use iterative::simple_search;
+pub use iterative::{simple_search, simple_search_multipv};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -53,6 +53,8 @@ pub struct SimpleSearchContext<'a> {
     pub previous_piece: [Option<Piece>; MAX_PLY],
     /// Optional callback for reporting iteration info
     pub info_callback: Option<SearchInfoCallback>,
+    /// Root moves to consider (for `MultiPV` support - empty means all moves)
+    pub root_moves: Vec<Move>,
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +100,21 @@ impl SimpleSearchContext<'_> {
     /// Extract Principal Variation from TT
     /// Returns a vector of moves representing the best line
     fn extract_pv(&mut self, max_len: usize) -> Vec<Move> {
+        self.extract_pv_with_first_move_opt(None, max_len)
+    }
+
+    /// Extract PV with a specific first move, then continue from TT
+    /// Used for `MultiPV` to ensure the PV starts with the correct best move
+    fn extract_pv_with_first_move(&mut self, first_move: Move, max_len: usize) -> Vec<Move> {
+        self.extract_pv_with_first_move_opt(Some(first_move), max_len)
+    }
+
+    /// Extract PV, optionally starting with a specified first move
+    fn extract_pv_with_first_move_opt(
+        &mut self,
+        first_move: Option<Move>,
+        max_len: usize,
+    ) -> Vec<Move> {
         let mut pv = Vec::with_capacity(max_len);
         // Use fixed array instead of HashSet - max_len is bounded by MAX_PLY
         let mut seen_hashes = [0u64; MAX_PLY];
@@ -111,17 +128,23 @@ impl SimpleSearchContext<'_> {
             }
             seen_hashes[seen_count] = hash;
 
-            // Get best move from TT
-            let tt_move = if let Some(entry) = self.state.tables.tt.probe(self.board.hash) {
-                entry.best_move()
+            // For the first move, use provided first_move if given
+            let mv = if let (0, Some(fm)) = (seen_count, first_move) {
+                fm
             } else {
-                None
-            };
+                // Get best move from TT
+                let tt_move = if let Some(entry) = self.state.tables.tt.probe(self.board.hash) {
+                    entry.best_move()
+                } else {
+                    None
+                };
 
-            let Some(mv) = tt_move else { break };
-            if mv == EMPTY_MOVE {
-                break;
-            }
+                let Some(m) = tt_move else { break };
+                if m == EMPTY_MOVE {
+                    break;
+                }
+                m
+            };
 
             // Verify move is legal using fast single-move check
             if !self.board.is_legal_move(mv) {
@@ -721,13 +744,31 @@ impl SimpleSearchContext<'_> {
         node.tt_move = tt_move;
         node.tt_score = tt_score;
         node.tt_bound = tt_bound;
-        if let Some(cutoff_score) = tt_cutoff {
-            self.state.stats.tt_hits = self.state.stats.tt_hits.saturating_add(1);
-            return cutoff_score;
+
+        // At root with restricted moves (MultiPV), only use TT cutoff if TT move is in root_moves
+        let use_tt_cutoff = if is_root && !self.root_moves.is_empty() {
+            tt_move != EMPTY_MOVE && self.root_moves.contains(&tt_move)
+        } else {
+            true
+        };
+
+        if use_tt_cutoff {
+            if let Some(cutoff_score) = tt_cutoff {
+                self.state.stats.tt_hits = self.state.stats.tt_hits.saturating_add(1);
+                return cutoff_score;
+            }
         }
 
-        // Generate moves
-        let moves = self.board.generate_moves();
+        // Generate moves (at root, use root_moves if available for MultiPV)
+        let moves = if is_root && !self.root_moves.is_empty() {
+            let mut move_list = MoveList::new();
+            for m in &self.root_moves {
+                move_list.push(*m);
+            }
+            move_list
+        } else {
+            self.board.generate_moves()
+        };
         if moves.is_empty() {
             return if in_check {
                 -MATE_SCORE + ply as i32 // Checkmate
