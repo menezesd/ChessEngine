@@ -344,18 +344,8 @@ fn test_rook_seventh_rank_bonus() {
     let (mg_7th, eg_7th) = seventh.eval_rooks();
     let (mg_normal, eg_normal) = normal.eval_rooks();
 
-    assert!(
-        mg_7th >= mg_normal,
-        "7th={}, normal={}",
-        mg_7th,
-        mg_normal
-    );
-    assert!(
-        eg_7th >= eg_normal,
-        "7th={}, normal={}",
-        eg_7th,
-        eg_normal
-    );
+    assert!(mg_7th >= mg_normal, "7th={}, normal={}", mg_7th, mg_normal);
+    assert!(eg_7th >= eg_normal, "7th={}, normal={}", eg_7th, eg_normal);
 }
 
 // ============================================================================

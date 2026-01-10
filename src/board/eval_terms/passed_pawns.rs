@@ -14,6 +14,16 @@ use crate::board::types::{Bitboard, Color, Piece, Square};
 use super::tables::{ROOK_BEHIND_PASSER_EG, ROOK_BEHIND_PASSER_MG};
 
 impl Board {
+    /// Check if a pawn at the given square is a passed pawn.
+    /// A passed pawn has no enemy pawns ahead of it or on adjacent files.
+    #[must_use]
+    pub fn is_passed_pawn(&self, sq: Square, color: Color) -> bool {
+        let color_idx = color.index();
+        let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+        let pass_mask = PASSED_PAWN_MASK[color_idx][sq.as_index()];
+        (pass_mask.0 & enemy_pawns.0) == 0
+    }
+
     /// Evaluate passed pawns.
     /// Returns `(middlegame_score, endgame_score)` from white's perspective.
     #[must_use]
@@ -104,8 +114,12 @@ impl Board {
 
                     // Check if we have a rook behind (supporting) the passed pawn
                     let behind_mask = match color {
-                        Color::White => Bitboard(fill_south(Bitboard::from_square(sq).0) & file_mask.0),
-                        Color::Black => Bitboard(fill_north(Bitboard::from_square(sq).0) & file_mask.0),
+                        Color::White => {
+                            Bitboard(fill_south(Bitboard::from_square(sq).0) & file_mask.0)
+                        }
+                        Color::Black => {
+                            Bitboard(fill_north(Bitboard::from_square(sq).0) & file_mask.0)
+                        }
                     };
 
                     if (our_rooks.0 & behind_mask.0) != 0 {

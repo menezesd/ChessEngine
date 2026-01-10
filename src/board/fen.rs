@@ -78,7 +78,10 @@ impl Board {
                 && ('a'..='h').contains(&chars[0])
                 && ('1'..='8').contains(&chars[1])
             {
-                Some(Square::new(rank_to_index(chars[1]), file_to_index(chars[0])))
+                Some(Square::new(
+                    rank_to_index(chars[1]),
+                    file_to_index(chars[0]),
+                ))
             } else {
                 return Err(FenError::InvalidEnPassant {
                     found: parts[3].to_string(),

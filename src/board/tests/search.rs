@@ -77,7 +77,8 @@ fn alphabeta_avoids_checkmate() {
 #[test]
 fn alphabeta_returns_none_for_checkmate_position() {
     // White is already checkmated
-    let mut board = Board::from_fen("rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1");
+    let mut board =
+        Board::from_fen("rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1");
     let mut state = SearchState::new(1);
     let stop = AtomicBool::new(false);
 
@@ -107,7 +108,10 @@ fn search_with_node_limit() {
     let result = search(&mut board, &mut state, config, &stop);
 
     // Should complete (due to node limit) and find some move
-    assert!(result.best_move.is_some(), "Should find a move with node limit");
+    assert!(
+        result.best_move.is_some(),
+        "Should find a move with node limit"
+    );
 }
 
 #[test]
@@ -166,7 +170,12 @@ fn search_captures_hanging_queen() {
 
     let mv = best.unwrap();
     // Nxd5 captures the queen
-    assert_eq!(mv.to_string(), "c3d5", "Should capture queen with Nxd5, got {}", mv);
+    assert_eq!(
+        mv.to_string(),
+        "c3d5",
+        "Should capture queen with Nxd5, got {}",
+        mv
+    );
 }
 
 #[test]
@@ -301,7 +310,10 @@ fn search_handles_repetition() {
 
     // Search should handle repetition correctly
     let best = find_best_move(&mut board, &mut state, 4, &stop);
-    assert!(best.is_some(), "Should find a move even with repetition history");
+    assert!(
+        best.is_some(),
+        "Should find a move even with repetition history"
+    );
 }
 
 // ============================================================================
@@ -313,7 +325,10 @@ fn continuation_history_in_search_state() {
     // Use SearchState which properly allocates ContinuationHistory on heap
     let state = SearchState::new(1);
     // All entries should be 0
-    let score = state.tables.continuation_history.score(Piece::Pawn, 0, &EMPTY_MOVE);
+    let score = state
+        .tables
+        .continuation_history
+        .score(Piece::Pawn, 0, &EMPTY_MOVE);
     assert_eq!(score, 0);
 }
 
@@ -325,9 +340,15 @@ fn continuation_history_update_via_state() {
     // Create a test move
     let mv = board.parse_move("e2e4").unwrap();
 
-    state.tables.continuation_history.update(Piece::Pawn, 20, &mv, 5);
+    state
+        .tables
+        .continuation_history
+        .update(Piece::Pawn, 20, &mv, 5);
 
-    let score = state.tables.continuation_history.score(Piece::Pawn, 20, &mv);
+    let score = state
+        .tables
+        .continuation_history
+        .score(Piece::Pawn, 20, &mv);
     assert!(score > 0, "Score should increase after update");
 }
 
@@ -338,11 +359,20 @@ fn continuation_history_decay_via_state() {
 
     let mv = board.parse_move("e2e4").unwrap();
 
-    state.tables.continuation_history.update(Piece::Pawn, 20, &mv, 10);
-    let before = state.tables.continuation_history.score(Piece::Pawn, 20, &mv);
+    state
+        .tables
+        .continuation_history
+        .update(Piece::Pawn, 20, &mv, 10);
+    let before = state
+        .tables
+        .continuation_history
+        .score(Piece::Pawn, 20, &mv);
 
     state.tables.continuation_history.decay();
-    let after = state.tables.continuation_history.score(Piece::Pawn, 20, &mv);
+    let after = state
+        .tables
+        .continuation_history
+        .score(Piece::Pawn, 20, &mv);
 
     assert!(after < before, "Score should decrease after decay");
 }
@@ -354,10 +384,16 @@ fn continuation_history_reset_via_state() {
 
     let mv = board.parse_move("e2e4").unwrap();
 
-    state.tables.continuation_history.update(Piece::Pawn, 20, &mv, 10);
+    state
+        .tables
+        .continuation_history
+        .update(Piece::Pawn, 20, &mv, 10);
     state.tables.continuation_history.reset();
 
-    let score = state.tables.continuation_history.score(Piece::Pawn, 20, &mv);
+    let score = state
+        .tables
+        .continuation_history
+        .score(Piece::Pawn, 20, &mv);
     assert_eq!(score, 0, "Score should be 0 after reset");
 }
 
@@ -373,7 +409,7 @@ fn history_table_bounds() {
     // Test with edge case indices - Ra1 to h8 (an impossible quiet move but valid indices)
     let mv = board.parse_move("a2a4").unwrap();
 
-    state.tables.history.update(&mv, 10);
+    state.tables.history.update(&mv, 10, 0);
     let score = state.tables.history.score(&mv);
     assert!(score > 0);
 }
@@ -387,7 +423,7 @@ fn history_table_saturating_add() {
 
     // Update many times to test saturation
     for _ in 0..1000 {
-        state.tables.history.update(&mv, 10);
+        state.tables.history.update(&mv, 10, 0);
     }
 
     let score = state.tables.history.score(&mv);
@@ -499,7 +535,8 @@ fn finds_back_rank_mate() {
 #[test]
 fn avoids_getting_mated() {
     // Black threatens mate, white must defend
-    let mut board = Board::from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4");
+    let mut board =
+        Board::from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4");
     let mut state = SearchState::new(1);
     let stop = AtomicBool::new(false);
 

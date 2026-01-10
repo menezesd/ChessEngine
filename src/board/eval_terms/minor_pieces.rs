@@ -27,9 +27,8 @@ const OUTPOST_RANKS: [Bitboard; 2] = [
 ];
 
 /// Central files bonus mask (c-f files get extra bonus)
-const CENTRAL_FILES: Bitboard = Bitboard(
-    Bitboard::FILE_C.0 | Bitboard::FILE_D.0 | Bitboard::FILE_E.0 | Bitboard::FILE_F.0,
-);
+const CENTRAL_FILES: Bitboard =
+    Bitboard(Bitboard::FILE_C.0 | Bitboard::FILE_D.0 | Bitboard::FILE_E.0 | Bitboard::FILE_F.0);
 
 impl Board {
     /// Evaluate minor pieces (knights and bishops).
@@ -69,12 +68,14 @@ impl Board {
                         let can_be_attacked = match color {
                             Color::White => {
                                 // Enemy pawns below this square on adjacent files
-                                let mask = adj_files.0 & !Bitboard(0xFFFF_FFFF_FFFF_FFFF << (sq.rank() * 8)).0;
+                                let mask = adj_files.0
+                                    & !Bitboard(0xFFFF_FFFF_FFFF_FFFF << (sq.rank() * 8)).0;
                                 (enemy_pawns.0 & mask) != 0
                             }
                             Color::Black => {
                                 // Enemy pawns above this square on adjacent files
-                                let mask = adj_files.0 & (Bitboard(0xFFFF_FFFF_FFFF_FFFF << ((sq.rank() + 1) * 8)).0);
+                                let mask = adj_files.0
+                                    & (Bitboard(0xFFFF_FFFF_FFFF_FFFF << ((sq.rank() + 1) * 8)).0);
                                 (enemy_pawns.0 & mask) != 0
                             }
                         };
@@ -106,8 +107,8 @@ impl Board {
 
                     let can_be_attacked = match color {
                         Color::White => {
-                            let mask = adj_files.0
-                                & !Bitboard(0xFFFF_FFFF_FFFF_FFFF << (sq.rank() * 8)).0;
+                            let mask =
+                                adj_files.0 & !Bitboard(0xFFFF_FFFF_FFFF_FFFF << (sq.rank() * 8)).0;
                             (enemy_pawns.0 & mask) != 0
                         }
                         Color::Black => {

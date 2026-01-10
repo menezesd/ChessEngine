@@ -77,14 +77,15 @@ impl SimpleSearchContext<'_> {
 
             self.initial_depth = depth;
 
-            // Aspiration window - start narrow, widen exponentially on fail
-            // Use smaller initial window at higher depths for better pruning
+            // Aspiration window - simple fixed delta
             let mut delta = if depth <= 5 { 35 } else { 20 };
+
             let mut alpha = score.saturating_sub(delta);
             let mut beta = score.saturating_add(delta);
 
             loop {
-                let new_score = self.alphabeta(depth, alpha, beta, true, 0, crate::board::EMPTY_MOVE);
+                let new_score =
+                    self.alphabeta(depth, alpha, beta, true, 0, crate::board::EMPTY_MOVE);
 
                 if self.should_stop() {
                     break;
@@ -169,6 +170,7 @@ impl SimpleSearchContext<'_> {
                     pv: pv_str,
                     seldepth: self.state.stats.seldepth,
                     tt_hits: self.state.stats.tt_hits,
+                    multipv: 1, // TODO: implement full MultiPV support
                 };
                 cb(&info);
             }

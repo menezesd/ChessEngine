@@ -31,7 +31,7 @@ impl UciOptions {
         }
     }
 
-    pub fn print(&self, _params: &SearchParams) {
+    pub fn print(&self, params: &SearchParams) {
         println!("id name chess_engine");
         println!("id author Dean Menezes");
         println!(
@@ -66,6 +66,31 @@ impl UciOptions {
             "option name Ponder type check default {}",
             if self.ponder { "true" } else { "false" }
         );
+        // Tunable search parameters for SPSA
+        println!(
+            "option name RFPMargin type spin default {} min 50 max 300",
+            params.rfp_margin
+        );
+        println!(
+            "option name NullMoveReduction type spin default {} min 1 max 5",
+            params.null_reduction
+        );
+        println!(
+            "option name FutilityMargin type spin default {} min 50 max 250",
+            params.futility_margin
+        );
+        println!(
+            "option name RazoringMargin type spin default {} min 150 max 500",
+            params.razor_margin
+        );
+        println!(
+            "option name IIRMinDepth type spin default {} min 3 max 8",
+            params.iir_min_depth
+        );
+        println!(
+            "option name LMRMinDepth type spin default {} min 2 max 6",
+            params.lmr_min_depth
+        );
         println!("uciok");
     }
 
@@ -73,7 +98,7 @@ impl UciOptions {
         &mut self,
         name: &str,
         value: Option<&str>,
-        _state: &mut SearchState,
+        state: &mut SearchState,
     ) -> Option<UciOptionAction> {
         let normalized = name.trim().to_ascii_lowercase();
         match normalized.as_str() {
@@ -140,6 +165,37 @@ impl UciOptions {
             "ponder" => {
                 if let Some(v) = value {
                     self.ponder = matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1");
+                }
+            }
+            // Tunable search parameters for SPSA
+            "rfpmargin" => {
+                if let Some(v) = value.and_then(|v| v.parse::<i32>().ok()) {
+                    state.params_mut().rfp_margin = v.clamp(50, 300);
+                }
+            }
+            "nullmovereduction" => {
+                if let Some(v) = value.and_then(|v| v.parse::<u32>().ok()) {
+                    state.params_mut().null_reduction = v.clamp(1, 5);
+                }
+            }
+            "futilitymargin" => {
+                if let Some(v) = value.and_then(|v| v.parse::<i32>().ok()) {
+                    state.params_mut().futility_margin = v.clamp(50, 250);
+                }
+            }
+            "razoringmargin" => {
+                if let Some(v) = value.and_then(|v| v.parse::<i32>().ok()) {
+                    state.params_mut().razor_margin = v.clamp(150, 500);
+                }
+            }
+            "iirmindepth" => {
+                if let Some(v) = value.and_then(|v| v.parse::<u32>().ok()) {
+                    state.params_mut().iir_min_depth = v.clamp(3, 8);
+                }
+            }
+            "lmrmindepth" => {
+                if let Some(v) = value.and_then(|v| v.parse::<u32>().ok()) {
+                    state.params_mut().lmr_min_depth = v.clamp(2, 6);
                 }
             }
             _ => {}

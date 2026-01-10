@@ -17,8 +17,7 @@ const MIN_MOVES_TO_GO: u64 = 10;
 /// Time control settings for a search.
 ///
 /// This enum unifies different time control modes used by UCI and `XBoard` protocols.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimeControl {
     /// Infinite search - no time limit
     #[default]
@@ -127,7 +126,6 @@ impl TimeControl {
         }
     }
 }
-
 
 /// Compute soft and hard time limits for incremental time control.
 #[allow(clippy::cast_precision_loss)]
@@ -303,11 +301,8 @@ mod tests {
 
     #[test]
     fn time_control_incremental_from_duration() {
-        let tc = TimeControl::incremental(
-            Duration::from_secs(300),
-            Duration::from_secs(3),
-            Some(40),
-        );
+        let tc =
+            TimeControl::incremental(Duration::from_secs(300), Duration::from_secs(3), Some(40));
 
         match tc {
             TimeControl::Incremental {

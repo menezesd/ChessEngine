@@ -205,6 +205,17 @@ impl SimpleSearchContext<'_> {
             // Track if this is a quiet move
             let is_quiet = !m.is_capture() && !m.is_promotion();
 
+            // SEE pruning for quiet moves at shallow depths
+            // Skip moves that lose material by moving to an attacked square
+            if is_quiet
+                && depth <= 3
+                && !in_check
+                && move_count > 1
+                && !self.board.see_quiet_safe(m.from(), m.to())
+            {
+                continue;
+            }
+
             if is_quiet {
                 _quiet_moves_tried += 1;
                 // Track for negative history (only if not the cutoff move)
@@ -256,7 +267,8 @@ impl SimpleSearchContext<'_> {
             // Extensions:
             // 1. Check extension: search one ply deeper when giving check
             // 2. Singular extension: extend TT move if it's singular
-            // 3. Recapture extension: extend when recapturing on the same square
+            // 3. Recapture extension: extend when recapturing valuable pieces on same square
+            // 4. Passed pawn extension: extend advanced passed pawn pushes
             let mut extension = 0u32;
             if gives_check {
                 extension += 1;
@@ -264,9 +276,12 @@ impl SimpleSearchContext<'_> {
             if m == node.tt_move && node.singular_extension > 0 {
                 extension += node.singular_extension;
             }
-            // Recapture extension: DISABLED - causes regression on WAC
-            // Passed pawn extension: DISABLED - causes regression on WAC
-            let new_depth = if move_count == 1 { depth + extension } else { depth - 1 + extension };
+
+            let new_depth = if move_count == 1 {
+                depth + extension
+            } else {
+                depth - 1 + extension
+            };
 
             let mut score: i32;
 
@@ -283,7 +298,8 @@ impl SimpleSearchContext<'_> {
 
                 // Re-search at full depth if reduced search found something
                 if pruning.reduction > 0 && score > alpha {
-                    score = -self.alphabeta(new_depth, -alpha - 1, -alpha, true, ply + 1, EMPTY_MOVE);
+                    score =
+                        -self.alphabeta(new_depth, -alpha - 1, -alpha, true, ply + 1, EMPTY_MOVE);
                 }
 
                 // Re-search with full window if PVS found improvement
@@ -311,7 +327,7 @@ impl SimpleSearchContext<'_> {
                         // Don't penalize the cutoff move itself
                         for quiet_mv in quiets_tried.iter().take(quiets_count) {
                             if *quiet_mv != m && *quiet_mv != EMPTY_MOVE {
-                                self.state.tables.history.penalize(quiet_mv, depth);
+                                self.state.tables.history.penalize(quiet_mv, depth, ply);
                             }
                         }
                         self.handle_beta_cutoff(m, ply, depth, score, best_move);
@@ -428,14 +444,32 @@ impl SimpleSearchContext<'_> {
             } else if m.is_capture() {
                 self.state.tables.mvv_lva_score(self.board, m)
             } else {
-                // Combine history and continuation history for quiet moves
+                // Combine history, continuation history, and countermove history for quiet moves
                 let hist = self.state.tables.history_score(m);
                 let cont_hist = if let Some(piece) = prev_piece {
-                    self.state.tables.continuation_history.score(piece, prev_to, m)
+                    self.state
+                        .tables
+                        .continuation_history
+                        .score(piece, prev_to, m)
                 } else {
                     0
                 };
-                hist + cont_hist
+                // Countermove history: use opponent's previous move and our moving piece
+                let cm_hist = if let Some(opp_piece) = prev_piece {
+                    if let Some((_, our_piece)) = self.board.piece_at(m.from()) {
+                        // Weight countermove history at 0.5x of continuation history
+                        self.state
+                            .tables
+                            .countermove_history
+                            .score(opp_piece, prev_to, our_piece, m)
+                            / 2
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                hist + cont_hist + cm_hist
             };
             scored.push(*m, score);
         }
@@ -458,11 +492,22 @@ impl SimpleSearchContext<'_> {
                 }
             }
 
-            // Update continuation history
+            // Update continuation history and countermove history
             if ply > 0 {
                 if let Some(prev_piece) = self.previous_piece[ply - 1] {
                     let prev_to = self.previous_move[ply - 1].to().index();
-                    self.state.tables.continuation_history.update(prev_piece, prev_to, &m, depth);
+                    self.state
+                        .tables
+                        .continuation_history
+                        .update(prev_piece, prev_to, &m, depth);
+
+                    // Also update countermove history (opponent's piece-to -> our piece-to)
+                    if let Some((_, our_piece)) = self.board.piece_at(m.from()) {
+                        self.state
+                            .tables
+                            .countermove_history
+                            .update(prev_piece, prev_to, our_piece, &m, depth);
+                    }
                 }
             }
         } else if m.is_capture() {
@@ -476,12 +521,15 @@ impl SimpleSearchContext<'_> {
                 } else {
                     Piece::Pawn // Fallback, shouldn't happen
                 };
-                self.state.tables.capture_history.update(attacker, victim, depth);
+                self.state
+                    .tables
+                    .capture_history
+                    .update(attacker, victim, depth);
             }
         }
 
-        // Update history
-        self.state.tables.update_history(&m, depth);
+        // Update history with gravity
+        self.state.tables.update_history(&m, depth, ply);
 
         // Store in TT (allow mate scores too)
         if !self.should_stop() {
@@ -601,6 +649,7 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Alpha-beta search with all pruning and extension techniques
+    #[allow(clippy::too_many_lines)]
     pub fn alphabeta(
         &mut self,
         depth: u32,
@@ -730,8 +779,14 @@ impl SimpleSearchContext<'_> {
             let singular_depth = (depth - 1) / 2;
 
             // Search with TT move excluded
-            let singular_score =
-                self.alphabeta(singular_depth, singular_beta - 1, singular_beta, false, ply, tt_move);
+            let singular_score = self.alphabeta(
+                singular_depth,
+                singular_beta - 1,
+                singular_beta,
+                false,
+                ply,
+                tt_move,
+            );
 
             if singular_score < singular_beta {
                 // TT move is singular - extend it

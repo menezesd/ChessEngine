@@ -29,7 +29,12 @@ fn test_en_passant_make_unmake() {
 fn test_promotion_make_unmake() {
     let mut board = Board::from_fen("8/P7/8/8/8/8/8/K1k5 w - - 0 1");
     let original_hash = board.hash();
-    let mv = find_move(&mut board, Square::new(6, 0), Square::new(7, 0), Some(Piece::Queen));
+    let mv = find_move(
+        &mut board,
+        Square::new(6, 0),
+        Square::new(7, 0),
+        Some(Piece::Queen),
+    );
     let info = board.make_move(mv);
     board.unmake_move(mv, info);
     assert_eq!(board.hash(), original_hash);

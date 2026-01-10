@@ -227,7 +227,8 @@ impl Board {
             if m.from() == Square::new(start_rank, 0) && self.has_castling_right(color, 'Q') {
                 hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][1];
                 self.castling_rights &= !castle_bit(color, 'Q');
-            } else if m.from() == Square::new(start_rank, 7) && self.has_castling_right(color, 'K') {
+            } else if m.from() == Square::new(start_rank, 7) && self.has_castling_right(color, 'K')
+            {
                 hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(color)][0];
                 self.castling_rights &= !castle_bit(color, 'K');
             }
@@ -237,7 +238,9 @@ impl Board {
         if let Some((captured_color, captured_piece)) = captured {
             if captured_piece == Piece::Rook {
                 let start_rank = if captured_color == Color::White { 0 } else { 7 };
-                if m.to() == Square::new(start_rank, 0) && self.has_castling_right(captured_color, 'Q') {
+                if m.to() == Square::new(start_rank, 0)
+                    && self.has_castling_right(captured_color, 'Q')
+                {
                     hash_delta ^= ZOBRIST.castling_keys[color_to_zobrist_index(captured_color)][1];
                     self.castling_rights &= !castle_bit(captured_color, 'Q');
                 } else if m.to() == Square::new(start_rank, 7)
@@ -455,7 +458,11 @@ impl Board {
             .piece_at(rook_sq)
             .expect("Unmake castling: rook missing");
         self.remove_piece(rook_sq, rook_info.0, rook_info.1);
-        self.set_piece(Square::new(m.to().rank(), rook_orig_f), rook_info.0, rook_info.1);
+        self.set_piece(
+            Square::new(m.to().rank(), rook_orig_f),
+            rook_info.0,
+            rook_info.1,
+        );
     }
 
     fn restore_standard_move(&mut self, m: Move, color: Color, info: &UnmakeInfo) {

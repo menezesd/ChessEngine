@@ -82,23 +82,17 @@ impl KillerTable {
 
     #[must_use]
     pub fn primary(&self, ply: usize) -> Move {
-        self.slots
-            .get(ply)
-            .map_or(super::EMPTY_MOVE, |row| row[0])
+        self.slots.get(ply).map_or(super::EMPTY_MOVE, |row| row[0])
     }
 
     #[must_use]
     pub fn secondary(&self, ply: usize) -> Move {
-        self.slots
-            .get(ply)
-            .map_or(super::EMPTY_MOVE, |row| row[1])
+        self.slots.get(ply).map_or(super::EMPTY_MOVE, |row| row[1])
     }
 
     #[must_use]
     pub fn tertiary(&self, ply: usize) -> Move {
-        self.slots
-            .get(ply)
-            .map_or(super::EMPTY_MOVE, |row| row[2])
+        self.slots.get(ply).map_or(super::EMPTY_MOVE, |row| row[2])
     }
 
     pub fn update(&mut self, ply: usize, mv: Move) {
@@ -145,23 +139,25 @@ impl HistoryTable {
         self.entries.get(idx).copied().unwrap_or(0)
     }
 
-    pub fn update(&mut self, mv: &Move, depth: u32) {
+    /// Update history score for a move that caused a beta cutoff
+    pub fn update(&mut self, mv: &Move, depth: u32, _ply: usize) {
         let from = mv.from().index();
         let to = mv.to().index();
         let idx = from * 64 + to;
         if let Some(entry) = self.entries.get_mut(idx) {
-            *entry = entry.saturating_add((depth * depth * depth) as i32);
+            let bonus = (depth * depth * depth) as i32;
+            *entry = entry.saturating_add(bonus);
         }
     }
 
     /// Penalize a move that failed to cause a cutoff (negative history)
-    pub fn penalize(&mut self, mv: &Move, depth: u32) {
+    pub fn penalize(&mut self, mv: &Move, depth: u32, _ply: usize) {
         let from = mv.from().index();
         let to = mv.to().index();
         let idx = from * 64 + to;
         if let Some(entry) = self.entries.get_mut(idx) {
-            // Use depth^2 for penalty (less aggressive than depth^3 bonus)
-            *entry = entry.saturating_sub((depth * depth) as i32);
+            let penalty = (depth * depth) as i32;
+            *entry = entry.saturating_sub(penalty);
         }
     }
 
@@ -285,6 +281,79 @@ impl ContinuationHistory {
     }
 }
 
+/// Countermove history table - tracks what responses work well against opponent moves.
+///
+/// Unlike continuation history (which uses our previous move), this uses the opponent's
+/// previous move (`prev_piece`, `prev_to`) and our current move's piece type.
+/// Indexed by `[opp_piece * 64 + opp_to][our_piece * 64 + our_to]`.
+pub struct CountermoveHistory {
+    /// `[prev_piece * 64 + prev_to]` -> `[piece * 64 + to]` -> score
+    entries: Box<[[i16; 4096]; 384]>,
+}
+
+impl Default for CountermoveHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CountermoveHistory {
+    #[must_use]
+    pub fn new() -> Self {
+        CountermoveHistory {
+            entries: Box::new([[0i16; 4096]; 384]),
+        }
+    }
+
+    /// Get countermove history score for responding to opponent's move
+    #[must_use]
+    pub fn score(&self, opp_piece: Piece, opp_to: usize, our_piece: Piece, mv: &Move) -> i32 {
+        let outer_idx = opp_piece as usize * 64 + opp_to;
+        let inner_idx = our_piece as usize * 64 + mv.to().index();
+        if outer_idx < 384 {
+            i32::from(self.entries[outer_idx][inner_idx])
+        } else {
+            0
+        }
+    }
+
+    /// Update countermove history on beta cutoff
+    pub fn update(
+        &mut self,
+        opp_piece: Piece,
+        opp_to: usize,
+        our_piece: Piece,
+        mv: &Move,
+        depth: u32,
+    ) {
+        let outer_idx = opp_piece as usize * 64 + opp_to;
+        let inner_idx = our_piece as usize * 64 + mv.to().index();
+        if outer_idx < 384 {
+            let bonus = (depth * depth) as i16;
+            let entry = &mut self.entries[outer_idx][inner_idx];
+            *entry = entry.saturating_add(bonus).min(16000);
+        }
+    }
+
+    /// Decay all entries
+    pub fn decay(&mut self) {
+        for outer in self.entries.iter_mut() {
+            for entry in outer.iter_mut() {
+                *entry >>= 2;
+            }
+        }
+    }
+
+    /// Reset all entries
+    pub fn reset(&mut self) {
+        for outer in self.entries.iter_mut() {
+            for entry in outer.iter_mut() {
+                *entry = 0;
+            }
+        }
+    }
+}
+
 /// Capture history table - tracks which captures historically cause cutoffs.
 /// Indexed by `[attacker_piece][victim_piece]` for a 6x6 = 36 entry table.
 pub struct CaptureHistory {
@@ -338,6 +407,8 @@ impl CaptureHistory {
 pub struct SearchTables {
     /// Shared transposition table (thread-safe, can be shared across workers)
     pub tt: Arc<TranspositionTable>,
+    /// Shared pawn hash table (thread-safe, can be shared across workers)
+    pub pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
     /// Per-thread killer move table
     pub killer_moves: KillerTable,
     /// Per-thread history heuristic table
@@ -346,6 +417,8 @@ pub struct SearchTables {
     pub counter_moves: CounterMoveTable,
     /// Per-thread continuation history table
     pub continuation_history: ContinuationHistory,
+    /// Per-thread countermove history table (response to opponent's move)
+    pub countermove_history: CountermoveHistory,
     /// Per-thread capture history table
     pub capture_history: CaptureHistory,
 }
@@ -399,9 +472,9 @@ impl SearchTables {
         self.history.score(mv)
     }
 
-    /// Update history on beta cutoff
-    pub fn update_history(&mut self, mv: &Move, depth: u32) {
-        self.history.update(mv, depth);
+    /// Update history on beta cutoff with gravity
+    pub fn update_history(&mut self, mv: &Move, depth: u32, ply: usize) {
+        self.history.update(mv, depth, ply);
     }
 
     /// Reset history table
@@ -434,10 +507,12 @@ impl SearchState {
             },
             tables: SearchTables {
                 tt: Arc::new(TranspositionTable::new(tt_mb)),
+                pawn_hash: Arc::new(crate::pawn_hash::PawnHashTable::default()),
                 killer_moves: KillerTable::new(),
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
                 continuation_history: ContinuationHistory::new(),
+                countermove_history: CountermoveHistory::new(),
                 capture_history: CaptureHistory::new(),
             },
             generation: 0,
@@ -451,7 +526,11 @@ impl SearchState {
     /// Create a new `SearchState` with a shared transposition table.
     /// Used for SMP workers that share a TT but have separate local tables.
     #[must_use]
-    pub fn with_shared_tt(tt: Arc<TranspositionTable>, generation: u16) -> Self {
+    pub fn with_shared_tt(
+        tt: Arc<TranspositionTable>,
+        pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
+        generation: u16,
+    ) -> Self {
         SearchState {
             stats: SearchStats {
                 nodes: 0,
@@ -462,10 +541,12 @@ impl SearchState {
             },
             tables: SearchTables {
                 tt,
+                pawn_hash,
                 killer_moves: KillerTable::new(),
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
                 continuation_history: ContinuationHistory::new(),
+                countermove_history: CountermoveHistory::new(),
                 capture_history: CaptureHistory::new(),
             },
             generation,
@@ -482,6 +563,12 @@ impl SearchState {
         Arc::clone(&self.tables.tt)
     }
 
+    /// Get a clone of the shared pawn hash table Arc for use by SMP workers
+    #[must_use]
+    pub fn shared_pawn_hash(&self) -> Arc<crate::pawn_hash::PawnHashTable> {
+        Arc::clone(&self.tables.pawn_hash)
+    }
+
     pub fn new_search(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.stats.reset_search();
@@ -490,6 +577,7 @@ impl SearchState {
         // Decay history and clear tactical helpers to avoid stale biases.
         self.tables.history.decay();
         self.tables.continuation_history.decay();
+        self.tables.countermove_history.decay();
         self.tables.killer_moves.reset();
         self.tables.counter_moves.reset();
     }
@@ -690,6 +778,9 @@ pub struct SearchIterationInfo {
     pub pv: String,
     pub seldepth: u32,
     pub tt_hits: u64,
+    /// Which PV line this is (1 = best, 2 = second best, etc.)
+    /// Currently always 1 - full `MultiPV` is not yet implemented.
+    pub multipv: u32,
 }
 
 /// Callback type for iteration info.

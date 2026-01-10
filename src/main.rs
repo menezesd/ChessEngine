@@ -271,15 +271,36 @@ impl UciSession {
 }
 
 fn print_uci_info(info: &SearchIterationInfo) {
+    // Include multipv in output for UCI compliance
+    let multipv_str = if info.multipv > 1 {
+        format!(" multipv {}", info.multipv)
+    } else {
+        String::new()
+    };
+
     if let Some(mate) = info.mate_in {
         println!(
-            "info depth {} seldepth {} nodes {} nps {} time {} score mate {} pv {}",
-            info.depth, info.seldepth, info.nodes, info.nps, info.time_ms, mate, info.pv
+            "info depth {} seldepth {}{} nodes {} nps {} time {} score mate {} pv {}",
+            info.depth,
+            info.seldepth,
+            multipv_str,
+            info.nodes,
+            info.nps,
+            info.time_ms,
+            mate,
+            info.pv
         );
     } else {
         println!(
-            "info depth {} seldepth {} nodes {} nps {} time {} score cp {} pv {}",
-            info.depth, info.seldepth, info.nodes, info.nps, info.time_ms, info.score, info.pv
+            "info depth {} seldepth {}{} nodes {} nps {} time {} score cp {} pv {}",
+            info.depth,
+            info.seldepth,
+            multipv_str,
+            info.nodes,
+            info.nps,
+            info.time_ms,
+            info.score,
+            info.pv
         );
     }
 }

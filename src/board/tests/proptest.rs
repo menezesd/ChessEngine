@@ -251,7 +251,7 @@ proptest! {
         );
 
         for _ in 0..num_updates {
-            table.update(&mv, depth);
+            table.update(&mv, depth, 0);
         }
 
         prop_assert!(table.score(&mv) >= 0,
@@ -271,7 +271,7 @@ proptest! {
         );
 
         // Update with significant depth
-        table.update(&mv, 5);
+        table.update(&mv, 5, 0);
         let before = table.score(&mv);
 
         table.decay();
