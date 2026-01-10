@@ -4,6 +4,7 @@
 //! Implements tapered evaluation with advanced evaluation terms including:
 //! - Material and piece-square tables (incremental)
 //! - Bishop pair bonus
+//! - Bishop vs knight imbalance (bishops better in open positions)
 //! - Mobility
 //! - Pawn structure (passed, doubled, isolated, backward)
 //! - King safety (attack units, pawn shield)
@@ -21,6 +22,11 @@ const TEMPO_BONUS: i32 = 11;
 
 /// Total phase value (sum of all pieces' phase weights at game start)
 const PHASE_TOTAL: i32 = 24;
+
+/// Bishop vs Knight imbalance bonus per pawn difference from 8.
+/// Bishops are worth more in open positions (fewer pawns).
+/// Formula: bishop_bonus = (8 - total_pawns) * BISHOP_OPEN_BONUS per bishop advantage
+const BISHOP_OPEN_BONUS: i32 = 4;
 
 /// Phase factors for tapered evaluation.
 ///
@@ -77,8 +83,22 @@ impl Board {
         // Bishop pair bonus
         let white_bishops = self.pieces[0][Piece::Bishop.index()].popcount();
         let black_bishops = self.pieces[1][Piece::Bishop.index()].popcount();
-        let bishop_bonus =
+        let bishop_pair_bonus =
             BISHOP_PAIR_BONUS * ((white_bishops / 2) as i32 - (black_bishops / 2) as i32);
+
+        // Bishop vs Knight imbalance: bishops better in open positions
+        let white_knights = self.pieces[0][Piece::Knight.index()].popcount();
+        let black_knights = self.pieces[1][Piece::Knight.index()].popcount();
+        let total_pawns = self.pieces[0][Piece::Pawn.index()].popcount()
+            + self.pieces[1][Piece::Pawn.index()].popcount();
+        let openness = (16 - total_pawns as i32).max(0); // 0 when 16 pawns, 16 when 0 pawns
+
+        // Net bishop advantage (bishops - knights for each side)
+        let white_bishop_adv = white_bishops as i32 - white_knights as i32;
+        let black_bishop_adv = black_bishops as i32 - black_knights as i32;
+        let bishop_imbalance = (white_bishop_adv - black_bishop_adv) * openness * BISHOP_OPEN_BONUS / 8;
+
+        let bishop_bonus = bishop_pair_bonus + bishop_imbalance;
 
         // Compute attack context once for all evaluation terms
         let ctx = self.compute_attack_context();
@@ -139,6 +159,7 @@ impl Board {
 
     /// Simple/fast evaluation for quiescence or pruning decisions.
     /// Only uses incremental material + PST + bishop pair.
+    /// Note: Bishop imbalance is only in full eval to keep simple eval fast.
     #[must_use]
     pub fn evaluate_simple(&self) -> i32 {
         let c_idx = usize::from(!self.white_to_move);
@@ -149,6 +170,7 @@ impl Board {
         let mideval = self.eval_mg[c_idx] - self.eval_mg[opp_idx];
         let endeval = self.eval_eg[c_idx] - self.eval_eg[opp_idx];
 
+        // Bishop pair bonus only (imbalance is in full eval)
         let our_bishops = self.pieces[c_idx][Piece::Bishop.index()].popcount();
         let opp_bishops = self.pieces[opp_idx][Piece::Bishop.index()].popcount();
         let bishop_bonus =

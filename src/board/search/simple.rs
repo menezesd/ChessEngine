@@ -204,17 +204,6 @@ impl SimpleSearchContext<'_> {
             // Track if this is a quiet move
             let is_quiet = !m.is_capture() && !m.is_promotion();
 
-            // Late Move Pruning: DISABLED - even threshold 30 causes regression
-            // The engine's tactical strength relies on searching all moves at shallow depths
-            // if !is_pv
-            //     && !in_check
-            //     && is_quiet
-            //     && depth == 1
-            //     && _quiet_moves_tried >= 30
-            // {
-            //     continue;
-            // }
-
             if is_quiet {
                 _quiet_moves_tried += 1;
                 // Track for negative history (only if not the cutoff move)
@@ -388,7 +377,7 @@ impl SimpleSearchContext<'_> {
     /// Check if the position is improving (eval better than 2 plies ago)
     #[inline]
     fn is_improving(&self, ply: usize, eval: i32) -> bool {
-        if ply < 2 {
+        if ply < 2 || ply >= MAX_PLY {
             true
         } else {
             eval > self.static_eval[ply - 2]
