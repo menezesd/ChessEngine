@@ -77,10 +77,11 @@ impl SimpleSearchContext<'_> {
 
             self.initial_depth = depth;
 
-            // Aspiration window
-            let mut delta = 30;
-            let mut alpha = score - delta;
-            let mut beta = score + delta;
+            // Aspiration window - start narrow, widen exponentially on fail
+            // Use smaller initial window at higher depths for better pruning
+            let mut delta = if depth <= 5 { 35 } else { 20 };
+            let mut alpha = score.saturating_sub(delta);
+            let mut beta = score.saturating_add(delta);
 
             loop {
                 let new_score = self.alphabeta(depth, alpha, beta, true, 0, crate::board::EMPTY_MOVE);
@@ -96,18 +97,20 @@ impl SimpleSearchContext<'_> {
                 }
 
                 if new_score >= beta {
+                    // Fail high - widen beta
                     beta = beta.saturating_add(delta);
-                    delta = delta.saturating_add(delta);
+                    delta = delta.saturating_mul(3) / 2; // Grow by 1.5x instead of 2x
                 } else if new_score <= alpha {
+                    // Fail low - widen alpha more aggressively
                     alpha = alpha.saturating_sub(delta);
-                    delta = delta.saturating_add(delta);
+                    delta = delta.saturating_mul(2); // Fail low is more critical, widen faster
                 } else {
                     score = new_score;
                     break;
                 }
 
-                // Prevent infinite loop with very wide window
-                if delta > 1000 {
+                // Prevent infinite loop - fall back to full window
+                if delta > 800 {
                     alpha = -30000;
                     beta = 30000;
                 }

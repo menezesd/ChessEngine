@@ -77,7 +77,7 @@ struct MovePruning {
 }
 
 impl SimpleSearchContext<'_> {
-    /// Precomputed LMR table
+    /// Precomputed LMR table - slightly more aggressive than before
     #[allow(clippy::cast_precision_loss)]
     fn lmr_table() -> &'static [[u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH] {
         use std::sync::OnceLock;
@@ -86,7 +86,8 @@ impl SimpleSearchContext<'_> {
             let mut t = [[0u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH];
             for (depth, row) in t.iter_mut().enumerate().skip(1) {
                 for (idx, cell) in row.iter_mut().enumerate().skip(1) {
-                    let val = (0.53 + (depth as f64).ln() * (idx as f64).ln() / 2.44).floor();
+                    // Slightly more aggressive: (0.4 vs 0.53 base, 2.3 vs 2.44 divisor)
+                    let val = (0.4 + (depth as f64).ln() * (idx as f64).ln() / 2.3).floor();
                     *cell = val.max(0.0) as u32;
                 }
             }

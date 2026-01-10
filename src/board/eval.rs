@@ -110,6 +110,8 @@ impl Board {
         let (king_mg, king_eg) = self.eval_king_safety_with_context(&ctx);
         let (shield_mg, shield_eg) = self.eval_king_shield();
         let (rook_mg, rook_eg) = self.eval_rooks();
+        let (minor_mg, minor_eg) = self.eval_minor_pieces(&ctx);
+        let tropism_mg = self.eval_tropism();
 
         // Combined evaluation for passed pawns and hanging pieces (shares attack computation)
         let (pass_mg, pass_eg, hanging) = self.eval_attacks_dependent_with_context(&ctx);
@@ -123,6 +125,8 @@ impl Board {
             + king_mg
             + shield_mg
             + rook_mg
+            + minor_mg
+            + tropism_mg
             + hanging;
 
         // Combine all endgame terms
@@ -134,6 +138,7 @@ impl Board {
             + king_eg
             + shield_eg
             + rook_eg
+            + minor_eg
             + hanging;
 
         // Tapered evaluation

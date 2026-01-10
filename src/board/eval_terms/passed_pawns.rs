@@ -5,10 +5,13 @@
 #![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
 
 use crate::board::masks::{
-    relative_rank, PASSED_PAWN_BONUS_EG, PASSED_PAWN_BONUS_MG, PASSED_PAWN_MASK,
+    fill_north, fill_south, relative_rank, FILES, PASSED_PAWN_BONUS_EG, PASSED_PAWN_BONUS_MG,
+    PASSED_PAWN_MASK,
 };
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece, Square};
+
+use super::tables::{ROOK_BEHIND_PASSER_EG, ROOK_BEHIND_PASSER_MG};
 
 impl Board {
     /// Evaluate passed pawns.
@@ -92,6 +95,29 @@ impl Board {
 
                     mg += sign * (base_mg * multiplier / 100);
                     eg += sign * (base_eg * multiplier / 100);
+
+                    // Rook behind passed pawn bonus
+                    let file = sq.file();
+                    let file_mask = FILES[file];
+                    let our_rooks = self.pieces[color_idx][Piece::Rook.index()];
+                    let their_rooks = self.pieces[1 - color_idx][Piece::Rook.index()];
+
+                    // Check if we have a rook behind (supporting) the passed pawn
+                    let behind_mask = match color {
+                        Color::White => Bitboard(fill_south(Bitboard::from_square(sq).0) & file_mask.0),
+                        Color::Black => Bitboard(fill_north(Bitboard::from_square(sq).0) & file_mask.0),
+                    };
+
+                    if (our_rooks.0 & behind_mask.0) != 0 {
+                        mg += sign * ROOK_BEHIND_PASSER_MG;
+                        eg += sign * ROOK_BEHIND_PASSER_EG;
+                    }
+
+                    // Penalty if enemy rook is behind our passed pawn (blocking)
+                    if (their_rooks.0 & behind_mask.0) != 0 {
+                        mg -= sign * (ROOK_BEHIND_PASSER_MG / 2);
+                        eg -= sign * (ROOK_BEHIND_PASSER_EG / 2);
+                    }
                 }
             }
         }
