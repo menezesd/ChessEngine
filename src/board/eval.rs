@@ -117,6 +117,18 @@ impl Board {
         // Combined evaluation for passed pawns and hanging pieces (shares attack computation)
         let (pass_mg, pass_eg, hanging) = self.eval_attacks_dependent_with_context(&ctx);
 
+        // New advanced evaluation terms
+        let (coord_mg, coord_eg) = self.eval_coordination(&ctx);
+        let (pawn_adv_mg, pawn_adv_eg) = self.eval_pawn_advanced();
+        let (weak_mg, weak_eg) = self.eval_weak_squares(&ctx);
+        let (kdanger_mg, kdanger_eg) = self.eval_king_danger(&ctx);
+        let (endgame_mg, endgame_eg) = self.eval_endgame_patterns();
+        let (space_mg, space_eg) = self.eval_space_control(&ctx);
+        let (threats_mg, threats_eg) = self.eval_threats_advanced(&ctx);
+        let (quality_mg, quality_eg) = self.eval_piece_quality(&ctx);
+        let (imbal_mg, imbal_eg) = self.eval_imbalances();
+        let (init_mg, init_eg) = self.eval_initiative(&ctx);
+
         // Combine all middlegame terms
         let total_mg = base_mg
             + bishop_bonus
@@ -128,7 +140,17 @@ impl Board {
             + rook_mg
             + minor_mg
             + tropism_mg
-            + hanging;
+            + hanging
+            + coord_mg
+            + pawn_adv_mg
+            + weak_mg
+            + kdanger_mg
+            + endgame_mg
+            + space_mg
+            + threats_mg
+            + quality_mg
+            + imbal_mg
+            + init_mg;
 
         // Combine all endgame terms
         let total_eg = base_eg
@@ -140,7 +162,17 @@ impl Board {
             + shield_eg
             + rook_eg
             + minor_eg
-            + hanging;
+            + hanging
+            + coord_eg
+            + pawn_adv_eg
+            + weak_eg
+            + kdanger_eg
+            + endgame_eg
+            + space_eg
+            + threats_eg
+            + quality_eg
+            + imbal_eg
+            + init_eg;
 
         // Tapered evaluation
         let mut score = phase.taper(total_mg, total_eg) + TEMPO_BONUS;
