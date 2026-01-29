@@ -264,6 +264,42 @@ impl SimpleSearchContext<'_> {
 
             moves_tried += 1;
 
+            // Futility pruning: skip quiet moves that can't improve alpha
+            // Only at shallow depths, when not in check, move doesn't give check
+            if is_quiet
+                && !in_check
+                && !gives_check
+                && depth <= 6
+                && moves_tried > 1
+                && !is_pv
+            {
+                let static_eval = if ply < MAX_PLY {
+                    self.static_eval[ply]
+                } else {
+                    0
+                };
+                let futility_margin = self.state.params.futility_margin * depth as i32;
+                if static_eval + futility_margin <= alpha {
+                    self.board.unmake_move(m, info);
+                    continue;
+                }
+            }
+
+            // Late Move Pruning (LMP): skip late quiet moves at shallow depths
+            // Based on the idea that late moves in ordering are unlikely to be good
+            if is_quiet
+                && !in_check
+                && !gives_check
+                && depth <= self.state.params.lmp_min_depth
+                && !is_pv
+            {
+                let lmp_threshold = self.state.params.lmp_move_limit + depth as usize * depth as usize;
+                if moves_tried > lmp_threshold {
+                    self.board.unmake_move(m, info);
+                    continue;
+                }
+            }
+
             let mut pruning = MovePruning {
                 skip: false,
                 reduction: 0,
