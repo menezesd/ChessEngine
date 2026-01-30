@@ -403,6 +403,69 @@ impl CaptureHistory {
     }
 }
 
+/// Correction history - tracks how wrong static eval is for similar pawn structures.
+/// When search finds a more accurate score than static eval, we store the correction
+/// indexed by pawn hash. Future positions with similar pawn structures get this
+/// correction applied to their static eval.
+const CORRECTION_HISTORY_SIZE: usize = 16384;
+
+pub struct CorrectionHistory {
+    /// Indexed by pawn_hash % size, stores weighted average correction
+    corrections: Box<[i16; CORRECTION_HISTORY_SIZE]>,
+}
+
+impl Default for CorrectionHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CorrectionHistory {
+    #[must_use]
+    pub fn new() -> Self {
+        CorrectionHistory {
+            corrections: Box::new([0; CORRECTION_HISTORY_SIZE]),
+        }
+    }
+
+    fn index(pawn_hash: u64) -> usize {
+        (pawn_hash as usize) % CORRECTION_HISTORY_SIZE
+    }
+
+    /// Get correction for a position based on pawn structure
+    #[must_use]
+    pub fn get(&self, pawn_hash: u64) -> i32 {
+        self.corrections[Self::index(pawn_hash)] as i32
+    }
+
+    /// Update correction when we find search score differs from static eval
+    /// Uses exponential moving average: new = old * (1-weight) + correction * weight
+    pub fn update(&mut self, pawn_hash: u64, static_eval: i32, search_score: i32, depth: u32) {
+        // Only update for reasonable depths and non-mate scores
+        if depth < 2 || search_score.abs() > 20000 {
+            return;
+        }
+
+        let correction = search_score - static_eval;
+        // Clamp correction to reasonable range
+        let correction = correction.clamp(-500, 500);
+
+        let idx = Self::index(pawn_hash);
+        let old = self.corrections[idx] as i32;
+
+        // Weight based on depth (deeper = more reliable)
+        let weight = (depth.min(8) * 8) as i32; // 16-64 out of 256
+        let new_val = (old * (256 - weight) + correction * weight) / 256;
+
+        self.corrections[idx] = new_val.clamp(-1000, 1000) as i16;
+    }
+
+    /// Reset all corrections
+    pub fn reset(&mut self) {
+        self.corrections.fill(0);
+    }
+}
+
 /// Tables used during search (TT, killers, history, counter moves)
 pub struct SearchTables {
     /// Shared transposition table (thread-safe, can be shared across workers)
@@ -421,6 +484,8 @@ pub struct SearchTables {
     pub countermove_history: CountermoveHistory,
     /// Per-thread capture history table
     pub capture_history: CaptureHistory,
+    /// Per-thread correction history table
+    pub correction_history: CorrectionHistory,
 }
 
 impl SearchTables {
@@ -514,6 +579,7 @@ impl SearchState {
                 continuation_history: ContinuationHistory::new(),
                 countermove_history: CountermoveHistory::new(),
                 capture_history: CaptureHistory::new(),
+                correction_history: CorrectionHistory::new(),
             },
             generation: 0,
             last_move: super::EMPTY_MOVE,
@@ -548,6 +614,7 @@ impl SearchState {
                 continuation_history: ContinuationHistory::new(),
                 countermove_history: CountermoveHistory::new(),
                 capture_history: CaptureHistory::new(),
+                correction_history: CorrectionHistory::new(),
             },
             generation,
             last_move: super::EMPTY_MOVE,

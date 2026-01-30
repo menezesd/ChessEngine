@@ -88,8 +88,8 @@ impl SimpleSearchContext<'_> {
             let mut t = [[0u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH];
             for (depth, row) in t.iter_mut().enumerate().skip(1) {
                 for (idx, cell) in row.iter_mut().enumerate().skip(1) {
-                    // Slightly more aggressive: (0.4 vs 0.53 base, 2.3 vs 2.44 divisor)
-                    let val = (0.4 + (depth as f64).ln() * (idx as f64).ln() / 2.3).floor();
+                    // Stockfish-like LMR: base 0.77, divisor 2.36
+                    let val = (0.77 + (depth as f64).ln() * (idx as f64).ln() / 2.36).floor();
                     *cell = val.max(0.0) as u32;
                 }
             }
@@ -408,6 +408,20 @@ impl SimpleSearchContext<'_> {
         }
 
         self.store_tt(depth, best_score, raised_alpha, best_move);
+
+        // Update correction history for exact bounds (when we have reliable score vs static eval)
+        if raised_alpha && ply < MAX_PLY && !in_check && best_score.abs() < 20000 {
+            let pawn_hash = self.board.pawn_hash();
+            let raw_eval = self.static_eval[ply];
+            // Remove the previously applied correction to get raw eval
+            let old_correction = self.state.tables.correction_history.get(pawn_hash);
+            let static_eval_raw = raw_eval - old_correction;
+            self.state
+                .tables
+                .correction_history
+                .update(pawn_hash, static_eval_raw, best_score, depth);
+        }
+
         best_score
     }
 
@@ -814,10 +828,19 @@ impl SimpleSearchContext<'_> {
         }
 
         // Static evaluation for pruning decisions
-        let eval = if in_check {
+        let raw_eval = if in_check {
             -30000 // Don't use static eval when in check
         } else {
             self.evaluate_simple()
+        };
+
+        // Apply correction history to improve static eval accuracy
+        let eval = if in_check {
+            raw_eval
+        } else {
+            let pawn_hash = self.board.pawn_hash();
+            let correction = self.state.tables.correction_history.get(pawn_hash);
+            (raw_eval + correction).clamp(-29000, 29000)
         };
 
         // Store eval for improving detection
