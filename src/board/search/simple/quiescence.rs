@@ -1,7 +1,7 @@
 use super::super::constants::{MATE_THRESHOLD, MAX_QSEARCH_DEPTH};
 use super::super::move_order::piece_value;
 use super::SimpleSearchContext;
-use crate::board::ScoredMoveList;
+use crate::board::{ScoredMoveList, EMPTY_MOVE};
 
 /// Delta pruning safety margin (centipawns)
 const DELTA_MARGIN: i32 = 200;
@@ -37,10 +37,23 @@ impl SimpleSearchContext<'_> {
             self.board.generate_tactical_moves()
         };
 
-        // Sort captures by MVV-LVA (using stack-allocated list)
+        // Probe TT for move ordering only (not cutoff - depth semantics differ)
+        let tt_move = self
+            .state
+            .tables
+            .tt
+            .probe(self.board.hash)
+            .and_then(|e| e.best_move())
+            .unwrap_or(EMPTY_MOVE);
+
+        // Sort captures by MVV-LVA, with TT move first (using stack-allocated list)
         let mut sorted_moves = ScoredMoveList::new();
         for m in &moves {
-            let score = self.state.tables.mvv_lva_score(self.board, m);
+            let score = if *m == tt_move {
+                1_000_000 // TT move first
+            } else {
+                self.state.tables.mvv_lva_score(self.board, m)
+            };
             sorted_moves.push(*m, score);
         }
         if sorted_moves.len() > 3 {
