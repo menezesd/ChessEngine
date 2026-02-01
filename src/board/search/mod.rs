@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use crate::tt::TranspositionTable;
 
+use super::nnue::NnueNetwork;
 use super::{Board, Move, Piece, MAX_PLY};
 pub use params::SearchParams;
 
@@ -472,6 +473,8 @@ pub struct SearchTables {
     pub tt: Arc<TranspositionTable>,
     /// Shared pawn hash table (thread-safe, can be shared across workers)
     pub pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
+    /// Shared NNUE network (optional, loaded from file)
+    pub nnue: Option<Arc<NnueNetwork>>,
     /// Per-thread killer move table
     pub killer_moves: KillerTable,
     /// Per-thread history heuristic table
@@ -573,6 +576,7 @@ impl SearchState {
             tables: SearchTables {
                 tt: Arc::new(TranspositionTable::new(tt_mb)),
                 pawn_hash: Arc::new(crate::pawn_hash::PawnHashTable::default()),
+                nnue: None,
                 killer_moves: KillerTable::new(),
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
@@ -589,12 +593,13 @@ impl SearchState {
         }
     }
 
-    /// Create a new `SearchState` with a shared transposition table.
-    /// Used for SMP workers that share a TT but have separate local tables.
+    /// Create a new `SearchState` with shared tables.
+    /// Used for SMP workers that share TT, pawn hash, and NNUE but have separate local tables.
     #[must_use]
-    pub fn with_shared_tt(
+    pub fn with_shared_tables(
         tt: Arc<TranspositionTable>,
         pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
+        nnue: Option<Arc<NnueNetwork>>,
         generation: u16,
     ) -> Self {
         SearchState {
@@ -608,6 +613,7 @@ impl SearchState {
             tables: SearchTables {
                 tt,
                 pawn_hash,
+                nnue,
                 killer_moves: KillerTable::new(),
                 history: HistoryTable::new(),
                 counter_moves: CounterMoveTable::new(),
@@ -622,6 +628,19 @@ impl SearchState {
             params: SearchParams::default(),
             trace: false,
         }
+    }
+
+    /// Load NNUE network from file
+    pub fn load_nnue<P: AsRef<std::path::Path>>(&mut self, path: P) -> std::io::Result<()> {
+        let network = NnueNetwork::load(path)?;
+        self.tables.nnue = Some(Arc::new(network));
+        Ok(())
+    }
+
+    /// Get a clone of the shared NNUE network Arc for use by SMP workers
+    #[must_use]
+    pub fn shared_nnue(&self) -> Option<Arc<NnueNetwork>> {
+        self.tables.nnue.clone()
     }
 
     /// Get a clone of the shared TT Arc for use by SMP workers

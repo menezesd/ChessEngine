@@ -445,13 +445,18 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Evaluate position from side-to-move's perspective
+    /// Uses NNUE if available, otherwise falls back to HCE
     #[inline]
     fn evaluate(&self) -> i32 {
-        // Use simple evaluation for faster search
-        self.board.evaluate_simple()
+        if let Some(ref nnue) = self.state.tables.nnue {
+            self.board.evaluate_nnue(nnue)
+        } else {
+            self.board.evaluate_simple()
+        }
     }
 
     /// Fast/simple evaluation for pruning decisions
+    /// Always uses HCE for speed (NNUE is more expensive)
     #[inline]
     fn evaluate_simple(&self) -> i32 {
         self.board.evaluate_simple()

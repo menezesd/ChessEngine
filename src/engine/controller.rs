@@ -107,17 +107,48 @@ pub struct EngineController {
     num_threads: usize,
 }
 
+/// Default NNUE file paths to try loading
+const DEFAULT_NNUE_PATHS: &[&str] = &[
+    "trained_new_combined.nnue",
+    "trained.nnue",
+    "default.nnue",
+];
+
 impl EngineController {
     /// Create a new engine controller
     #[must_use]
     pub fn new(tt_mb: usize) -> Self {
-        EngineController {
+        let mut controller = EngineController {
             board: Board::new(),
             search_state: Arc::new(Mutex::new(SearchState::new(tt_mb))),
             current_job: None,
             info_callback: None,
             num_threads: 1,
+        };
+
+        // Try to auto-load a default NNUE file
+        controller.try_load_default_nnue();
+
+        controller
+    }
+
+    /// Try to load a default NNUE file from common paths
+    fn try_load_default_nnue(&mut self) {
+        for path in DEFAULT_NNUE_PATHS {
+            if std::path::Path::new(path).exists() {
+                if self.load_nnue(path).is_ok() {
+                    eprintln!("info string Loaded NNUE: {}", path);
+                    return;
+                }
+            }
         }
+        // No NNUE loaded - using HCE
+    }
+
+    /// Load NNUE network from file
+    pub fn load_nnue<P: AsRef<std::path::Path>>(&mut self, path: P) -> std::io::Result<()> {
+        let mut state = self.search_state.lock();
+        state.load_nnue(path)
     }
 
     /// Set the number of search threads for SMP

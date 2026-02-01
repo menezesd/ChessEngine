@@ -217,4 +217,46 @@ impl Board {
 
         phase.taper(mideval, endeval) + bishop_bonus + TEMPO_BONUS
     }
+
+    /// Compute active NNUE features for both perspectives.
+    /// Returns (white_features, black_features) as vectors of feature indices.
+    #[must_use]
+    pub fn compute_nnue_features(&self) -> (Vec<usize>, Vec<usize>) {
+        use super::nnue::network::feature_index;
+
+        let mut white_features = Vec::with_capacity(32);
+        let mut black_features = Vec::with_capacity(32);
+
+        for color_idx in 0..2 {
+            for piece_idx in 0..6 {
+                let bb = self.pieces[color_idx][piece_idx];
+                for sq in bb.iter() {
+                    let sq_idx = sq.as_index();
+                    // White's perspective
+                    white_features.push(feature_index(piece_idx, color_idx, sq_idx, 0));
+                    // Black's perspective
+                    black_features.push(feature_index(piece_idx, color_idx, sq_idx, 1));
+                }
+            }
+        }
+
+        (white_features, black_features)
+    }
+
+    /// Evaluate position using NNUE network.
+    /// Returns score in centipawns from side-to-move perspective.
+    #[must_use]
+    pub fn evaluate_nnue(&self, network: &super::nnue::NnueNetwork) -> i32 {
+        use super::nnue::NnueAccumulator;
+
+        // Compute features from scratch (non-incremental)
+        let (white_features, black_features) = self.compute_nnue_features();
+
+        // Build accumulator
+        let mut acc = NnueAccumulator::new(&network.feature_bias);
+        acc.refresh(&white_features, &black_features, network);
+
+        // Evaluate
+        network.evaluate(&acc, self.white_to_move)
+    }
 }
