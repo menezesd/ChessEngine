@@ -132,8 +132,21 @@ impl EngineController {
         controller
     }
 
-    /// Try to load a default NNUE file from common paths
+    /// Try to load a default NNUE file from common paths or embedded
     fn try_load_default_nnue(&mut self) {
+        // First try embedded NNUE (if compiled in)
+        #[cfg(feature = "embedded_nnue")]
+        {
+            use crate::board::nnue::NnueNetwork;
+            let network = NnueNetwork::from_embedded();
+            let mut state = self.search_state.lock();
+            state.tables.nnue = Some(std::sync::Arc::new(network));
+            eprintln!("info string Using embedded NNUE");
+            return;
+        }
+
+        // Fall back to loading from file
+        #[cfg(not(feature = "embedded_nnue"))]
         for path in DEFAULT_NNUE_PATHS {
             if std::path::Path::new(path).exists() {
                 if self.load_nnue(path).is_ok() {
@@ -142,7 +155,6 @@ impl EngineController {
                 }
             }
         }
-        // No NNUE loaded - using HCE
     }
 
     /// Load NNUE network from file

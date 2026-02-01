@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["embedded_nnue"]
+embedded_nnue = []
 serde = ["dep:serde"]
 logging = ["dep:log"]
 
