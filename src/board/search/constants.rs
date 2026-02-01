@@ -7,7 +7,8 @@
 // ============================================================================
 
 /// Maximum quiescence search depth to prevent explosion
-pub const MAX_QSEARCH_DEPTH: i32 = 4;
+/// Higher values find more tactics but increase nodes searched
+pub const MAX_QSEARCH_DEPTH: i32 = 8;
 
 /// Scores with absolute value >= this are considered checkmate scores
 pub const MATE_THRESHOLD: i32 = 28000;
