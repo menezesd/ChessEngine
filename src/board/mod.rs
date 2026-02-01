@@ -24,6 +24,7 @@ mod fen;
 mod make_unmake;
 mod masks;
 mod movegen;
+pub mod nnue;
 pub mod prelude;
 mod pst;
 mod san;

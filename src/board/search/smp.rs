@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use crate::board::nnue::NnueNetwork;
 use crate::board::{Board, Move};
 use crate::tt::TranspositionTable;
 
@@ -26,6 +27,8 @@ pub struct SharedSearchState {
     pub tt: Arc<TranspositionTable>,
     /// Thread-safe pawn hash table
     pub pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
+    /// Shared NNUE network (optional)
+    pub nnue: Option<Arc<NnueNetwork>>,
     /// Stop flag checked by all workers
     pub stop: Arc<AtomicBool>,
     /// Global node counter (sum of all workers)
@@ -39,16 +42,18 @@ pub struct SharedSearchState {
 }
 
 impl SharedSearchState {
-    /// Create with a specific TT and pawn hash table
+    /// Create with a specific TT, pawn hash table, and optional NNUE network
     pub fn new(
         tt: Arc<TranspositionTable>,
         pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
+        nnue: Option<Arc<NnueNetwork>>,
         stop: Arc<AtomicBool>,
         generation: u16,
     ) -> Self {
         SharedSearchState {
             tt,
             pawn_hash,
+            nnue,
             stop,
             total_nodes: Arc::new(AtomicU64::new(0)),
             max_seldepth: Arc::new(AtomicU64::new(0)),
@@ -209,10 +214,11 @@ pub fn smp_search(
     state.generation = state.generation.wrapping_add(1);
     state.stats.reset_search();
 
-    // Create shared state with the TT and pawn hash from SearchState
+    // Create shared state with the TT, pawn hash, and NNUE from SearchState
     let shared = Arc::new(SharedSearchState::new(
         state.shared_tt(),
         state.shared_pawn_hash(),
+        state.shared_nnue(),
         Arc::clone(&stop),
         state.generation,
     ));
@@ -313,10 +319,11 @@ fn run_worker(
     info_callback: Option<SearchInfoCallback>,
     _start_time: Instant,
 ) -> WorkerResult {
-    // Create local SearchState for this worker with shared TT and pawn hash
-    let mut local_state = SearchState::with_shared_tt(
+    // Create local SearchState for this worker with shared TT, pawn hash, and NNUE
+    let mut local_state = SearchState::with_shared_tables(
         Arc::clone(&shared.tt),
         Arc::clone(&shared.pawn_hash),
+        shared.nnue.clone(),
         shared.generation,
     );
     local_state.params = shared.params.clone();
