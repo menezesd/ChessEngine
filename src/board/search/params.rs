@@ -6,7 +6,6 @@ pub struct SearchParams {
     pub null_reduction: u32,
     pub null_verification_depth: u32,
     pub iir_min_depth: u32,
-    pub razor_margin: i32,
     pub singular_margin: i32,
     pub rfp_margin: i32,
     pub static_null_margin: i32,
@@ -27,7 +26,6 @@ impl SearchParams {
             null_reduction: 2,
             null_verification_depth: 8,
             iir_min_depth: 4,
-            razor_margin: 250,
             singular_margin: 50,
             rfp_margin: 70,
             static_null_margin: 100,
@@ -46,7 +44,6 @@ impl SearchParams {
         let mut params = Self::baseline();
         params.null_min_depth = 4;
         params.iir_min_depth = 6;
-        params.razor_margin = 300;
         params.rfp_margin = 160;
         params.static_null_margin = 120;
         params.lmp_min_depth = 3;

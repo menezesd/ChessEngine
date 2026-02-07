@@ -2,8 +2,6 @@
 //!
 //! Evaluates passed pawns with bonuses based on advancement and control of stop square.
 
-#![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
-
 use crate::board::masks::{
     fill_north, fill_south, relative_rank, FILES, PASSED_PAWN_BONUS_EG, PASSED_PAWN_BONUS_MG,
     PASSED_PAWN_MASK,
@@ -11,6 +9,7 @@ use crate::board::masks::{
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece, Square};
 
+use super::helpers::AttackContext;
 use super::tables::{ROOK_BEHIND_PASSER_EG, ROOK_BEHIND_PASSER_MG};
 
 impl Board {
@@ -19,7 +18,7 @@ impl Board {
     #[must_use]
     pub fn is_passed_pawn(&self, sq: Square, color: Color) -> bool {
         let color_idx = color.index();
-        let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+        let enemy_pawns = self.pieces[color.opponent().index()][Piece::Pawn.index()];
         let pass_mask = PASSED_PAWN_MASK[color_idx][sq.as_index()];
         (pass_mask.0 & enemy_pawns.0) == 0
     }
@@ -28,40 +27,22 @@ impl Board {
     /// Returns `(middlegame_score, endgame_score)` from white's perspective.
     #[must_use]
     pub fn eval_passed_pawns(&self) -> (i32, i32) {
-        let white_attacks = self.all_attacks(Color::White);
-        let black_attacks = self.all_attacks(Color::Black);
-        self.eval_passed_pawns_with_attacks(white_attacks, black_attacks)
+        let ctx = self.compute_attack_context();
+        self.eval_passed_pawns_with_context(&ctx)
     }
 
-    /// Evaluate passed pawns using pre-computed attacks (avoids recomputation).
-    pub(super) fn eval_passed_pawns_with_attacks(
-        &self,
-        white_attacks: Bitboard,
-        black_attacks: Bitboard,
-    ) -> (i32, i32) {
+    /// Evaluate passed pawns using pre-computed attack context.
+    pub(super) fn eval_passed_pawns_with_context(&self, ctx: &AttackContext) -> (i32, i32) {
         let mut mg = 0;
         let mut eg = 0;
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
-            let color = if color_idx == 0 {
-                Color::White
-            } else {
-                Color::Black
-            };
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
             let own_pawns = self.pieces[color_idx][Piece::Pawn.index()];
-            let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
-
-            let our_attacks = if color_idx == 0 {
-                white_attacks
-            } else {
-                black_attacks
-            };
-            let their_attacks = if color_idx == 0 {
-                black_attacks
-            } else {
-                white_attacks
-            };
+            let enemy_pawns = self.pieces[color.opponent().index()][Piece::Pawn.index()];
+            let our_attacks = ctx.all_attacks(color);
+            let their_attacks = ctx.all_attacks(color.opponent());
 
             for sq_idx in own_pawns.iter() {
                 let sq = sq_idx;
@@ -110,7 +91,7 @@ impl Board {
                     let file = sq.file();
                     let file_mask = FILES[file];
                     let our_rooks = self.pieces[color_idx][Piece::Rook.index()];
-                    let their_rooks = self.pieces[1 - color_idx][Piece::Rook.index()];
+                    let their_rooks = self.pieces[color.opponent().index()][Piece::Rook.index()];
 
                     // Check if we have a rook behind (supporting) the passed pawn
                     let behind_mask = match color {

@@ -172,14 +172,7 @@ mod tests {
 
     #[test]
     fn test_piece_index_round_trip() {
-        for piece in [
-            Piece::Pawn,
-            Piece::Knight,
-            Piece::Bishop,
-            Piece::Rook,
-            Piece::Queen,
-            Piece::King,
-        ] {
+        for piece in Piece::ALL {
             let idx = PieceIndex::from_piece(piece);
             assert_eq!(idx.to_piece(), piece);
         }

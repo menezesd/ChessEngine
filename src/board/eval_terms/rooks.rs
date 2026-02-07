@@ -2,11 +2,9 @@
 //!
 //! Evaluates rook placement on open files, 7th rank, and trapped rooks.
 
-#![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
-
 use crate::board::masks::{FILES, RANK_7TH};
 use crate::board::state::Board;
-use crate::board::types::{Bitboard, Piece};
+use crate::board::types::{Bitboard, Color, Piece};
 
 use crate::board::attack_tables::slider_attacks;
 
@@ -14,6 +12,14 @@ use super::tables::{
     CONNECTED_ROOKS_EG, CONNECTED_ROOKS_MG, ROOK_7TH_EG, ROOK_7TH_MG, ROOK_OPEN_FILE_EG,
     ROOK_OPEN_FILE_MG, ROOK_SEMI_OPEN_EG, ROOK_SEMI_OPEN_MG, TRAPPED_ROOK_MG,
 };
+
+// File indices for trapped rook detection
+const FILE_A: usize = 0;
+const FILE_B: usize = 1;
+const FILE_C: usize = 2;
+const FILE_F: usize = 5;
+const FILE_G: usize = 6;
+const FILE_H: usize = 7;
 
 impl Board {
     /// Evaluate rook activity (open files, 7th rank).
@@ -23,11 +29,11 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
-
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
             let our_pawns = self.pieces[color_idx][Piece::Pawn.index()];
-            let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+            let enemy_pawns = self.pieces[color.opponent().index()][Piece::Pawn.index()];
 
             for sq_idx in self.pieces[color_idx][Piece::Rook.index()].iter() {
                 let sq = sq_idx;
@@ -66,7 +72,7 @@ impl Board {
                 let king_rank = king_sq_idx / 8;
 
                 // Check for trapped rook by uncastled king
-                let back_rank = if color_idx == 0 { 0 } else { 7 };
+                let back_rank = color.back_rank();
                 if king_rank == back_rank {
                     for rook_sq in self.pieces[color_idx][Piece::Rook.index()].iter() {
                         let rook_file = rook_sq.file();
@@ -74,14 +80,14 @@ impl Board {
 
                         if rook_rank == back_rank {
                             // King on f/g file with rook trapped on g/h
-                            if (king_file == 5 || king_file == 6)
-                                && (rook_file == 6 || rook_file == 7)
+                            if (king_file == FILE_F || king_file == FILE_G)
+                                && (rook_file == FILE_G || rook_file == FILE_H)
                             {
                                 mg += sign * TRAPPED_ROOK_MG;
                             }
                             // King on b/c file with rook trapped on a/b
-                            if (king_file == 1 || king_file == 2)
-                                && (rook_file == 0 || rook_file == 1)
+                            if (king_file == FILE_B || king_file == FILE_C)
+                                && (rook_file == FILE_A || rook_file == FILE_B)
                             {
                                 mg += sign * TRAPPED_ROOK_MG;
                             }

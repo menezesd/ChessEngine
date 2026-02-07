@@ -468,6 +468,34 @@ impl ScoredMoveList {
         self.as_mut_slice().sort_by(|a, b| b.score.cmp(&a.score));
     }
 
+    /// Partial sort: find the best move from index `start` onwards and swap it to position `start`.
+    /// Returns the move at position `start` after swapping (the best remaining move).
+    /// This implements incremental selection sort - O(n-start) per call, but avoids sorting
+    /// moves we'll never try due to early cutoffs.
+    #[inline]
+    pub fn pick_best(&mut self, start: usize) -> Option<&ScoredMove> {
+        if start >= self.len {
+            return None;
+        }
+
+        // Find index of best move from start onwards
+        let mut best_idx = start;
+        let mut best_score = self.moves[start].score;
+        for i in (start + 1)..self.len {
+            if self.moves[i].score > best_score {
+                best_score = self.moves[i].score;
+                best_idx = i;
+            }
+        }
+
+        // Swap best to start position
+        if best_idx != start {
+            self.moves.swap(start, best_idx);
+        }
+
+        Some(&self.moves[start])
+    }
+
     /// Iterate over scored moves.
     pub fn iter(&self) -> std::slice::Iter<'_, ScoredMove> {
         self.as_slice().iter()

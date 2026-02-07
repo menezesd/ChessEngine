@@ -3,10 +3,8 @@
 //! Evaluates piece proximity to the enemy king.
 //! Queens and rooks get bonuses for being close to the enemy king.
 
-#![allow(clippy::needless_range_loop)]
-
 use crate::board::state::Board;
-use crate::board::types::Piece;
+use crate::board::types::{Color, Piece};
 
 use super::tables::{QUEEN_TROPISM_MG, ROOK_TROPISM_MG};
 
@@ -17,9 +15,10 @@ impl Board {
     pub fn eval_tropism(&self) -> i32 {
         let mut score = 0;
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
-            let enemy_king_bb = self.pieces[1 - color_idx][Piece::King.index()];
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
+            let enemy_king_bb = self.pieces[color.opponent().index()][Piece::King.index()];
 
             if enemy_king_bb.is_empty() {
                 continue;

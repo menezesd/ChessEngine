@@ -11,14 +11,6 @@ use super::{
 };
 
 impl Board {
-    pub(crate) fn current_color(&self) -> Color {
-        if self.white_to_move {
-            Color::White
-        } else {
-            Color::Black
-        }
-    }
-
     pub(crate) fn has_castling_right(&self, color: Color, side: char) -> bool {
         self.castling_rights & castle_bit(color, side) != 0
     }
@@ -30,6 +22,12 @@ impl Board {
         self.pieces[c_idx][p_idx].0 |= bit;
         self.occupied[c_idx].0 |= bit;
         self.all_occupied.0 |= bit;
+        // Update mailbox for O(1) piece_at
+        self.mailbox[sq.index()] = Some((color, piece));
+        // Update cached king square
+        if piece == Piece::King {
+            self.king_square[c_idx] = sq;
+        }
     }
 
     pub(crate) fn remove_piece(&mut self, sq: Square, color: Color, piece: Piece) {
@@ -39,36 +37,14 @@ impl Board {
         self.pieces[c_idx][p_idx].0 &= !bit;
         self.occupied[c_idx].0 &= !bit;
         self.all_occupied.0 &= !bit;
+        // Update mailbox for O(1) piece_at
+        self.mailbox[sq.index()] = None;
     }
 
+    /// O(1) lookup of piece at a square using mailbox representation
+    #[inline]
     pub(crate) fn piece_at(&self, sq: Square) -> Option<(Color, Piece)> {
-        let bit = bit_for_square(sq).0;
-        if self.all_occupied.0 & bit == 0 {
-            return None;
-        }
-
-        let color = if self.occupied[0].0 & bit != 0 {
-            Color::White
-        } else {
-            Color::Black
-        };
-        let c_idx = color.index();
-        for p_idx in 0..6 {
-            if self.pieces[c_idx][p_idx].0 & bit != 0 {
-                let piece = match p_idx {
-                    0 => Piece::Pawn,
-                    1 => Piece::Knight,
-                    2 => Piece::Bishop,
-                    3 => Piece::Rook,
-                    4 => Piece::Queen,
-                    5 => Piece::King,
-                    _ => unreachable!(),
-                };
-                return Some((color, piece));
-            }
-        }
-
-        None
+        self.mailbox[sq.index()]
     }
 
     pub(crate) fn is_empty(&self, sq: Square) -> bool {
@@ -362,7 +338,7 @@ impl Board {
         let previous_eval_eg = self.eval_eg;
         let previous_game_phase = self.game_phase;
 
-        let color = self.current_color();
+        let color = self.side_to_move();
         let c_idx = color.index();
         let opp_idx = 1 - c_idx;
         let is_white = color == Color::White;
@@ -506,7 +482,7 @@ impl Board {
         self.eval_eg = info.previous_eval_eg;
         self.game_phase = info.previous_game_phase;
 
-        let color = self.current_color();
+        let color = self.side_to_move();
 
         if m.is_castling() {
             self.restore_castling_move(m, color);

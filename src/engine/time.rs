@@ -14,6 +14,53 @@ const PANIC_THRESHOLD_MS: u64 = 5000;
 /// Minimum moves-to-go estimate to avoid over-thinking
 const MIN_MOVES_TO_GO: u64 = 10;
 
+/// Safety margin added to overhead for critical time detection
+const CRITICAL_TIME_MARGIN_MS: u64 = 50;
+
+/// Panic mode: fraction of remaining time to use
+const PANIC_TIME_FRACTION: f64 = 0.05;
+
+/// Panic mode: minimum fraction divisor for target time
+const PANIC_MIN_FRACTION: u64 = 5;
+
+/// Panic mode: hard time fraction divisor
+const PANIC_HARD_FRACTION: u64 = 3;
+
+/// Time thresholds for moves-to-go estimation (in ms)
+const LONG_TIME_CONTROL_MS: u64 = 300_000;
+const MEDIUM_TIME_CONTROL_MS: u64 = 60_000;
+
+/// Estimated moves for different time controls
+const LONG_MOVES_ESTIMATE: u64 = 40;
+const MEDIUM_MOVES_ESTIMATE: u64 = 30;
+const SHORT_MOVES_ESTIMATE: u64 = 25;
+
+/// Configuration for time management calculations.
+///
+/// Groups together the various percentages and overheads used in time limit calculations.
+#[derive(Debug, Clone, Copy)]
+pub struct TimeConfig {
+    /// Time to reserve for move overhead (communication latency, etc.)
+    pub move_overhead_ms: u64,
+    /// Percentage of remaining time to use as soft limit
+    pub soft_time_percent: u64,
+    /// Percentage of remaining time to use as hard limit
+    pub hard_time_percent: u64,
+    /// Default maximum nodes (0 = unlimited)
+    pub default_max_nodes: u64,
+}
+
+impl Default for TimeConfig {
+    fn default() -> Self {
+        Self {
+            move_overhead_ms: 50,
+            soft_time_percent: 70,
+            hard_time_percent: 90,
+            default_max_nodes: 0,
+        }
+    }
+}
+
 /// Time control settings for a search.
 ///
 /// This enum unifies different time control modes used by UCI and `XBoard` protocols.
@@ -97,12 +144,7 @@ impl TimeControl {
     ///
     /// Returns `(soft_time_ms, hard_time_ms)` or `(u64::MAX, u64::MAX)` for unlimited.
     #[must_use]
-    pub fn compute_limits(
-        &self,
-        move_overhead_ms: u64,
-        soft_time_percent: u64,
-        hard_time_percent: u64,
-    ) -> (u64, u64) {
+    pub fn compute_limits(&self, config: &TimeConfig) -> (u64, u64) {
         match self {
             TimeControl::Infinite | TimeControl::Depth => (u64::MAX, u64::MAX),
             TimeControl::MoveTime { time_ms } => {
@@ -115,14 +157,7 @@ impl TimeControl {
                 time_left_ms,
                 inc_ms,
                 movestogo,
-            } => compute_incremental_limits(
-                *time_left_ms,
-                *inc_ms,
-                *movestogo,
-                move_overhead_ms,
-                soft_time_percent,
-                hard_time_percent,
-            ),
+            } => compute_incremental_limits(*time_left_ms, *inc_ms, *movestogo, config),
         }
     }
 }
@@ -133,16 +168,13 @@ fn compute_incremental_limits(
     time_left_ms: u64,
     inc_ms: u64,
     movestogo: Option<u64>,
-    move_overhead_ms: u64,
-    soft_time_percent: u64,
-    hard_time_percent: u64,
+    config: &TimeConfig,
 ) -> (u64, u64) {
-    let safe_ms = time_left_ms.saturating_sub(move_overhead_ms);
+    let safe_ms = time_left_ms.saturating_sub(config.move_overhead_ms);
 
     // Critical time: less than overhead + safety margin
-    if time_left_ms <= move_overhead_ms.saturating_add(50) {
-        let fallback = time_left_ms / 2;
-        let fallback = fallback.max(1);
+    if time_left_ms <= config.move_overhead_ms.saturating_add(CRITICAL_TIME_MARGIN_MS) {
+        let fallback = (time_left_ms / 2).max(1);
         return (fallback, fallback);
     }
 
@@ -150,9 +182,9 @@ fn compute_incremental_limits(
     if safe_ms < PANIC_THRESHOLD_MS {
         // Use a fraction of remaining time based on how critical it is
         let panic_factor = safe_ms as f64 / PANIC_THRESHOLD_MS as f64;
-        let target = (safe_ms as f64 * 0.05 * panic_factor) as u64 + inc_ms;
-        let target = target.min(safe_ms / 5).max(1);
-        let hard = (safe_ms / 3).max(target).max(1);
+        let target = (safe_ms as f64 * PANIC_TIME_FRACTION * panic_factor) as u64 + inc_ms;
+        let target = target.min(safe_ms / PANIC_MIN_FRACTION).max(1);
+        let hard = (safe_ms / PANIC_HARD_FRACTION).max(target).max(1);
         return (target, hard);
     }
 
@@ -161,12 +193,12 @@ fn compute_incremental_limits(
         .unwrap_or({
             // Assume game is roughly in middle if we have decent time
             // Use more conservative estimate when time is lower
-            if safe_ms > 300_000 {
-                40 // Long time control - more moves expected
-            } else if safe_ms > 60_000 {
-                30 // Medium time control
+            if safe_ms > LONG_TIME_CONTROL_MS {
+                LONG_MOVES_ESTIMATE
+            } else if safe_ms > MEDIUM_TIME_CONTROL_MS {
+                MEDIUM_MOVES_ESTIMATE
             } else {
-                25 // Short time control - be more aggressive
+                SHORT_MOVES_ESTIMATE
             }
         })
         .max(MIN_MOVES_TO_GO);
@@ -175,8 +207,8 @@ fn compute_incremental_limits(
     let base_time = safe_ms / moves_to_go + inc_ms;
 
     // Apply percentage caps
-    let soft_cap = safe_ms * soft_time_percent / 100;
-    let hard_cap = safe_ms * hard_time_percent / 100;
+    let soft_cap = safe_ms * config.soft_time_percent / 100;
+    let hard_cap = safe_ms * config.hard_time_percent / 100;
 
     // Soft time: use more time for first moves, less for later
     let soft_ms = base_time.min(soft_cap).max(1);
@@ -198,18 +230,16 @@ pub fn compute_time_limits(
     inc: Duration,
     movetime: Option<Duration>,
     movestogo: Option<u64>,
-    move_overhead_ms: u64,
-    soft_time_percent: u64,
-    hard_time_percent: u64,
+    config: &TimeConfig,
 ) -> (u64, u64) {
     // Fixed movetime takes priority
     if let Some(mt) = movetime {
         let tc = TimeControl::move_time(mt);
-        return tc.compute_limits(move_overhead_ms, soft_time_percent, hard_time_percent);
+        return tc.compute_limits(config);
     }
 
     let tc = TimeControl::incremental(time_left, inc, movestogo);
-    tc.compute_limits(move_overhead_ms, soft_time_percent, hard_time_percent)
+    tc.compute_limits(config)
 }
 
 /// Parameters for executing a search (shared builder for protocol layers).
@@ -225,25 +255,21 @@ pub struct SearchRequest {
 
 /// Build a search request from a time control and constraints.
 #[must_use]
-#[allow(clippy::too_many_arguments)]
 pub fn build_search_request(
     time_control: TimeControl,
     depth: Option<u32>,
     nodes: Option<u64>,
     ponder: bool,
     infinite: bool,
-    default_max_nodes: u64,
-    move_overhead_ms: u64,
-    soft_time_percent: u64,
-    hard_time_percent: u64,
+    config: &TimeConfig,
 ) -> (SearchRequest, (u64, u64)) {
     let (soft_ms, hard_ms) = if infinite || ponder {
         (u64::MAX, u64::MAX)
     } else {
-        time_control.compute_limits(move_overhead_ms, soft_time_percent, hard_time_percent)
+        time_control.compute_limits(config)
     };
 
-    let max_nodes = nodes.unwrap_or(default_max_nodes);
+    let max_nodes = nodes.unwrap_or(config.default_max_nodes);
 
     (
         SearchRequest {
@@ -262,6 +288,16 @@ pub fn build_search_request(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Standard test config with conservative percentages
+    fn test_config() -> TimeConfig {
+        TimeConfig {
+            move_overhead_ms: 50,
+            soft_time_percent: 5,
+            hard_time_percent: 20,
+            default_max_nodes: 0,
+        }
+    }
 
     // ========================================================================
     // TimeControl enum tests
@@ -380,7 +416,7 @@ mod tests {
     #[test]
     fn compute_limits_infinite() {
         let tc = TimeControl::Infinite;
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, hard) = tc.compute_limits(&test_config());
 
         assert_eq!(soft, u64::MAX);
         assert_eq!(hard, u64::MAX);
@@ -389,7 +425,7 @@ mod tests {
     #[test]
     fn compute_limits_depth() {
         let tc = TimeControl::Depth;
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, hard) = tc.compute_limits(&test_config());
 
         assert_eq!(soft, u64::MAX);
         assert_eq!(hard, u64::MAX);
@@ -398,7 +434,7 @@ mod tests {
     #[test]
     fn compute_limits_movetime() {
         let tc = TimeControl::MoveTime { time_ms: 5000 };
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, hard) = tc.compute_limits(&test_config());
 
         // For movetime, both should equal the specified time
         assert_eq!(soft, 5000);
@@ -408,7 +444,7 @@ mod tests {
     #[test]
     fn compute_limits_movetime_zero() {
         let tc = TimeControl::MoveTime { time_ms: 0 };
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, hard) = tc.compute_limits(&test_config());
 
         // Should be capped at minimum 1ms
         assert_eq!(soft, 1);
@@ -423,7 +459,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, hard) = tc.compute_limits(&test_config());
 
         // Should produce reasonable values
         assert!(soft > 0);
@@ -440,7 +476,7 @@ mod tests {
             movestogo: Some(20), // 20 moves to go
         };
 
-        let (soft, _hard) = tc.compute_limits(50, 5, 20);
+        let (soft, _hard) = tc.compute_limits(&test_config());
 
         // Should allocate roughly 60000/20 = 3000ms per move
         assert!(soft > 0);
@@ -456,7 +492,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, _hard) = tc.compute_limits(50, 5, 20);
+        let (soft, _hard) = tc.compute_limits(&test_config());
 
         // Should be very small but non-zero
         assert!(soft > 0);
@@ -472,7 +508,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, _hard) = tc.compute_limits(50, 5, 20);
+        let (soft, _hard) = tc.compute_limits(&test_config());
 
         // Should be conservative
         assert!(soft > 0);
@@ -487,7 +523,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, hard) = tc.compute_limits(&test_config());
 
         // With lots of time, should use more time per move
         assert!(soft > 5000); // Should use more than just the increment
@@ -505,9 +541,7 @@ mod tests {
             Duration::from_secs(0),
             Some(Duration::from_secs(5)), // movetime takes priority
             None,
-            50,
-            5,
-            20,
+            &test_config(),
         );
 
         assert_eq!(soft, 5000);
@@ -521,9 +555,7 @@ mod tests {
             Duration::from_secs(3),
             None,
             None,
-            50,
-            5,
-            20,
+            &test_config(),
         );
 
         assert!(soft > 0);
@@ -537,9 +569,7 @@ mod tests {
             Duration::from_secs(0),
             None,
             Some(10), // 10 moves to go
-            50,
-            5,
-            20,
+            &test_config(),
         );
 
         // Should allocate roughly 60s / 10 = 6s per move
@@ -559,7 +589,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (req, _) = build_search_request(tc, None, None, false, true, 0, 50, 5, 20);
+        let (req, _) = build_search_request(tc, None, None, false, true, &test_config());
 
         assert!(req.infinite);
         assert_eq!(req.soft_time_ms, 0);
@@ -574,7 +604,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (req, _) = build_search_request(tc, None, None, true, false, 0, 50, 5, 20);
+        let (req, _) = build_search_request(tc, None, None, true, false, &test_config());
 
         assert!(req.ponder);
         assert_eq!(req.soft_time_ms, 0);
@@ -584,7 +614,7 @@ mod tests {
     #[test]
     fn build_search_request_with_depth() {
         let tc = TimeControl::Infinite;
-        let (req, _) = build_search_request(tc, Some(10), None, false, false, 0, 50, 5, 20);
+        let (req, _) = build_search_request(tc, Some(10), None, false, false, &test_config());
 
         assert_eq!(req.depth, Some(10));
     }
@@ -592,7 +622,7 @@ mod tests {
     #[test]
     fn build_search_request_with_nodes() {
         let tc = TimeControl::Infinite;
-        let (req, _) = build_search_request(tc, None, Some(1000000), false, false, 0, 50, 5, 20);
+        let (req, _) = build_search_request(tc, None, Some(1000000), false, false, &test_config());
 
         assert_eq!(req.max_nodes, 1000000);
     }
@@ -600,7 +630,11 @@ mod tests {
     #[test]
     fn build_search_request_default_nodes() {
         let tc = TimeControl::Infinite;
-        let (req, _) = build_search_request(tc, None, None, false, false, 500000, 50, 5, 20);
+        let config = TimeConfig {
+            default_max_nodes: 500000,
+            ..test_config()
+        };
+        let (req, _) = build_search_request(tc, None, None, false, false, &config);
 
         assert_eq!(req.max_nodes, 500000);
     }
@@ -613,7 +647,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (req, (soft, hard)) = build_search_request(tc, None, None, false, false, 0, 50, 5, 20);
+        let (req, (soft, hard)) = build_search_request(tc, None, None, false, false, &test_config());
 
         assert!(!req.infinite);
         assert!(!req.ponder);
@@ -641,7 +675,11 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, hard) = tc.compute_limits(0, 5, 20);
+        let config = TimeConfig {
+            move_overhead_ms: 0,
+            ..test_config()
+        };
+        let (soft, hard) = tc.compute_limits(&config);
 
         // Should handle gracefully
         assert!(soft >= 1);
@@ -656,7 +694,7 @@ mod tests {
             movestogo: None,
         };
 
-        let (soft, _hard) = tc.compute_limits(50, 5, 20);
+        let (soft, _hard) = tc.compute_limits(&test_config());
 
         // Should use the increment
         assert!(soft > 0);
@@ -670,7 +708,7 @@ mod tests {
             movestogo: Some(1), // Last move before time control
         };
 
-        let (soft, hard) = tc.compute_limits(50, 5, 20);
+        let (soft, hard) = tc.compute_limits(&test_config());
 
         // Should use most of the remaining time
         assert!(soft > 0);

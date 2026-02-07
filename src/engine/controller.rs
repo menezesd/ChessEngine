@@ -107,7 +107,8 @@ pub struct EngineController {
     num_threads: usize,
 }
 
-/// Default NNUE file paths to try loading
+/// Default NNUE file paths to try loading (used when embedded_nnue is disabled)
+#[cfg(not(feature = "embedded_nnue"))]
 const DEFAULT_NNUE_PATHS: &[&str] = &[
     "trained_new_combined.nnue",
     "trained.nnue",
@@ -142,7 +143,6 @@ impl EngineController {
             let mut state = self.search_state.lock();
             state.tables.nnue = Some(std::sync::Arc::new(network));
             eprintln!("info string Using embedded NNUE");
-            return;
         }
 
         // Fall back to loading from file

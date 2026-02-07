@@ -27,7 +27,7 @@ use crate::board::{
     find_best_move, find_best_move_with_ponder, find_best_move_with_time_and_ponder, Board, Color,
     Move, SearchClock, SearchLimits, SearchResult, SearchState, DEFAULT_TT_MB,
 };
-use crate::engine::time::TimeControl;
+use crate::engine::time::{TimeConfig, TimeControl};
 
 use command::{parse_xboard_command, XBoardCommand};
 use output::{format_error, format_features, format_illegal_move, format_move, format_pong};
@@ -645,11 +645,13 @@ impl XBoardHandler {
             ))
         } else {
             // Timed search
-            let (soft_ms, hard_ms) = time_control.compute_limits(
-                0,  // move_overhead_ms
-                5,  // soft_time_percent
-                15, // hard_time_percent
-            );
+            let config = TimeConfig {
+                move_overhead_ms: 0,
+                soft_time_percent: 5,
+                hard_time_percent: 15,
+                default_max_nodes: 0,
+            };
+            let (soft_ms, hard_ms) = time_control.compute_limits(&config);
 
             let start = Instant::now();
             let soft_deadline = start + Duration::from_millis(soft_ms);

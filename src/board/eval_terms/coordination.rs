@@ -45,10 +45,6 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let c_idx = color.index();
-        let _own_pieces = self.occupied[c_idx];
-        let _enemy_attacks = ctx.all_attacks(color.opponent());
-
         // Battery detection
         mg += self.eval_batteries(color);
 
@@ -98,8 +94,7 @@ impl Board {
         }
 
         // Check for doubled rooks (Rook + Rook on same file)
-        let mut rook_iter = rooks.iter();
-        while let Some(rook1) = rook_iter.next() {
+        for rook1 in rooks.iter() {
             let rook1_file = rook1.index() % 8;
             for rook2 in rooks.iter() {
                 if rook2.index() > rook1.index() {
@@ -178,14 +173,15 @@ impl Board {
         // Check pawn defenders
         let _pawn_attacks = self.pawn_attacks(color);
         // Pawns that could attack this square are on adjacent files, one rank behind
+        let file = sq % 8;
         let defending_pawn_sqs = match color {
             Color::White => {
                 let mut sqs = 0u64;
                 if sq >= 8 {
-                    if sq % 8 > 0 {
+                    if file != 0 {
                         sqs |= 1u64 << (sq - 9);
                     }
-                    if sq % 8 < 7 {
+                    if file < 7 {
                         sqs |= 1u64 << (sq - 7);
                     }
                 }
@@ -194,10 +190,10 @@ impl Board {
             Color::Black => {
                 let mut sqs = 0u64;
                 if sq < 56 {
-                    if sq % 8 > 0 {
+                    if file != 0 {
                         sqs |= 1u64 << (sq + 7);
                     }
-                    if sq % 8 < 7 {
+                    if file < 7 {
                         sqs |= 1u64 << (sq + 9);
                     }
                 }
@@ -263,11 +259,12 @@ impl Board {
                 let pf = piece_sq.index() % 8;
                 let pr = piece_sq.index() / 8;
 
-                // Within 2 squares
-                if ((file as i32 - pf as i32).abs() <= 2) && ((rank as i32 - pr as i32).abs() <= 2) {
-                    if (enemy_attacks.0 & (1u64 << piece_sq.index())) != 0 {
-                        attacked_pieces_near += 1;
-                    }
+                // Within 2 squares and attacked by enemy
+                if (file as i32 - pf as i32).abs() <= 2
+                    && (rank as i32 - pr as i32).abs() <= 2
+                    && (enemy_attacks.0 & (1u64 << piece_sq.index())) != 0
+                {
+                    attacked_pieces_near += 1;
                 }
             }
         }

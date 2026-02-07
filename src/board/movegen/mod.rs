@@ -117,7 +117,7 @@ impl Board {
 
     #[must_use]
     pub fn generate_moves(&mut self) -> MoveList {
-        let current_color = self.current_color();
+        let current_color = self.side_to_move();
         let opponent_color = current_color.opponent();
         let pseudo_moves = self.generate_pseudo_moves();
         let mut legal_moves = MoveList::new();
@@ -149,13 +149,13 @@ impl Board {
 
     #[must_use]
     pub fn is_checkmate(&mut self) -> bool {
-        let color = self.current_color();
+        let color = self.side_to_move();
         self.is_in_check(color) && self.generate_moves().is_empty()
     }
 
     #[must_use]
     pub fn is_stalemate(&mut self) -> bool {
-        let color = self.current_color();
+        let color = self.side_to_move();
         !self.is_in_check(color) && self.generate_moves().is_empty()
     }
 
@@ -166,7 +166,7 @@ impl Board {
     #[must_use]
     pub fn is_legal_move(&mut self, mv: Move) -> bool {
         let from = mv.from();
-        let current_color = self.current_color();
+        let current_color = self.side_to_move();
 
         // Check that there's a piece of the right color on the from square
         let Some((piece_color, piece)) = self.piece_at(from) else {
@@ -216,7 +216,7 @@ impl Board {
     }
 
     pub(crate) fn generate_tactical_moves(&mut self) -> MoveList {
-        let current_color = self.current_color();
+        let current_color = self.side_to_move();
         let mut pseudo_tactical_moves = MoveList::new();
         let c_idx = current_color.index();
 

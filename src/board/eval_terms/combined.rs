@@ -18,9 +18,8 @@ impl Board {
     /// Combined evaluation using pre-computed attack context.
     #[must_use]
     pub fn eval_attacks_dependent_with_context(&self, ctx: &AttackContext) -> (i32, i32, i32) {
-        let (pass_mg, pass_eg) =
-            self.eval_passed_pawns_with_attacks(ctx.white_attacks, ctx.black_attacks);
-        let hanging = self.eval_hanging_with_attacks(ctx.white_attacks, ctx.black_attacks);
+        let (pass_mg, pass_eg) = self.eval_passed_pawns_with_context(ctx);
+        let hanging = self.eval_hanging_with_context(ctx);
 
         (pass_mg, pass_eg, hanging)
     }

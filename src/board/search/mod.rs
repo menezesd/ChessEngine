@@ -81,19 +81,32 @@ impl KillerTable {
         }
     }
 
+    /// Get killer move at given ply and slot (0=primary, 1=secondary, 2=tertiary)
     #[must_use]
+    pub fn get(&self, ply: usize, slot: usize) -> Move {
+        self.slots
+            .get(ply)
+            .and_then(|row| row.get(slot))
+            .copied()
+            .unwrap_or(super::EMPTY_MOVE)
+    }
+
+    #[must_use]
+    #[inline]
     pub fn primary(&self, ply: usize) -> Move {
-        self.slots.get(ply).map_or(super::EMPTY_MOVE, |row| row[0])
+        self.get(ply, 0)
     }
 
     #[must_use]
+    #[inline]
     pub fn secondary(&self, ply: usize) -> Move {
-        self.slots.get(ply).map_or(super::EMPTY_MOVE, |row| row[1])
+        self.get(ply, 1)
     }
 
     #[must_use]
+    #[inline]
     pub fn tertiary(&self, ply: usize) -> Move {
-        self.slots.get(ply).map_or(super::EMPTY_MOVE, |row| row[2])
+        self.get(ply, 2)
     }
 
     pub fn update(&mut self, ply: usize, mv: Move) {
@@ -411,7 +424,7 @@ impl CaptureHistory {
 const CORRECTION_HISTORY_SIZE: usize = 16384;
 
 pub struct CorrectionHistory {
-    /// Indexed by pawn_hash % size, stores weighted average correction
+    /// Indexed by `pawn_hash` % size, stores weighted average correction
     corrections: Box<[i16; CORRECTION_HISTORY_SIZE]>,
 }
 
@@ -510,9 +523,9 @@ impl SearchTables {
         // For en passant, captured piece is always a pawn
         if mv.is_en_passant() {
             let mvv_lva = move_order::piece_value(Piece::Pawn) * 10 - attacker;
-            let see_score = board.see(mv.from(), mv.to()) / 10;
+            // Skip SEE for en passant - it's almost always a simple pawn exchange
             let cap_hist = self.capture_history.score(attacker_piece, Piece::Pawn) / 100;
-            return mvv_lva + see_score + cap_hist;
+            return mvv_lva + cap_hist;
         }
 
         // Look up what piece is on the target square
@@ -524,14 +537,34 @@ impl SearchTables {
         // MVV-LVA: prioritize high-value victims captured by low-value attackers
         let mvv_lva = captured * 10 - attacker;
 
-        // Add SEE as a factor for more accurate ordering
-        // SEE is scaled down so it doesn't dominate MVV-LVA
-        let see_score = board.see(mv.from(), mv.to()) / 10;
+        // Check if capture is near enemy king (sacrifices near king often have tactics)
+        let enemy_king_sq = board.find_king(if board.white_to_move {
+            crate::board::Color::Black
+        } else {
+            crate::board::Color::White
+        });
+        let near_king = enemy_king_sq.is_some_and(|king_sq| {
+            let to_sq = mv.to();
+            let rank_diff = (to_sq.rank() as i32 - king_sq.rank() as i32).abs();
+            let file_diff = (to_sq.file() as i32 - king_sq.file() as i32).abs();
+            rank_diff <= 1 && file_diff <= 1
+        });
+
+        // Only compute SEE for potentially bad captures (attacker >= victim)
+        // Skip SEE penalty for captures near enemy king (often tactical)
+        let see_score = if attacker > captured && !near_king {
+            // Potentially losing capture - use SEE with known pieces (avoids redundant lookups)
+            board.see_with_pieces(mv.from(), mv.to(), attacker_piece, victim_piece) / 10
+        } else {
+            // Good capture, or near enemy king - don't penalize
+            0
+        };
 
         // Add capture history as a tie-breaker
         let cap_hist = self.capture_history.score(attacker_piece, victim_piece) / 100;
 
-        mvv_lva + see_score + cap_hist
+        // Add base score to ensure captures are tried before killers/quiets
+        constants::CAPTURE_BASE_SCORE + mvv_lva + see_score + cap_hist
     }
 
     /// Get history score for a move
@@ -548,6 +581,11 @@ impl SearchTables {
     /// Reset history table
     pub fn reset_history(&mut self) {
         self.history.reset();
+    }
+
+    /// Decay history table (preserves some information from previous searches)
+    pub fn decay_history(&mut self) {
+        self.history.decay();
     }
 }
 

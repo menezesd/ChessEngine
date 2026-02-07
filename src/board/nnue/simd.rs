@@ -2,10 +2,10 @@
 //!
 //! Provides vectorized implementations for:
 //! - Accumulator updates (add/subtract i16 vectors)
-//! - SCReLU activation with dot product
+//! - `SCReLU` activation with dot product
 //!
 //! Supports:
-//! - x86_64: AVX2 (256-bit vectors, 16 i16 at a time)
+//! - `x86_64`: `AVX2` (256-bit vectors, 16 i16 at a time)
 //! - aarch64: NEON (128-bit vectors, 8 i16 at a time)
 //! - Fallback: Scalar operations
 
@@ -75,10 +75,11 @@ pub fn sub_weights(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     }
 }
 
-/// Compute SCReLU activation and dot product using SIMD when available.
+/// Compute `SCReLU` activation and dot product using SIMD when available.
 ///
-/// Returns sum of: screlu(acc[i]) * weights[i] for i in 0..HIDDEN_SIZE
+/// Returns sum of: `screlu(acc[i]) * weights[i]` for i in `0..HIDDEN_SIZE`
 #[inline]
+#[must_use] 
 pub fn screlu_dot(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
     #[cfg(target_arch = "aarch64")]
     {
@@ -125,11 +126,13 @@ fn sub_weights_scalar(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
     }
 }
 
+/// Scalar fallback for `screlu_dot` (kept for reference/testing)
+#[allow(dead_code)]
 #[inline]
 fn screlu_dot_scalar(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
     let mut sum = 0i32;
     for i in 0..HIDDEN_SIZE {
-        let clamped = i32::from(acc[i]).clamp(0, i32::from(QA as i16));
+        let clamped = i32::from(acc[i]).clamp(0, i32::from(QA));
         let activated = clamped * clamped;
         sum += activated * i32::from(weights[i]);
     }
@@ -142,7 +145,7 @@ fn screlu_dot_scalar(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> 
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn add_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
-    use std::arch::aarch64::*;
+    use std::arch::aarch64::{vld1q_s16, vqaddq_s16, vst1q_s16};
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -158,7 +161,7 @@ unsafe fn add_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn sub_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
-    use std::arch::aarch64::*;
+    use std::arch::aarch64::{vld1q_s16, vqsubq_s16, vst1q_s16};
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -173,13 +176,13 @@ unsafe fn sub_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
-    use std::arch::aarch64::*;
+    use std::arch::aarch64::{vdupq_n_s16, vdupq_n_s64, vld1q_s16, vminq_s16, vmaxq_s16, vmovl_s16, vget_low_s16, vget_high_s16, vmulq_s32, vaddq_s64, vmovl_s32, vget_low_s32, vget_high_s32, vgetq_lane_s64};
 
     let acc_ptr = acc.as_ptr();
     let weights_ptr = weights.as_ptr();
 
     let zero = vdupq_n_s16(0);
-    let qa = vdupq_n_s16(QA as i16);
+    let qa = vdupq_n_s16(QA);
 
     // Accumulate in 4 x i64 to avoid overflow
     let mut sum0 = vdupq_n_s64(0);

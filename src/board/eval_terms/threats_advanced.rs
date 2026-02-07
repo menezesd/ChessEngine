@@ -10,7 +10,7 @@ use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS};
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece};
 
-use super::helpers::AttackContext;
+use super::helpers::{single_pawn_attacks, AttackContext};
 
 /// Fork threat bonus
 pub const FORK_THREAT_MG: i32 = 20;
@@ -69,7 +69,6 @@ impl Board {
         let opp_idx = color.opponent().index();
         let mut bonus = 0;
 
-        let _enemy_pieces = self.occupied[opp_idx];
         let enemy_king = self.pieces[opp_idx][Piece::King.index()];
         let enemy_queen = self.pieces[opp_idx][Piece::Queen.index()];
         let enemy_rooks = self.pieces[opp_idx][Piece::Rook.index()];
@@ -91,36 +90,8 @@ impl Board {
         // Pawn fork threats
         let pawns = self.pieces[c_idx][Piece::Pawn.index()];
         for pawn_sq in pawns.iter() {
-            let file = pawn_sq.index() % 8;
-            let rank = pawn_sq.index() / 8;
-
-            let attacks = match color {
-                Color::White => {
-                    if rank >= 7 {
-                        continue;
-                    }
-                    let mut atk = 0u64;
-                    if file > 0 {
-                        atk |= 1u64 << (pawn_sq.index() + 7);
-                    }
-                    if file < 7 {
-                        atk |= 1u64 << (pawn_sq.index() + 9);
-                    }
-                    atk
-                }
-                Color::Black => {
-                    if rank <= 0 {
-                        continue;
-                    }
-                    let mut atk = 0u64;
-                    if file > 0 {
-                        atk |= 1u64 << (pawn_sq.index() - 9);
-                    }
-                    if file < 7 {
-                        atk |= 1u64 << (pawn_sq.index() - 7);
-                    }
-                    atk
-                }
+            let Some(attacks) = single_pawn_attacks(pawn_sq.index(), color) else {
+                continue;
             };
 
             let targets_hit = (attacks & high_value.0).count_ones();
@@ -192,13 +163,13 @@ impl Board {
         }
 
         // Check if there's exactly one piece between slider and target
-        let between_mask = self.between_mask(slider_sq, target_sq);
+        let between_mask = Self::between_mask(slider_sq, target_sq);
         if between_mask == 0 {
             return 0;
         }
 
         let blockers = self.all_occupied.0 & between_mask;
-        if blockers.count_ones() == 1 {
+        if blockers.is_power_of_two() {
             // Exactly one blocker - check if it's an enemy piece
             if (self.occupied[opp_idx].0 & blockers) != 0 {
                 return if to_king { PIN_TO_KING_MG } else { PIN_TO_QUEEN_MG };
@@ -209,7 +180,7 @@ impl Board {
     }
 
     /// Get the squares between two squares on a line.
-    fn between_mask(&self, sq1: usize, sq2: usize) -> u64 {
+    fn between_mask(sq1: usize, sq2: usize) -> u64 {
         let file1 = sq1 % 8;
         let rank1 = sq1 / 8;
         let file2 = sq2 % 8;
@@ -236,7 +207,7 @@ impl Board {
         let mut r = rank1 as i32 + rank_diff;
 
         while f != file2 as i32 || r != rank2 as i32 {
-            if f < 0 || f > 7 || r < 0 || r > 7 {
+            if !(0..=7).contains(&f) || !(0..=7).contains(&r) {
                 break;
             }
             mask |= 1u64 << (r * 8 + f);
@@ -327,9 +298,9 @@ impl Board {
             let x_ray = slider_attacks(bishop_sq.index(), 0, true); // Empty board
             if (x_ray & (1u64 << enemy_king_sq)) != 0 {
                 // Our bishop could attack king if blockers moved
-                let between = self.between_mask(bishop_sq.index(), enemy_king_sq);
+                let between = Self::between_mask(bishop_sq.index(), enemy_king_sq);
                 let our_blockers = self.occupied[c_idx].0 & between;
-                if our_blockers.count_ones() == 1 {
+                if our_blockers.is_power_of_two() {
                     // One of our pieces can discover an attack
                     bonus += DISCOVERY_POTENTIAL_MG;
                 }
@@ -339,9 +310,9 @@ impl Board {
         for rook_sq in our_rooks.iter() {
             let x_ray = slider_attacks(rook_sq.index(), 0, false);
             if (x_ray & (1u64 << enemy_king_sq)) != 0 {
-                let between = self.between_mask(rook_sq.index(), enemy_king_sq);
+                let between = Self::between_mask(rook_sq.index(), enemy_king_sq);
                 let our_blockers = self.occupied[c_idx].0 & between;
-                if our_blockers.count_ones() == 1 {
+                if our_blockers.is_power_of_two() {
                     bonus += DISCOVERY_POTENTIAL_MG;
                 }
             }
@@ -367,9 +338,8 @@ mod tests {
 
     #[test]
     fn test_between_mask() {
-        let board: Board = "8/8/8/8/8/8/8/8 w - - 0 1".parse().unwrap();
         // a1 to h8 diagonal
-        let mask = board.between_mask(0, 63);
+        let mask = Board::between_mask(0, 63);
         // Should include b2, c3, d4, e5, f6, g7
         assert!((mask & (1u64 << 9)) != 0); // b2
         assert!((mask & (1u64 << 18)) != 0); // c3

@@ -240,9 +240,15 @@ fn test_mvv_lva_queen_takes_pawn() {
     let mv = Move::capture(Square::new(4, 4), Square::new(5, 3)); // Qxd6
 
     let score = state.tables.mvv_lva_score(&board, &mv);
-    // Pawn (100) * 10 - Queen (900) = 100
-    assert!(score > 0); // Still positive but low
-    assert!(score < 200);
+    // Pawn (100) * 10 - Queen (900) = 100 (plus CAPTURE_BASE_SCORE)
+    // Queen takes pawn should score much lower than pawn takes queen
+    assert!(score > 0);
+
+    // Compare with pawn takes queen to verify relative ordering
+    let pxq_board = make_board("8/8/3q4/4P3/8/8/8/8 w - - 0 1");
+    let pxq_mv = Move::capture(Square::new(4, 4), Square::new(5, 3)); // exd6
+    let pxq_score = state.tables.mvv_lva_score(&pxq_board, &pxq_mv);
+    assert!(pxq_score > score); // Pawn takes queen should score higher
 }
 
 #[test]

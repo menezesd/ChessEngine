@@ -8,7 +8,7 @@
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece};
 
-use super::helpers::AttackContext;
+use super::helpers::{single_pawn_attacks, AttackContext};
 
 /// Space bonus per controlled square in enemy territory
 pub const SPACE_BONUS_MG: i32 = 2;
@@ -52,7 +52,6 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let _c_idx = color.index();
         let our_attacks = ctx.all_attacks(color);
         let enemy_attacks = ctx.all_attacks(color.opponent());
 
@@ -69,8 +68,7 @@ impl Board {
         mg += space_count * SPACE_BONUS_MG;
         eg += space_count * SPACE_BONUS_EG;
 
-        // Central control
-        let _center_control = (our_attacks.0 & CENTER_SQUARES).count_ones() as i32;
+        // Central control (safe squares bonus)
         let safe_center = (safe_squares.0 & CENTER_SQUARES).count_ones() as i32;
 
         // Extra bonus for safely controlling center
@@ -98,37 +96,8 @@ impl Board {
         let mut breaks = 0;
 
         for pawn_sq in own_pawns.iter() {
-            let file = pawn_sq.index() % 8;
-            let rank = pawn_sq.index() / 8;
-
-            // Check if pawn can capture to create a break
-            let capture_sqs = match color {
-                Color::White => {
-                    if rank >= 7 {
-                        continue;
-                    }
-                    let mut caps = 0u64;
-                    if file > 0 {
-                        caps |= 1u64 << (pawn_sq.index() + 7);
-                    }
-                    if file < 7 {
-                        caps |= 1u64 << (pawn_sq.index() + 9);
-                    }
-                    caps
-                }
-                Color::Black => {
-                    if rank <= 0 {
-                        continue;
-                    }
-                    let mut caps = 0u64;
-                    if file > 0 {
-                        caps |= 1u64 << (pawn_sq.index() - 9);
-                    }
-                    if file < 7 {
-                        caps |= 1u64 << (pawn_sq.index() - 7);
-                    }
-                    caps
-                }
+            let Some(capture_sqs) = single_pawn_attacks(pawn_sq.index(), color) else {
+                continue;
             };
 
             // Check if capture is available (enemy pawn present)
@@ -158,7 +127,7 @@ mod tests {
         let board: Board = "rnbqkbnr/pppppppp/8/8/3PP3/8/PPP2PPP/RNBQKBNR w KQkq - 0 1"
             .parse()
             .unwrap();
-        let ctx = super::super::helpers::AttackContext::new(&board);
+        let ctx = board.compute_attack_context();
         let (mg, _) = board.eval_space_control(&ctx);
         // White should have positive space advantage
         assert!(mg > 0);

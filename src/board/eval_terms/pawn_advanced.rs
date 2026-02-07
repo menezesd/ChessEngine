@@ -97,13 +97,13 @@ impl Board {
 
             // Pawn lever detection
             // A lever is a pawn that can capture to open a file
-            if self.is_pawn_lever(pawn_sq.index(), enemy_pawns, enemy_king_file, color) {
+            if Self::is_pawn_lever(pawn_sq.index(), enemy_pawns, enemy_king_file, color) {
                 mg += PAWN_LEVER_MG;
             }
         }
 
         // Pawn chain evaluation
-        let chain_bonus = self.count_chain_links(own_pawns, color);
+        let chain_bonus = Self::count_chain_links(own_pawns, color);
         mg += chain_bonus * PAWN_CHAIN_MG;
         eg += chain_bonus * PAWN_CHAIN_EG;
 
@@ -118,7 +118,6 @@ impl Board {
         enemy_pawns: Bitboard,
         color: Color,
     ) -> bool {
-        let _file = pawn_sq % 8;
         let rank = pawn_sq / 8;
 
         // Already a passed pawn? Not a candidate
@@ -159,7 +158,6 @@ impl Board {
 
     /// Check if a pawn is a lever that can open lines toward enemy king
     fn is_pawn_lever(
-        &self,
         pawn_sq: usize,
         enemy_pawns: Bitboard,
         enemy_king_file: usize,
@@ -190,7 +188,7 @@ impl Board {
                 caps
             }
             Color::Black => {
-                if rank <= 0 {
+                if rank == 0 {
                     return false;
                 }
                 let mut caps = 0u64;
@@ -208,7 +206,7 @@ impl Board {
     }
 
     /// Count pawn chain links (pawns defended by other pawns diagonally)
-    fn count_chain_links(&self, pawns: Bitboard, color: Color) -> i32 {
+    fn count_chain_links(pawns: Bitboard, color: Color) -> i32 {
         // A chain link is a pawn defended by another pawn
         let defenders = match color {
             Color::White => {
@@ -241,7 +239,7 @@ mod tests {
             .unwrap();
         let (mg, eg) = board.eval_pawn_advanced();
         // Just verify it runs without panic
-        assert!(mg >= 0 || mg < 0); // Always true, just to use the value
+        let _ = (mg, eg); // Use both values to avoid warnings
     }
 
     #[test]
@@ -249,7 +247,7 @@ mod tests {
         // Classic pawn chain d4-e5
         let board: Board = "8/8/8/4P3/3P4/8/8/8 w - - 0 1".parse().unwrap();
         let white_pawns = board.pieces[0][Piece::Pawn.index()];
-        let links = board.count_chain_links(white_pawns, Color::White);
+        let links = Board::count_chain_links(white_pawns, Color::White);
         assert!(links >= 1); // e5 is defended by d4
     }
 }

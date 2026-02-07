@@ -4,7 +4,7 @@
 
 use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS};
 use crate::board::state::Board;
-use crate::board::types::{Bitboard, Piece};
+use crate::board::types::{Bitboard, Color, Piece};
 
 use super::helpers::AttackContext;
 use super::tables::{
@@ -36,13 +36,11 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
-            let enemy_pawn_attacks = if color_idx == 0 {
-                black_pawn_attacks
-            } else {
-                white_pawn_attacks
-            };
+        let pawn_attacks = [white_pawn_attacks, black_pawn_attacks];
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
+            let enemy_pawn_attacks = pawn_attacks[color.opponent().index()];
 
             // Knight mobility
             for sq_idx in self.pieces[color_idx][Piece::Knight.index()].iter() {

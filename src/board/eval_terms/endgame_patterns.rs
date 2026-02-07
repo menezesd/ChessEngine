@@ -41,7 +41,7 @@ impl Board {
         // Check for fortress patterns
         if self.is_fortress() {
             // Reduce score toward draw
-            eg = eg / 4;
+            eg /= 4;
         }
 
         (mg, eg)
@@ -57,7 +57,7 @@ impl Board {
         let king_bb = self.pieces[c_idx][Piece::King.index()];
         if king_bb.0 != 0 {
             let king_sq = king_bb.0.trailing_zeros() as usize;
-            eg += self.king_centralization_bonus(king_sq);
+            eg += Self::king_centralization_bonus(king_sq);
         }
 
         // Rook activity - cutting off enemy king
@@ -65,7 +65,7 @@ impl Board {
         let enemy_king_bb = self.pieces[opp_idx][Piece::King.index()];
         if rooks.0 != 0 && enemy_king_bb.0 != 0 {
             let enemy_king_sq = enemy_king_bb.0.trailing_zeros() as usize;
-            eg += self.eval_rook_cut_off(rooks, enemy_king_sq, color);
+            eg += Self::eval_rook_cut_off(rooks, enemy_king_sq, color);
         }
 
         // Wrong bishop detection
@@ -75,7 +75,7 @@ impl Board {
     }
 
     /// Bonus for king being close to center in endgame.
-    fn king_centralization_bonus(&self, king_sq: usize) -> i32 {
+    fn king_centralization_bonus(king_sq: usize) -> i32 {
         let file = king_sq % 8;
         let rank = king_sq / 8;
 
@@ -90,7 +90,7 @@ impl Board {
     }
 
     /// Evaluate rook cutting off enemy king.
-    fn eval_rook_cut_off(&self, rooks: Bitboard, enemy_king_sq: usize, color: Color) -> i32 {
+    fn eval_rook_cut_off(rooks: Bitboard, enemy_king_sq: usize, color: Color) -> i32 {
         let enemy_king_rank = enemy_king_sq / 8;
         let enemy_king_file = enemy_king_sq % 8;
         let mut bonus = 0;
@@ -207,9 +207,8 @@ mod tests {
 
     #[test]
     fn test_king_centralization() {
-        let board: Board = "8/8/8/3K4/8/8/8/8 w - - 0 1".parse().unwrap();
         // King on d5 - central
-        let bonus = board.king_centralization_bonus(35); // d5 = 35
+        let bonus = Board::king_centralization_bonus(35); // d5 = 35
         assert!(bonus > 0);
     }
 

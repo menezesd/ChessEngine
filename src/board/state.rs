@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
 use super::{
-    Bitboard, Color, Piece, Square, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q,
+    Bitboard, Color, Piece, Square, ALL_CASTLING_RIGHTS,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +74,10 @@ pub struct Board {
     pub(crate) eval_mg: [i32; 2],    // [white, black] middlegame scores
     pub(crate) eval_eg: [i32; 2],    // [white, black] endgame scores
     pub(crate) game_phase: [i32; 2], // [white, black] phase contribution
+    // Cached king squares for fast check detection [white, black]
+    pub(crate) king_square: [Square; 2],
+    // Mailbox for O(1) piece_at lookups (mirrors bitboard state)
+    pub(crate) mailbox: [Option<(Color, Piece)>; 64],
 }
 
 impl Board {
@@ -97,7 +101,7 @@ impl Board {
             board.set_piece(Square::new(6, i), Color::Black, Piece::Pawn);
         }
 
-        board.castling_rights = CASTLE_WHITE_K | CASTLE_WHITE_Q | CASTLE_BLACK_K | CASTLE_BLACK_Q;
+        board.castling_rights = ALL_CASTLING_RIGHTS;
         board.white_to_move = true;
         board.hash = board.calculate_initial_hash();
         board.repetition_counts.set(board.hash, 1);
@@ -117,6 +121,7 @@ impl Board {
         self.eval_eg = [0, 0];
         self.game_phase = [0, 0];
         self.hash = 0;
+        self.mailbox = [None; 64];
     }
 
     /// Flip the side to move (for edit mode)
@@ -224,6 +229,9 @@ impl Board {
             eval_mg: [0, 0],
             eval_eg: [0, 0],
             game_phase: [0, 0],
+            // Will be set when kings are placed
+            king_square: [Square::new(0, 4), Square::new(7, 4)],
+            mailbox: [None; 64],
         }
     }
 
@@ -233,7 +241,7 @@ impl Board {
     }
 
     /// Compute a Zobrist hash of only the pawn positions.
-    /// Used for pawn hash table lookups.
+    /// Used for pawn hash table lookups and correction history.
     #[must_use]
     pub fn pawn_hash(&self) -> u64 {
         use crate::zobrist::ZOBRIST;
@@ -266,6 +274,14 @@ impl Board {
         } else {
             Color::Black
         }
+    }
+
+    /// Get all pieces of a given type regardless of color
+    #[must_use]
+    pub fn all_pieces_of_type(&self, piece: Piece) -> Bitboard {
+        Bitboard(
+            self.pieces[0][piece.index()].0 | self.pieces[1][piece.index()].0
+        )
     }
 
     #[must_use]

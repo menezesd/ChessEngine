@@ -12,7 +12,7 @@ pub(crate) enum SliderType {
 impl Board {
     pub(crate) fn generate_slider_moves(&self, from: Square, slider: SliderType) -> MoveList {
         let mut moves = MoveList::new();
-        let color = self.current_color();
+        let color = self.side_to_move();
         let own_occ = self.occupied[color.index()].0;
         let from_idx = from.index();
 

@@ -8,7 +8,7 @@
 
 /// Maximum quiescence search depth to prevent explosion
 /// Higher values find more tactics but increase nodes searched
-pub const MAX_QSEARCH_DEPTH: i32 = 8;
+pub const MAX_QSEARCH_DEPTH: i32 = 12;
 
 /// Scores with absolute value >= this are considered checkmate scores
 pub const MATE_THRESHOLD: i32 = 28000;
@@ -20,6 +20,9 @@ pub const MATE_THRESHOLD: i32 = 28000;
 
 /// Hash move (from transposition table) - highest priority
 pub const TT_MOVE_SCORE: i32 = 1 << 20;
+
+/// Base score for captures (added to MVV-LVA to ensure captures > killers)
+pub const CAPTURE_BASE_SCORE: i32 = 100000;
 
 /// First killer move (quiet that caused beta cutoff at same ply)
 pub const KILLER1_SCORE: i32 = 20000;

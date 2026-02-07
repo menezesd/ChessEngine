@@ -10,4 +10,4 @@ pub mod time;
 
 pub use controller::{EngineController, SearchJob, SearchParams};
 pub use protocol::{CommandResult, Protocol, ProtocolType};
-pub use time::{compute_time_limits, TimeControl};
+pub use time::{build_search_request, compute_time_limits, TimeConfig, TimeControl};

@@ -4,8 +4,8 @@ use super::super::{Bitboard, Board, Color, MoveList, Piece, Square};
 impl Board {
     pub(crate) fn generate_king_moves(&self, from: Square) -> MoveList {
         let mut moves = MoveList::new();
-        let color = self.current_color();
-        let back_rank = if color == Color::White { 0 } else { 7 };
+        let color = self.side_to_move();
+        let back_rank = color.back_rank();
         let from_idx = from.index();
         let own_occ = self.occupied[color.index()].0;
         let targets = Bitboard(KING_ATTACKS[from_idx] & !own_occ);
@@ -38,10 +38,14 @@ impl Board {
         moves
     }
 
+    /// Get the cached king square for a color.
+    /// This is O(1) instead of iterating the bitboard.
+    /// Returns Option for API compatibility with callers checking for illegal positions.
+    #[inline]
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn find_king(&self, color: Color) -> Option<Square> {
-        self.pieces[color.index()][Piece::King.index()]
-            .iter()
-            .next()
+        // Use cached king square - much faster than iterating bitboard
+        Some(self.king_square[color.index()])
     }
 
     pub(crate) fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
