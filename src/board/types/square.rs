@@ -8,6 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::board::error::SquareError;
 
+/// Number of ranks and files on the board
+#[allow(dead_code)]
+pub(crate) const BOARD_SIZE: usize = 8;
+
+/// Total number of squares on the board
+#[allow(dead_code)]
+pub(crate) const NUM_SQUARES: usize = BOARD_SIZE * BOARD_SIZE;
+
 pub(crate) fn file_to_index(file: char) -> usize {
     file as usize - ('a' as usize)
 }
@@ -68,6 +76,25 @@ impl Square {
     #[must_use]
     pub const fn flip_horizontal(self) -> Self {
         Square::new(self.rank(), 7 - self.file())
+    }
+
+    /// Get the square one rank forward from a color's perspective.
+    /// Returns None if the square is already at the edge (rank 7 for White, rank 0 for Black).
+    #[inline]
+    #[must_use]
+    pub const fn forward(self, is_white: bool) -> Option<Self> {
+        let rank = self.rank();
+        if is_white {
+            if rank < 7 {
+                Some(Square::new(rank + 1, self.file()))
+            } else {
+                None
+            }
+        } else if rank > 0 {
+            Some(Square::new(rank - 1, self.file()))
+        } else {
+            None
+        }
     }
 
     /// Get the square's index (0-63, a1=0, b1=1, ..., h8=63)

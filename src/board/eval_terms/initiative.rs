@@ -104,7 +104,7 @@ impl Board {
         }
 
         let enemy_king_sq = enemy_king_bb.0.trailing_zeros() as usize;
-        let king_zone = self.king_zone(enemy_king_sq);
+        let king_zone = Self::king_zone(enemy_king_sq);
 
         // Count how many of our pieces attack the king zone
         let mut attackers = 0;
@@ -148,7 +148,7 @@ impl Board {
     }
 
     /// Get king zone (king square + adjacent squares).
-    fn king_zone(&self, king_sq: usize) -> u64 {
+    fn king_zone(king_sq: usize) -> u64 {
         crate::board::attack_tables::KING_ATTACKS[king_sq] | (1u64 << king_sq)
     }
 
@@ -243,7 +243,7 @@ mod tests {
     fn test_tempo_threat() {
         // Position where white attacks an undefended piece
         let board: Board = "8/8/8/3n4/4B3/8/8/8 w - - 0 1".parse().unwrap();
-        let ctx = super::super::helpers::AttackContext::new(&board);
+        let ctx = board.compute_attack_context();
         let bonus = board.eval_tempo_threats(Color::White, &ctx);
         // Bishop attacks undefended knight
         assert!(bonus > 0);

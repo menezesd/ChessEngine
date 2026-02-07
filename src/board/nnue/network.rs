@@ -3,7 +3,7 @@
 //! Implements a 768 -> 256 -> 1 architecture with:
 //! - Dual perspective accumulators (white/black view)
 //! - Incremental updates for efficiency
-//! - SCReLU activation
+//! - `SCReLU` activation
 
 use super::simd;
 use super::{QA, QB, SCALE};
@@ -37,6 +37,7 @@ impl Default for NnueAccumulator {
 
 impl NnueAccumulator {
     /// Create a new accumulator initialized with biases
+    #[must_use] 
     pub fn new(biases: &[i16; HIDDEN_SIZE]) -> Self {
         Self {
             white: *biases,
@@ -81,13 +82,13 @@ impl NnueAccumulator {
 
 /// NNUE network weights
 pub struct NnueNetwork {
-    /// Feature transformer weights [INPUT_SIZE][HIDDEN_SIZE]
+    /// Feature transformer weights `[INPUT_SIZE][HIDDEN_SIZE]`
     pub feature_weights: Box<[[i16; HIDDEN_SIZE]; INPUT_SIZE]>,
-    /// Feature transformer biases [HIDDEN_SIZE]
+    /// Feature transformer biases `[HIDDEN_SIZE]`
     pub feature_bias: [i16; HIDDEN_SIZE],
-    /// Output weights for white perspective [HIDDEN_SIZE]
+    /// Output weights for white perspective `[HIDDEN_SIZE]`
     pub output_weights_white: [i16; HIDDEN_SIZE],
-    /// Output weights for black perspective [HIDDEN_SIZE]
+    /// Output weights for black perspective `[HIDDEN_SIZE]`
     pub output_weights_black: [i16; HIDDEN_SIZE],
     /// Output bias
     pub output_bias: i16,
@@ -111,26 +112,26 @@ impl NnueNetwork {
 
         // Read feature biases
         let mut feature_bias = [0i16; HIDDEN_SIZE];
-        for i in 0..HIDDEN_SIZE {
+        for elem in &mut feature_bias {
             let mut buf = [0u8; 2];
             reader.read_exact(&mut buf)?;
-            feature_bias[i] = i16::from_le_bytes(buf);
+            *elem = i16::from_le_bytes(buf);
         }
 
         // Read output weights (white perspective)
         let mut output_weights_white = [0i16; HIDDEN_SIZE];
-        for i in 0..HIDDEN_SIZE {
+        for elem in &mut output_weights_white {
             let mut buf = [0u8; 2];
             reader.read_exact(&mut buf)?;
-            output_weights_white[i] = i16::from_le_bytes(buf);
+            *elem = i16::from_le_bytes(buf);
         }
 
         // Read output weights (black perspective)
         let mut output_weights_black = [0i16; HIDDEN_SIZE];
-        for i in 0..HIDDEN_SIZE {
+        for elem in &mut output_weights_black {
             let mut buf = [0u8; 2];
             reader.read_exact(&mut buf)?;
-            output_weights_black[i] = i16::from_le_bytes(buf);
+            *elem = i16::from_le_bytes(buf);
         }
 
         // Read output bias
@@ -150,6 +151,7 @@ impl NnueNetwork {
     /// Evaluate position given accumulator and side to move
     /// Returns evaluation in centipawns from side-to-move perspective
     #[inline]
+    #[must_use] 
     pub fn evaluate(&self, acc: &NnueAccumulator, white_to_move: bool) -> i32 {
         let (us_acc, them_acc, us_weights, them_weights) = if white_to_move {
             (
@@ -181,6 +183,7 @@ impl NnueNetwork {
 
 /// Compute feature index for a piece at a square from a perspective
 #[inline]
+#[must_use] 
 pub fn feature_index(piece_type: usize, piece_color: usize, square: usize, perspective: usize) -> usize {
     let (oriented_sq, oriented_color) = if perspective == 1 {
         // Black's perspective - flip board vertically
@@ -199,6 +202,7 @@ pub static EMBEDDED_NETWORK: &[u8] = include_bytes!("nets/default.nnue");
 #[cfg(feature = "embedded_nnue")]
 impl NnueNetwork {
     /// Load network from embedded bytes
+    #[must_use] 
     pub fn from_embedded() -> Self {
         Self::from_bytes(EMBEDDED_NETWORK).expect("Embedded NNUE is invalid")
     }
@@ -224,26 +228,26 @@ impl NnueNetwork {
 
         // Read feature biases
         let mut feature_bias = [0i16; HIDDEN_SIZE];
-        for i in 0..HIDDEN_SIZE {
+        for elem in &mut feature_bias {
             let mut buf = [0u8; 2];
             reader.read_exact(&mut buf)?;
-            feature_bias[i] = i16::from_le_bytes(buf);
+            *elem = i16::from_le_bytes(buf);
         }
 
         // Read output weights (white perspective)
         let mut output_weights_white = [0i16; HIDDEN_SIZE];
-        for i in 0..HIDDEN_SIZE {
+        for elem in &mut output_weights_white {
             let mut buf = [0u8; 2];
             reader.read_exact(&mut buf)?;
-            output_weights_white[i] = i16::from_le_bytes(buf);
+            *elem = i16::from_le_bytes(buf);
         }
 
         // Read output weights (black perspective)
         let mut output_weights_black = [0i16; HIDDEN_SIZE];
-        for i in 0..HIDDEN_SIZE {
+        for elem in &mut output_weights_black {
             let mut buf = [0u8; 2];
             reader.read_exact(&mut buf)?;
-            output_weights_black[i] = i16::from_le_bytes(buf);
+            *elem = i16::from_le_bytes(buf);
         }
 
         // Read output bias

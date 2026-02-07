@@ -25,3 +25,7 @@ proptest = "1.4"
 [[bench]]
 name = "engine_benchmarks"
 harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

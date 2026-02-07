@@ -6,6 +6,50 @@ use crate::board::{Move, SearchIterationInfo, SearchState, EMPTY_MOVE, MAX_PLY};
 use std::sync::atomic::AtomicBool;
 
 impl SimpleSearchContext<'_> {
+    /// Check if we should stop the current iteration based on time management.
+    /// Returns true if we should stop iterating.
+    fn should_stop_iteration(
+        &self,
+        depth: u32,
+        soft_time_ms: u64,
+        stability_count: u32,
+        score: i32,
+        previous_score: i32,
+        prev_iter_nodes: u64,
+    ) -> bool {
+        if depth <= 4 || self.time_limit_ms == 0 {
+            return false;
+        }
+
+        let elapsed = self.start_time.elapsed().as_millis() as u64;
+
+        // Base soft time, adjusted for stability and score changes
+        let mut adjusted_soft_time = soft_time_ms;
+        if stability_count < 3 {
+            adjusted_soft_time = adjusted_soft_time.saturating_mul(130) / 100;
+        } else if stability_count >= 5 {
+            adjusted_soft_time = adjusted_soft_time.saturating_mul(80) / 100;
+        }
+        if score < previous_score - 30 {
+            adjusted_soft_time = adjusted_soft_time.saturating_mul(140) / 100;
+        }
+
+        // Node-based time check: estimate if we can complete the next depth
+        if elapsed > 0 && prev_iter_nodes > 5000 && depth > 5 {
+            let nps = self.nodes * 1000 / elapsed;
+            if nps > 0 {
+                let estimated_nodes = prev_iter_nodes.saturating_mul(25) / 10;
+                let estimated_time = estimated_nodes * 1000 / nps;
+                let remaining = self.time_limit_ms.saturating_sub(elapsed);
+                if estimated_time > remaining * 2 {
+                    return true;
+                }
+            }
+        }
+
+        elapsed >= adjusted_soft_time
+    }
+
     /// Iterative deepening with aspiration windows and time management.
     /// Uses `self.root_moves` for the moves to consider at root.
     /// `multipv_index`: which PV line this is (1 = best, 2 = second best, etc.)
@@ -40,51 +84,25 @@ impl SimpleSearchContext<'_> {
             let iter_start_nodes = self.nodes;
 
             // Soft time check: if we've used enough time and have a stable best move, stop
-            if depth > 4 && self.time_limit_ms > 0 {
-                let elapsed = self.start_time.elapsed().as_millis() as u64;
-
-                // Base soft time check
-                let mut adjusted_soft_time = soft_time_ms;
-
-                // Extend time if best move changed recently (unstable)
-                if stability_count < 3 {
-                    adjusted_soft_time = adjusted_soft_time.saturating_mul(130) / 100;
-                } else if stability_count >= 5 {
-                    // Reduce time if very stable
-                    adjusted_soft_time = adjusted_soft_time.saturating_mul(80) / 100;
-                }
-
-                // Extend time if score dropped significantly
-                if score < previous_score - 30 {
-                    adjusted_soft_time = adjusted_soft_time.saturating_mul(140) / 100;
-                }
-
-                // Node-based time check: estimate if we can complete the next depth
-                // Only apply after we have reliable node counts (depth > 5, prev_iter > 5000)
-                if elapsed > 0 && prev_iter_nodes > 5000 && depth > 5 {
-                    let nps = self.nodes * 1000 / elapsed;
-                    if nps > 0 {
-                        // Estimate nodes for this depth (branching factor ~2.5 typically)
-                        let estimated_nodes = prev_iter_nodes.saturating_mul(25) / 10;
-                        let estimated_time = estimated_nodes * 1000 / nps;
-                        let remaining = self.time_limit_ms.saturating_sub(elapsed);
-
-                        // Only abort if we're very confident we can't finish (need 2x remaining time)
-                        if estimated_time > remaining * 2 {
-                            break;
-                        }
-                    }
-                }
-
-                if elapsed >= adjusted_soft_time {
-                    break;
-                }
+            if self.should_stop_iteration(
+                depth,
+                soft_time_ms,
+                stability_count,
+                score,
+                previous_score,
+                prev_iter_nodes,
+            ) {
+                break;
             }
 
             self.initial_depth = depth;
 
-            // Aspiration window - simple fixed delta
-            let mut delta = if depth <= 5 { 35 } else { 20 };
+            // Aspiration window - fixed delta, stability adjustments removed
+            let mut delta = if depth <= 5 {
+                35
+            } else {
+                20
+            };
 
             let mut alpha = score.saturating_sub(delta);
             let mut beta = score.saturating_add(delta);

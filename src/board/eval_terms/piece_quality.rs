@@ -56,7 +56,7 @@ impl Board {
         // Evaluate each piece type
         let knights = self.pieces[c_idx][Piece::Knight.index()];
         for sq in knights.iter() {
-            let (piece_mg, piece_eg) = self.eval_piece_activity(
+            let (piece_mg, piece_eg) = Self::eval_piece_activity(
                 sq.index(),
                 KNIGHT_ATTACKS[sq.index()],
                 own_pieces,
@@ -70,7 +70,7 @@ impl Board {
         let bishops = self.pieces[c_idx][Piece::Bishop.index()];
         for sq in bishops.iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, true);
-            let (piece_mg, piece_eg) = self.eval_piece_activity(
+            let (piece_mg, piece_eg) = Self::eval_piece_activity(
                 sq.index(),
                 attacks,
                 own_pieces,
@@ -84,7 +84,7 @@ impl Board {
         let rooks = self.pieces[c_idx][Piece::Rook.index()];
         for sq in rooks.iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, false);
-            let (piece_mg, piece_eg) = self.eval_piece_activity(
+            let (piece_mg, piece_eg) = Self::eval_piece_activity(
                 sq.index(),
                 attacks,
                 own_pieces,
@@ -99,7 +99,7 @@ impl Board {
         for sq in queens.iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, true)
                 | slider_attacks(sq.index(), self.all_occupied.0, false);
-            let (piece_mg, piece_eg) = self.eval_piece_activity(
+            let (piece_mg, piece_eg) = Self::eval_piece_activity(
                 sq.index(),
                 attacks,
                 own_pieces,
@@ -118,7 +118,6 @@ impl Board {
 
     /// Evaluate activity of a single piece.
     fn eval_piece_activity(
-        &self,
         _sq: usize,
         attacks: u64,
         own_pieces: Bitboard,
@@ -189,9 +188,10 @@ mod tests {
     fn test_trapped_piece() {
         // Knight trapped in corner
         let board: Board = "8/8/1p6/p7/N7/8/8/8 w - - 0 1".parse().unwrap();
-        let ctx = super::super::helpers::AttackContext::new(&board);
+        let ctx = board.compute_attack_context();
         let (mg, eg) = board.eval_piece_quality(&ctx);
         // Knight on a4 with pawns on a5, b6 should be very restricted
+        let _ = eg; // Silence unused variable warning
         assert!(mg < 10); // Should have some penalty
     }
 
@@ -199,7 +199,7 @@ mod tests {
     fn test_active_piece() {
         // Knight in center with many squares
         let board: Board = "8/8/8/3N4/8/8/8/8 w - - 0 1".parse().unwrap();
-        let ctx = super::super::helpers::AttackContext::new(&board);
+        let ctx = board.compute_attack_context();
         let (mg, _) = board.eval_piece_quality(&ctx);
         // Central knight should be active
         assert!(mg >= 0);

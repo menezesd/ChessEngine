@@ -54,6 +54,21 @@ impl Board {
         self.see_impl(from, to, attacker, captured)
     }
 
+    /// SEE with known attacker and victim pieces.
+    ///
+    /// This avoids redundant `piece_at` lookups when the caller already knows the pieces.
+    #[inline]
+    #[must_use]
+    pub fn see_with_pieces(
+        &self,
+        from: Square,
+        to: Square,
+        attacker: Piece,
+        victim: Piece,
+    ) -> i32 {
+        self.see_impl(from, to, attacker, victim)
+    }
+
     /// SEE implementation with known attacker and victim.
     fn see_impl(&self, from: Square, to: Square, attacker: Piece, victim: Piece) -> i32 {
         // Maximum depth of exchanges (should never be exceeded)
@@ -195,10 +210,7 @@ impl Board {
     #[inline]
     fn diagonal_sliders(&self) -> Bitboard {
         Bitboard(
-            self.pieces[0][Piece::Bishop.index()].0
-                | self.pieces[0][Piece::Queen.index()].0
-                | self.pieces[1][Piece::Bishop.index()].0
-                | self.pieces[1][Piece::Queen.index()].0,
+            self.all_pieces_of_type(Piece::Bishop).0 | self.all_pieces_of_type(Piece::Queen).0,
         )
     }
 
@@ -206,10 +218,7 @@ impl Board {
     #[inline]
     fn straight_sliders(&self) -> Bitboard {
         Bitboard(
-            self.pieces[0][Piece::Rook.index()].0
-                | self.pieces[0][Piece::Queen.index()].0
-                | self.pieces[1][Piece::Rook.index()].0
-                | self.pieces[1][Piece::Queen.index()].0,
+            self.all_pieces_of_type(Piece::Rook).0 | self.all_pieces_of_type(Piece::Queen).0,
         )
     }
 

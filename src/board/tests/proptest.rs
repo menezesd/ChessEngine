@@ -120,7 +120,7 @@ proptest! {
             }
 
             // Verify each legal move doesn't leave king in check
-            let current_color = board.current_color();
+            let current_color = board.side_to_move();
             for mv in moves.iter() {
                 let info = board.make_move(*mv);
                 prop_assert!(!board.is_in_check(current_color),

@@ -43,6 +43,46 @@ impl AttackContext {
     }
 }
 
+/// Compute attack squares for a single pawn.
+///
+/// Returns `None` if the pawn cannot attack (on promotion/first rank).
+/// This is a standalone function to avoid code duplication in eval terms.
+#[inline]
+#[must_use]
+pub fn single_pawn_attacks(sq: usize, color: Color) -> Option<u64> {
+    let file = sq % 8;
+    let rank = sq / 8;
+
+    match color {
+        Color::White => {
+            if rank >= 7 {
+                return None;
+            }
+            let mut attacks = 0u64;
+            if file > 0 {
+                attacks |= 1u64 << (sq + 7);
+            }
+            if file < 7 {
+                attacks |= 1u64 << (sq + 9);
+            }
+            Some(attacks)
+        }
+        Color::Black => {
+            if rank == 0 {
+                return None;
+            }
+            let mut attacks = 0u64;
+            if file > 0 {
+                attacks |= 1u64 << (sq - 9);
+            }
+            if file < 7 {
+                attacks |= 1u64 << (sq - 7);
+            }
+            Some(attacks)
+        }
+    }
+}
+
 impl Board {
     /// Get all squares attacked by pawns of a color.
     #[must_use]

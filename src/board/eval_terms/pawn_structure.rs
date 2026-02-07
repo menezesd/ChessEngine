@@ -24,15 +24,11 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
-            let color = if color_idx == 0 {
-                Color::White
-            } else {
-                Color::Black
-            };
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
             let own_pawns = self.pieces[color_idx][Piece::Pawn.index()];
-            let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+            let enemy_pawns = self.pieces[color.opponent().index()][Piece::Pawn.index()];
 
             for sq_idx in own_pawns.iter() {
                 let sq = sq_idx;

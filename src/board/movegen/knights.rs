@@ -4,7 +4,7 @@ use super::super::{Bitboard, Board, MoveList, Square};
 impl Board {
     pub(crate) fn generate_knight_moves(&self, from: Square) -> MoveList {
         let mut moves = MoveList::new();
-        let color = self.current_color();
+        let color = self.side_to_move();
         let from_idx = from.index();
         let own_occ = self.occupied[color.index()].0;
         let targets = Bitboard(KNIGHT_ATTACKS[from_idx] & !own_occ);

@@ -7,7 +7,7 @@
 use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS};
 use crate::board::masks::{FILES, KING_ATTACK_TABLE, KING_ZONE_EXTENDED, PAWN_SHIELD_MASK};
 use crate::board::state::Board;
-use crate::board::types::{Bitboard, Piece};
+use crate::board::types::{Bitboard, Color, Piece};
 
 use super::helpers::AttackContext;
 use super::tables::{
@@ -38,9 +38,10 @@ impl Board {
     ) -> (i32, i32) {
         let mut mg = 0;
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
-            let enemy_idx = 1 - color_idx;
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
+            let enemy_idx = color.opponent().index();
 
             // Find our king
             let king_bb = self.pieces[color_idx][Piece::King.index()];
@@ -137,8 +138,9 @@ impl Board {
     pub fn eval_king_shield(&self) -> (i32, i32) {
         let mut mg = 0;
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
 
             // Find our king
             let king_bb = self.pieces[color_idx][Piece::King.index()];
@@ -160,7 +162,7 @@ impl Board {
             let file_mask = FILES[king_file];
             let our_pawns_on_file = (file_mask.0 & our_pawns.0) != 0;
             let enemy_pawns_on_file =
-                (file_mask.0 & self.pieces[1 - color_idx][Piece::Pawn.index()].0) != 0;
+                (file_mask.0 & self.pieces[color.opponent().index()][Piece::Pawn.index()].0) != 0;
 
             if !our_pawns_on_file && !enemy_pawns_on_file {
                 mg += sign * KING_OPEN_FILE_MG;
@@ -169,7 +171,7 @@ impl Board {
             }
 
             // Check adjacent files too (half penalty for adjacent files)
-            let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+            let enemy_pawns = self.pieces[color.opponent().index()][Piece::Pawn.index()];
             for &adj_file_idx in &[king_file.wrapping_sub(1), king_file + 1] {
                 if adj_file_idx < 8 {
                     let adj_file = FILES[adj_file_idx];

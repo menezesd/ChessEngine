@@ -6,6 +6,22 @@ use crate::board::{ScoredMoveList, EMPTY_MOVE};
 /// Delta pruning safety margin (centipawns)
 const DELTA_MARGIN: i32 = 200;
 
+/// Additional delta margin at deeper qsearch depths
+const DELTA_MARGIN_DEEP: i32 = 100;
+
+/// SEE threshold at shallow qsearch (prune all losing captures)
+const SEE_THRESHOLD_SHALLOW: i32 = 0;
+
+/// SEE threshold at medium qsearch (allow slightly bad captures)
+const SEE_THRESHOLD_MEDIUM: i32 = -100;
+
+/// SEE threshold at deep qsearch (allow more speculative captures)
+const SEE_THRESHOLD_DEEP: i32 = -200;
+
+/// Depth thresholds for SEE pruning
+const SEE_SHALLOW_DEPTH: i32 = 2;
+const SEE_MEDIUM_DEPTH: i32 = 5;
+
 impl SimpleSearchContext<'_> {
     /// Quiescence search for tactical stability with SEE and delta pruning
     pub fn quiesce(&mut self, mut alpha: i32, beta: i32, qdepth: i32) -> i32 {
@@ -16,7 +32,7 @@ impl SimpleSearchContext<'_> {
             return stand_pat;
         }
 
-        let in_check = self.board.is_in_check(self.board.current_color());
+        let in_check = self.board.is_in_check(self.board.side_to_move());
         let mut best_score = if in_check { -30000 } else { stand_pat };
 
         // Generate moves: all moves if in check, captures only otherwise
@@ -69,25 +85,42 @@ impl SimpleSearchContext<'_> {
             }
 
             // Delta pruning: if even winning the captured piece + margin won't raise alpha, skip
+            // Use slightly larger margin at deep depths to be less aggressive
             if !in_check && m.is_capture() {
                 if let Some((_, captured)) = self.board.piece_at(m.to()) {
-                    let delta = piece_value(captured) + DELTA_MARGIN;
+                    let margin = if qdepth <= SEE_SHALLOW_DEPTH {
+                        DELTA_MARGIN
+                    } else {
+                        DELTA_MARGIN + DELTA_MARGIN_DEEP
+                    };
+                    let delta = piece_value(captured) + margin;
                     if stand_pat + delta < alpha {
                         continue;
                     }
                 }
             }
 
-            // SEE pruning: skip bad captures unless we are in check
+            // SEE pruning: depth-dependent thresholds
+            // At shallow qsearch, prune all bad captures
+            // At deeper qsearch, allow slightly bad captures to find tactics
             if !in_check {
                 let see_score = self.board.see(m.from(), m.to());
-                if see_score < 0 {
+                let see_threshold = if qdepth <= SEE_SHALLOW_DEPTH {
+                    SEE_THRESHOLD_SHALLOW
+                } else if qdepth <= SEE_MEDIUM_DEPTH {
+                    SEE_THRESHOLD_MEDIUM
+                } else {
+                    SEE_THRESHOLD_DEEP
+                };
+                if see_score < see_threshold {
                     continue;
                 }
             }
 
             self.nodes += 1;
             let info = self.board.make_move(m);
+            // Prefetch TT for child position
+            self.state.tables.tt.prefetch(self.board.hash);
             let score = -self.quiesce(-beta, -alpha, qdepth + 1);
             self.board.unmake_move(m, info);
 

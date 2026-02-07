@@ -10,6 +10,10 @@ pub(crate) const CASTLE_WHITE_Q: u8 = 1 << 1;
 pub(crate) const CASTLE_BLACK_K: u8 = 1 << 2;
 pub(crate) const CASTLE_BLACK_Q: u8 = 1 << 3;
 
+/// All castling rights combined
+pub(crate) const ALL_CASTLING_RIGHTS: u8 =
+    CASTLE_WHITE_K | CASTLE_WHITE_Q | CASTLE_BLACK_K | CASTLE_BLACK_Q;
+
 /// Castling rights represented as a bitmask
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -25,7 +29,7 @@ impl CastlingRights {
     /// All castling rights (both sides can castle kingside and queenside)
     #[must_use]
     pub const fn all() -> Self {
-        CastlingRights(CASTLE_WHITE_K | CASTLE_WHITE_Q | CASTLE_BLACK_K | CASTLE_BLACK_Q)
+        CastlingRights(ALL_CASTLING_RIGHTS)
     }
 
     /// Check if a specific castling right is set

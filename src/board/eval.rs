@@ -29,6 +29,59 @@ const PHASE_TOTAL: i32 = 24;
 /// (Texel tuned v2)
 const BISHOP_OPEN_BONUS: i32 = 12;
 
+/// Accumulated evaluation score with middlegame and endgame components.
+#[derive(Debug, Clone, Copy, Default)]
+struct EvalScore {
+    mg: i32,
+    eg: i32,
+}
+
+impl EvalScore {
+    /// Create a new score from mg/eg tuple.
+    #[inline]
+    const fn new(mg: i32, eg: i32) -> Self {
+        EvalScore { mg, eg }
+    }
+
+    /// Create a score where mg and eg are the same (e.g., for bonuses).
+    #[inline]
+    const fn both(value: i32) -> Self {
+        EvalScore { mg: value, eg: value }
+    }
+
+    /// Create a score with only middlegame component.
+    #[inline]
+    const fn mg_only(mg: i32) -> Self {
+        EvalScore { mg, eg: 0 }
+    }
+}
+
+impl std::ops::Add for EvalScore {
+    type Output = Self;
+    #[inline]
+    fn add(self, other: Self) -> Self {
+        EvalScore {
+            mg: self.mg + other.mg,
+            eg: self.eg + other.eg,
+        }
+    }
+}
+
+impl std::ops::AddAssign for EvalScore {
+    #[inline]
+    fn add_assign(&mut self, other: Self) {
+        self.mg += other.mg;
+        self.eg += other.eg;
+    }
+}
+
+impl From<(i32, i32)> for EvalScore {
+    #[inline]
+    fn from((mg, eg): (i32, i32)) -> Self {
+        EvalScore { mg, eg }
+    }
+}
+
 /// Phase factors for tapered evaluation.
 ///
 /// Encapsulates the middlegame/endgame interpolation weights.
@@ -105,77 +158,38 @@ impl Board {
         // Compute attack context once for all evaluation terms
         let ctx = self.compute_attack_context();
 
+        // Accumulate all evaluation terms using EvalScore
+        let mut total = EvalScore::new(base_mg, base_eg);
+        total += EvalScore::both(bishop_bonus);
+
         // Advanced evaluation terms (all from white's perspective)
-        let (mob_mg, mob_eg) = self.eval_mobility_with_context(&ctx);
-        let (pawn_mg, pawn_eg) = self.eval_pawn_structure();
-        let (king_mg, king_eg) = self.eval_king_safety_with_context(&ctx);
-        let (shield_mg, shield_eg) = self.eval_king_shield();
-        let (rook_mg, rook_eg) = self.eval_rooks();
-        let (minor_mg, minor_eg) = self.eval_minor_pieces(&ctx);
-        let tropism_mg = self.eval_tropism();
+        total += self.eval_mobility_with_context(&ctx).into();
+        total += self.eval_pawn_structure().into();
+        total += self.eval_king_safety_with_context(&ctx).into();
+        total += self.eval_king_shield().into();
+        total += self.eval_rooks().into();
+        total += self.eval_minor_pieces(&ctx).into();
+        total += EvalScore::mg_only(self.eval_tropism());
 
         // Combined evaluation for passed pawns and hanging pieces (shares attack computation)
         let (pass_mg, pass_eg, hanging) = self.eval_attacks_dependent_with_context(&ctx);
+        total += EvalScore::new(pass_mg, pass_eg);
+        total += EvalScore::both(hanging);
 
-        // New advanced evaluation terms
-        let (coord_mg, coord_eg) = self.eval_coordination(&ctx);
-        let (pawn_adv_mg, pawn_adv_eg) = self.eval_pawn_advanced();
-        let (weak_mg, weak_eg) = self.eval_weak_squares(&ctx);
-        let (kdanger_mg, kdanger_eg) = self.eval_king_danger(&ctx);
-        let (endgame_mg, endgame_eg) = self.eval_endgame_patterns();
-        let (space_mg, space_eg) = self.eval_space_control(&ctx);
-        let (threats_mg, threats_eg) = self.eval_threats_advanced(&ctx);
-        let (quality_mg, quality_eg) = self.eval_piece_quality(&ctx);
-        let (imbal_mg, imbal_eg) = self.eval_imbalances();
-        let (init_mg, init_eg) = self.eval_initiative(&ctx);
-
-        // Combine all middlegame terms
-        let total_mg = base_mg
-            + bishop_bonus
-            + mob_mg
-            + pawn_mg
-            + pass_mg
-            + king_mg
-            + shield_mg
-            + rook_mg
-            + minor_mg
-            + tropism_mg
-            + hanging
-            + coord_mg
-            + pawn_adv_mg
-            + weak_mg
-            + kdanger_mg
-            + endgame_mg
-            + space_mg
-            + threats_mg
-            + quality_mg
-            + imbal_mg
-            + init_mg;
-
-        // Combine all endgame terms
-        let total_eg = base_eg
-            + bishop_bonus
-            + mob_eg
-            + pawn_eg
-            + pass_eg
-            + king_eg
-            + shield_eg
-            + rook_eg
-            + minor_eg
-            + hanging
-            + coord_eg
-            + pawn_adv_eg
-            + weak_eg
-            + kdanger_eg
-            + endgame_eg
-            + space_eg
-            + threats_eg
-            + quality_eg
-            + imbal_eg
-            + init_eg;
+        // Additional advanced evaluation terms
+        total += self.eval_coordination(&ctx).into();
+        total += self.eval_pawn_advanced().into();
+        total += self.eval_weak_squares(&ctx).into();
+        total += self.eval_king_danger(&ctx).into();
+        total += self.eval_endgame_patterns().into();
+        total += self.eval_space_control(&ctx).into();
+        total += self.eval_threats_advanced(&ctx).into();
+        total += self.eval_piece_quality(&ctx).into();
+        total += self.eval_imbalances().into();
+        total += self.eval_initiative(&ctx).into();
 
         // Tapered evaluation
-        let mut score = phase.taper(total_mg, total_eg) + TEMPO_BONUS;
+        let mut score = phase.taper(total.mg, total.eg) + TEMPO_BONUS;
 
         // Apply draw multiplier in endgames
         if phase.endphase > 12 {
@@ -201,16 +215,21 @@ impl Board {
     /// Note: Bishop imbalance is only in full eval to keep simple eval fast.
     #[must_use]
     pub fn evaluate_simple(&self) -> i32 {
-        let c_idx = usize::from(!self.white_to_move);
-        let opp_idx = 1 - c_idx;
+        let stm = if self.white_to_move {
+            Color::White
+        } else {
+            Color::Black
+        };
+        let stm_idx = stm.index();
+        let opp_idx = stm.opponent().index();
 
         let phase = PhaseFactors::from_game_phase(self.game_phase[0], self.game_phase[1]);
 
-        let mideval = self.eval_mg[c_idx] - self.eval_mg[opp_idx];
-        let endeval = self.eval_eg[c_idx] - self.eval_eg[opp_idx];
+        let mideval = self.eval_mg[stm_idx] - self.eval_mg[opp_idx];
+        let endeval = self.eval_eg[stm_idx] - self.eval_eg[opp_idx];
 
         // Bishop pair bonus only (imbalance is in full eval)
-        let our_bishops = self.pieces[c_idx][Piece::Bishop.index()].popcount();
+        let our_bishops = self.pieces[stm_idx][Piece::Bishop.index()].popcount();
         let opp_bishops = self.pieces[opp_idx][Piece::Bishop.index()].popcount();
         let bishop_bonus =
             BISHOP_PAIR_BONUS * ((our_bishops / 2) as i32 - (opp_bishops / 2) as i32);
@@ -219,7 +238,7 @@ impl Board {
     }
 
     /// Compute active NNUE features for both perspectives.
-    /// Returns (white_features, black_features) as vectors of feature indices.
+    /// Returns (`white_features`, `black_features`) as vectors of feature indices.
     #[must_use]
     pub fn compute_nnue_features(&self) -> (Vec<usize>, Vec<usize>) {
         use super::nnue::network::feature_index;
@@ -227,7 +246,8 @@ impl Board {
         let mut white_features = Vec::with_capacity(32);
         let mut black_features = Vec::with_capacity(32);
 
-        for color_idx in 0..2 {
+        for color in Color::BOTH {
+            let color_idx = color.index();
             for piece_idx in 0..6 {
                 let bb = self.pieces[color_idx][piece_idx];
                 for sq in bb.iter() {

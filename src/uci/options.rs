@@ -1,5 +1,15 @@
 use crate::board::{SearchParams, SearchState, DEFAULT_TT_MB};
 
+/// Print a UCI spin option.
+fn print_spin(name: &str, default: impl std::fmt::Display, min: impl std::fmt::Display, max: impl std::fmt::Display) {
+    println!("option name {name} type spin default {default} min {min} max {max}");
+}
+
+/// Print a UCI check option.
+fn print_check(name: &str, default: bool) {
+    println!("option name {name} type check default {}", if default { "true" } else { "false" });
+}
+
 pub enum UciOptionAction {
     ReinitHash(usize),
     SetThreads(usize),
@@ -34,63 +44,24 @@ impl UciOptions {
     pub fn print(&self, params: &SearchParams) {
         println!("id name chess_engine");
         println!("id author Dean Menezes");
-        println!(
-            "option name Hash type spin default {} min 1 max 65536",
-            self.hash_mb
-        );
-        println!(
-            "option name Threads type spin default {} min 1 max 256",
-            self.threads
-        );
-        println!(
-            "option name Move Overhead type spin default {} min 0 max 1000",
-            self.move_overhead_ms
-        );
-        println!(
-            "option name Soft Time Percent type spin default {} min 1 max 100",
-            self.soft_time_percent
-        );
-        println!(
-            "option name Hard Time Percent type spin default {} min 1 max 100",
-            self.hard_time_percent
-        );
-        println!(
-            "option name Max Nodes type spin default {} min 0 max 18446744073709551615",
-            self.default_max_nodes
-        );
-        println!(
-            "option name MultiPV type spin default {} min 1 max 64",
-            self.multi_pv
-        );
-        println!(
-            "option name Ponder type check default {}",
-            if self.ponder { "true" } else { "false" }
-        );
+
+        // Engine options
+        print_spin("Hash", self.hash_mb, 1, 65536);
+        print_spin("Threads", self.threads, 1, 256);
+        print_spin("Move Overhead", self.move_overhead_ms, 0, 1000);
+        print_spin("Soft Time Percent", self.soft_time_percent, 1, 100);
+        print_spin("Hard Time Percent", self.hard_time_percent, 1, 100);
+        print_spin("Max Nodes", self.default_max_nodes, 0_u64, u64::MAX);
+        print_spin("MultiPV", self.multi_pv, 1, 64);
+        print_check("Ponder", self.ponder);
+
         // Tunable search parameters for SPSA
-        println!(
-            "option name RFPMargin type spin default {} min 50 max 300",
-            params.rfp_margin
-        );
-        println!(
-            "option name NullMoveReduction type spin default {} min 1 max 5",
-            params.null_reduction
-        );
-        println!(
-            "option name FutilityMargin type spin default {} min 50 max 250",
-            params.futility_margin
-        );
-        println!(
-            "option name RazoringMargin type spin default {} min 150 max 500",
-            params.razor_margin
-        );
-        println!(
-            "option name IIRMinDepth type spin default {} min 3 max 8",
-            params.iir_min_depth
-        );
-        println!(
-            "option name LMRMinDepth type spin default {} min 2 max 6",
-            params.lmr_min_depth
-        );
+        print_spin("RFPMargin", params.rfp_margin, 50, 300);
+        print_spin("NullMoveReduction", params.null_reduction, 1, 5);
+        print_spin("FutilityMargin", params.futility_margin, 50, 250);
+        print_spin("IIRMinDepth", params.iir_min_depth, 3, 8);
+        print_spin("LMRMinDepth", params.lmr_min_depth, 2, 6);
+
         println!("uciok");
     }
 
@@ -181,11 +152,6 @@ impl UciOptions {
             "futilitymargin" => {
                 if let Some(v) = value.and_then(|v| v.parse::<i32>().ok()) {
                     state.params_mut().futility_margin = v.clamp(50, 250);
-                }
-            }
-            "razoringmargin" => {
-                if let Some(v) = value.and_then(|v| v.parse::<i32>().ok()) {
-                    state.params_mut().razor_margin = v.clamp(150, 500);
                 }
             }
             "iirmindepth" => {

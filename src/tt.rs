@@ -233,6 +233,20 @@ impl TranspositionTable {
         (hash as usize) & self.mask
     }
 
+    /// Prefetch TT bucket for a hash to hide memory latency.
+    /// Call this before making a move, then probe after the move is made.
+    #[inline]
+    pub fn prefetch(&self, hash: u64) {
+        let idx = self.index(hash);
+        let bucket_ptr = self.buckets.as_ptr().wrapping_add(idx);
+
+        // Use a volatile read as a cross-platform prefetch hint
+        // The compiler can't optimize this away, and it brings the cache line in
+        unsafe {
+            std::ptr::read_volatile(bucket_ptr.cast::<u8>());
+        }
+    }
+
     /// Probe the table for an entry matching the given hash.
     /// Returns None if no valid entry is found.
     #[must_use]

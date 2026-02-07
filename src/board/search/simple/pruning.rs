@@ -16,12 +16,13 @@ impl SimpleSearchContext<'_> {
         };
 
         // Don't do null move in check, with no pieces, at root, or when eval is too low
+        // Allow null move when eval is slightly below beta (more aggressive)
         if node.in_check
             || dominated_phase == 0
             || depth <= 2
             || depth >= self.initial_depth
             || node.ply == 0
-            || eval <= beta
+            || eval < beta - 20
         {
             return None;
         }
@@ -46,6 +47,59 @@ impl SimpleSearchContext<'_> {
 
         if score >= beta {
             return Some(beta);
+        }
+
+        None
+    }
+
+    /// `ProbCut`: If a shallow search on good captures suggests we'll beat beta
+    /// by a large margin, prune this node. Based on the idea that if a capture
+    /// refutes the position at reduced depth, it will likely refute at full depth.
+    pub(super) fn try_probcut(
+        &mut self,
+        depth: u32,
+        beta: i32,
+        node: &NodeContext,
+    ) -> Option<i32> {
+        // Very conservative: only at high depths, not in check
+        // High margin to avoid pruning tactical positions
+        if depth < 8 || node.in_check || beta.abs() > 20000 {
+            return None;
+        }
+
+        let probcut_beta = beta + 350;
+        let probcut_depth = depth.saturating_sub(5);
+
+        // Generate captures and promotions
+        let captures = self.board.generate_tactical_moves();
+
+        for m in &captures {
+            // Only consider good captures (positive SEE)
+            if self.board.see(m.from(), m.to()) < 0 {
+                continue;
+            }
+
+            let info = self.board.make_move(*m);
+
+            // Do a reduced search at probcut_beta
+            let score = -self.alphabeta(
+                probcut_depth,
+                -probcut_beta,
+                -probcut_beta + 1,
+                false,
+                node.ply + 1,
+                crate::board::EMPTY_MOVE,
+            );
+
+            self.board.unmake_move(*m, info);
+
+            if self.should_stop() {
+                return None;
+            }
+
+            if score >= probcut_beta {
+                return Some(score);
+            }
         }
 
         None
@@ -96,6 +150,11 @@ impl SimpleSearchContext<'_> {
             if let Some(score) = self.try_null_move_pruning(depth, beta, eval, node) {
                 return Some(score);
             }
+        }
+
+        // ProbCut: reduced search on good captures (conservative settings)
+        if let Some(score) = self.try_probcut(depth, beta, node) {
+            return Some(score);
         }
 
         None

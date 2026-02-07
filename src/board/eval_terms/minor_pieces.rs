@@ -5,8 +5,6 @@
 //! - Bishop outposts
 //! - Bad bishop penalty (bishop blocked by own pawns on same color)
 
-#![allow(clippy::needless_range_loop)]
-
 use crate::board::masks::ADJACENT_FILES;
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece};
@@ -38,13 +36,9 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
-            let color = if color_idx == 0 {
-                Color::White
-            } else {
-                Color::Black
-            };
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
 
             // Get pawn attacks for the enemy (unused currently but kept for future use)
             let _enemy_pawn_attacks = ctx.pawn_attacks(color.opponent());
@@ -64,7 +58,7 @@ impl Board {
                         let adj_files = ADJACENT_FILES[file];
 
                         // Get enemy pawns that could attack this square
-                        let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+                        let enemy_pawns = self.pieces[color.opponent().index()][Piece::Pawn.index()];
                         let can_be_attacked = match color {
                             Color::White => {
                                 // Enemy pawns below this square on adjacent files
@@ -103,7 +97,7 @@ impl Board {
                 {
                     let file = sq.file();
                     let adj_files = ADJACENT_FILES[file];
-                    let enemy_pawns = self.pieces[1 - color_idx][Piece::Pawn.index()];
+                    let enemy_pawns = self.pieces[color.opponent().index()][Piece::Pawn.index()];
 
                     let can_be_attacked = match color {
                         Color::White => {

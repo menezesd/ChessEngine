@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use chess_engine::board::SearchIterationInfo;
 use chess_engine::board::DEFAULT_TT_MB;
-use chess_engine::engine::time::{build_search_request, TimeControl};
+use chess_engine::engine::time::{build_search_request, TimeConfig, TimeControl};
 use chess_engine::engine::{EngineController, SearchParams as EngineSearchParams};
 use chess_engine::uci::command::{parse_go_params, parse_uci_command, GoParams, UciCommand};
 use chess_engine::uci::options::{parse_setoption, UciOptionAction, UciOptions};
@@ -127,16 +127,19 @@ impl UciSession {
             }
         }
 
+        let time_config = TimeConfig {
+            move_overhead_ms: self.options.move_overhead_ms,
+            soft_time_percent: self.options.soft_time_percent,
+            hard_time_percent: self.options.hard_time_percent,
+            default_max_nodes: self.options.default_max_nodes,
+        };
         let (request, (soft_time_ms, hard_time_ms)) = build_search_request(
             time_control,
             depth,
             nodes,
             go_ponder,
             go_infinite,
-            self.options.default_max_nodes,
-            self.options.move_overhead_ms,
-            self.options.soft_time_percent,
-            self.options.hard_time_percent,
+            &time_config,
         );
 
         let search_params = EngineSearchParams {

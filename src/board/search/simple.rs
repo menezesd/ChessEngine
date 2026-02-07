@@ -72,13 +72,80 @@ struct NodeContext {
     singular_extension: u32,
 }
 
-#[derive(Clone, Copy)]
-struct MovePruning {
-    skip: bool,
-    reduction: u32,
+/// Context for a single move being searched
+struct MoveContext {
+    m: Move,
+    move_score: i32,
+    is_quiet: bool,
+    gives_check: bool,
+    moving_piece: Option<crate::board::Piece>,
 }
 
 impl SimpleSearchContext<'_> {
+    /// Compute extensions for a move
+    fn compute_extensions(ctx: &MoveContext, node: &NodeContext) -> u32 {
+        let mut extension = 0u32;
+
+        // Check extension
+        if ctx.gives_check {
+            extension += 1;
+        }
+
+        // Singular extension
+        if ctx.m == node.tt_move && node.singular_extension > 0 {
+            extension += node.singular_extension;
+        }
+
+        // Passed pawn extension: pawn on 7th/2nd rank is dangerous
+        if extension == 0 && !ctx.m.is_promotion() {
+            if let Some(crate::board::Piece::Pawn) = ctx.moving_piece {
+                let to_rank = ctx.m.to().rank();
+                if to_rank == 6 || to_rank == 1 {
+                    extension += 1;
+                }
+            }
+        }
+
+        extension
+    }
+
+    /// Check if a quiet move should be pruned (futility pruning or LMP)
+    fn should_prune_quiet(
+        &self,
+        ctx: &MoveContext,
+        node: &NodeContext,
+        depth: u32,
+        moves_tried: usize,
+        alpha: i32,
+    ) -> bool {
+        if !ctx.is_quiet || node.in_check || ctx.gives_check || node.is_pv {
+            return false;
+        }
+
+        // Futility pruning
+        if depth <= 6 && moves_tried > 1 {
+            let static_eval = if node.ply < MAX_PLY {
+                self.static_eval[node.ply]
+            } else {
+                0
+            };
+            let futility_margin = self.state.params.futility_margin * depth as i32;
+            if static_eval + futility_margin <= alpha {
+                return true;
+            }
+        }
+
+        // Late Move Pruning (LMP)
+        if depth <= self.state.params.lmp_min_depth {
+            let lmp_threshold = self.state.params.lmp_move_limit + depth as usize * depth as usize;
+            if moves_tried > lmp_threshold {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Precomputed LMR table - slightly more aggressive than before
     #[allow(clippy::cast_precision_loss)]
     fn lmr_table() -> &'static [[u32; LMR_TABLE_MAX_IDX]; LMR_TABLE_MAX_DEPTH] {
@@ -182,10 +249,8 @@ impl SimpleSearchContext<'_> {
         beta: i32,
         moves: &MoveList,
     ) -> i32 {
-        let is_pv = node.is_pv;
         let ply = node.ply;
         let in_check = node.in_check;
-        let improving = node.improving;
 
         // Get previous move for counter-move ordering
         let prev_move = if ply > 0 && ply < MAX_PLY {
@@ -195,10 +260,8 @@ impl SimpleSearchContext<'_> {
         };
 
         // Move ordering: TT move, killers, counter, captures, history
+        // Use partial sorting (pick_best) to avoid sorting moves we never try
         let mut scored_moves = self.order_moves(moves, node.tt_move, ply, prev_move);
-        if depth > 1 {
-            scored_moves.sort_by_score_desc();
-        }
 
         let move_count = scored_moves.len();
         let tt_tactical = node.tt_move.is_capture() || node.tt_move.is_promotion();
@@ -213,9 +276,13 @@ impl SimpleSearchContext<'_> {
         let mut quiets_tried: [Move; 64] = [EMPTY_MOVE; 64];
         let mut quiets_count = 0usize;
 
-        for (i, scored) in scored_moves.iter().enumerate() {
+        // Use partial sorting: pick best remaining move each iteration
+        // This avoids sorting moves we never try due to early cutoffs
+        let mut i = 0;
+        while let Some(scored) = scored_moves.pick_best(i) {
             let m = scored.mv;
             let move_score = scored.score;
+            i += 1;
             if self.should_stop() {
                 break;
             }
@@ -254,8 +321,12 @@ impl SimpleSearchContext<'_> {
             // Make move first (we'll check for check after)
             let info = self.board.make_move(m);
 
+            // Prefetch TT entry for this position to hide memory latency
+            // By the time we call alphabeta, the cache line should be loaded
+            self.state.tables.tt.prefetch(self.board.hash);
+
             // Check if move gives check
-            let gives_check = self.board.is_in_check(self.board.current_color());
+            let gives_check = self.board.is_in_check(self.board.side_to_move());
 
             if ply < MAX_PLY {
                 self.previous_move[ply] = m;
@@ -264,77 +335,33 @@ impl SimpleSearchContext<'_> {
 
             moves_tried += 1;
 
-            // Futility pruning: skip quiet moves that can't improve alpha
-            // Only at shallow depths, when not in check, move doesn't give check
-            if is_quiet
-                && !in_check
-                && !gives_check
-                && depth <= 6
-                && moves_tried > 1
-                && !is_pv
-            {
-                let static_eval = if ply < MAX_PLY {
-                    self.static_eval[ply]
-                } else {
-                    0
-                };
-                let futility_margin = self.state.params.futility_margin * depth as i32;
-                if static_eval + futility_margin <= alpha {
-                    self.board.unmake_move(m, info);
-                    continue;
-                }
-            }
-
-            // Late Move Pruning (LMP): skip late quiet moves at shallow depths
-            // Based on the idea that late moves in ordering are unlikely to be good
-            if is_quiet
-                && !in_check
-                && !gives_check
-                && depth <= self.state.params.lmp_min_depth
-                && !is_pv
-            {
-                let lmp_threshold = self.state.params.lmp_move_limit + depth as usize * depth as usize;
-                if moves_tried > lmp_threshold {
-                    self.board.unmake_move(m, info);
-                    continue;
-                }
-            }
-
-            let mut pruning = MovePruning {
-                skip: false,
-                reduction: 0,
+            // Create move context for helper methods
+            let move_ctx = MoveContext {
+                m,
+                move_score,
+                is_quiet,
+                gives_check,
+                moving_piece,
             };
 
-            pruning.reduction = Self::compute_lmr_reduction(
-                i,
-                move_count,
-                move_score,
-                depth,
-                in_check,
-                gives_check,
-                is_quiet,
-                improving,
-                is_pv,
-                tt_tactical || gives_check || m.is_capture(),
-            );
-
-            if pruning.skip {
+            // Futility pruning and LMP
+            if self.should_prune_quiet(&move_ctx, node, depth, moves_tried, alpha) {
                 self.board.unmake_move(m, info);
                 continue;
             }
 
-            // Extensions:
-            // 1. Check extension: search one ply deeper when giving check
-            // 2. Singular extension: extend TT move if it's singular
-            // 3. Recapture extension: extend when recapturing valuable pieces on same square
-            // 4. Passed pawn extension: extend advanced passed pawn pushes
-            let mut extension = 0u32;
-            if gives_check {
-                extension += 1;
-            }
-            if m == node.tt_move && node.singular_extension > 0 {
-                extension += node.singular_extension;
-            }
+            // LMR reduction
+            let reduction = Self::compute_lmr_reduction(
+                i - 1,
+                move_count,
+                depth,
+                node,
+                &move_ctx,
+                tt_tactical || gives_check || m.is_capture(),
+            );
+
+            // Compute extensions
+            let extension = Self::compute_extensions(&move_ctx, node);
 
             let new_depth = if move_count == 1 {
                 depth + extension
@@ -344,10 +371,10 @@ impl SimpleSearchContext<'_> {
 
             let mut score: i32;
 
-            if i > 0 {
-                // PVS: null window search for non-first moves
+            if i > 1 {
+                // PVS: null window search for non-first moves (i is 1-indexed after pick_best)
                 score = -self.alphabeta(
-                    new_depth.saturating_sub(pruning.reduction),
+                    new_depth.saturating_sub(reduction),
                     -alpha - 1,
                     -alpha,
                     true,
@@ -356,7 +383,7 @@ impl SimpleSearchContext<'_> {
                 );
 
                 // Re-search at full depth if reduced search found something
-                if pruning.reduction > 0 && score > alpha {
+                if reduction > 0 && score > alpha {
                     score =
                         -self.alphabeta(new_depth, -alpha - 1, -alpha, true, ply + 1, EMPTY_MOVE);
                 }
@@ -693,34 +720,42 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Compute LMR reduction for a move.
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    ///
+    /// Uses `NodeContext` and `MoveContext` to reduce parameter count.
     fn compute_lmr_reduction(
         move_idx: usize,
         move_count: usize,
-        move_score: i32,
         depth: u32,
-        in_check: bool,
-        gives_check: bool,
-        is_quiet: bool,
-        _improving: bool,
-        is_pv: bool,
+        node: &NodeContext,
+        move_ctx: &MoveContext,
         tt_tactical: bool,
     ) -> u32 {
         let lmr_ok = move_idx > LMR_IDX_BASE + move_count / 4
-            && move_score < LMR_SCORE_THRESHOLD
+            && move_ctx.move_score < LMR_SCORE_THRESHOLD
             && depth > 1
-            && !in_check
-            && !gives_check
-            && is_quiet
-            && !is_pv
+            && !node.in_check
+            && !move_ctx.gives_check
+            && move_ctx.is_quiet
+            && !node.is_pv
             && !tt_tactical;
 
         if lmr_ok {
             let table = Self::lmr_table();
             let depth_idx = depth.min((LMR_TABLE_MAX_DEPTH - 1) as u32) as usize;
             let move_idx_clamped = move_idx.min(LMR_TABLE_MAX_IDX - 1);
-            let base = table[depth_idx][move_idx_clamped];
-            base.min(depth.saturating_sub(1))
+            let mut reduction = table[depth_idx][move_idx_clamped];
+
+            // Reduce less when position is improving (our eval is getting better)
+            if node.improving {
+                reduction = reduction.saturating_sub(1);
+            }
+
+            // Reduce less for moves with good history scores
+            if move_ctx.move_score > 1000 {
+                reduction = reduction.saturating_sub(1);
+            }
+
+            reduction.min(depth.saturating_sub(1))
         } else {
             0
         }
@@ -777,11 +812,11 @@ impl SimpleSearchContext<'_> {
         }
 
         // Check for missing king (illegal position)
-        if self.board.find_king(self.board.current_color()).is_none() {
+        if self.board.find_king(self.board.side_to_move()).is_none() {
             return -29000;
         }
 
-        let in_check = self.board.is_in_check(self.board.current_color());
+        let in_check = self.board.is_in_check(self.board.side_to_move());
         node.in_check = in_check;
 
         // Mate distance pruning

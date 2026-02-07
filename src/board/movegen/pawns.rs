@@ -16,7 +16,7 @@ impl Board {
         promotion_rank: usize,
         moves: &mut MoveList,
     ) {
-        let dir: isize = if color == Color::White { 1 } else { -1 };
+        let dir = color.pawn_direction();
         let r = from.rank() as isize;
         let f = from.file() as isize;
         let forward_r = r + dir;
@@ -48,15 +48,11 @@ impl Board {
     }
 
     pub(crate) fn generate_pawn_moves(&self, from: Square) -> MoveList {
-        let color = if self.white_to_move {
-            Color::White
-        } else {
-            Color::Black
-        };
+        let color = self.side_to_move();
         let mut moves = MoveList::new();
-        let dir: isize = if color == Color::White { 1 } else { -1 };
-        let start_rank = if color == Color::White { 1 } else { 6 };
-        let promotion_rank = if color == Color::White { 7 } else { 0 };
+        let dir = color.pawn_direction();
+        let start_rank = color.pawn_start_rank();
+        let promotion_rank = color.pawn_promotion_rank();
 
         let r = from.rank() as isize;
         let f = from.file() as isize;
@@ -96,9 +92,9 @@ impl Board {
     }
 
     pub(crate) fn generate_pawn_tactical_moves(&self, from: Square, moves: &mut MoveList) {
-        let color = self.current_color();
-        let dir: isize = if color == Color::White { 1 } else { -1 };
-        let promotion_rank = if color == Color::White { 7 } else { 0 };
+        let color = self.side_to_move();
+        let dir = color.pawn_direction();
+        let promotion_rank = color.pawn_promotion_rank();
 
         let r = from.rank() as isize;
         let f = from.file() as isize;

@@ -100,12 +100,10 @@ impl Board {
 
     /// Evaluate king exposure based on open lines.
     fn eval_king_exposure(&self, color: Color, king_sq: usize, _ctx: &AttackContext) -> i32 {
-        let _c_idx = color.index();
         let opp_idx = color.opponent().index();
         let mut penalty = 0;
 
         let king_file = king_sq % 8;
-        let _king_rank = king_sq / 8;
 
         // Check for open files toward king
         let file_mask = 0x0101_0101_0101_0101u64 << king_file;
@@ -222,7 +220,7 @@ mod tests {
         // King with some escape squares
         let board: Board = "8/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
         // Just verify the function runs
-        let ctx = super::super::helpers::AttackContext::new(&board);
+        let ctx = board.compute_attack_context();
         let (mg, _) = board.eval_king_danger(&ctx);
         // Alone king should have escape squares
         assert!(mg != i32::MIN);

@@ -12,7 +12,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
 
 use crate::board::nnue::NnueNetwork;
 use crate::board::{Board, Move};
@@ -121,6 +120,15 @@ impl Default for SmpConfig {
     }
 }
 
+/// Configuration passed to each worker thread
+#[derive(Clone)]
+struct WorkerSearchConfig {
+    max_depth: u32,
+    time_limit_ms: u64,
+    node_limit: u64,
+    info_callback: Option<SearchInfoCallback>,
+}
+
 impl SmpConfig {
     /// Create config with specified thread count
     #[must_use]
@@ -128,6 +136,16 @@ impl SmpConfig {
         SmpConfig {
             num_threads: num_threads.max(1),
             ..Default::default()
+        }
+    }
+
+    /// Extract worker search config from SMP config
+    fn to_worker_config(&self) -> WorkerSearchConfig {
+        WorkerSearchConfig {
+            max_depth: self.max_depth,
+            time_limit_ms: self.time_limit_ms,
+            node_limit: self.node_limit,
+            info_callback: self.info_callback.clone(),
         }
     }
 
@@ -223,11 +241,7 @@ pub fn smp_search(
         state.generation,
     ));
 
-    let start_time = Instant::now();
-    let info_callback = config.info_callback.clone();
-    let max_depth = config.max_depth;
-    let time_limit_ms = config.time_limit_ms;
-    let node_limit = config.node_limit;
+    let worker_config = config.to_worker_config();
 
     // Spawn worker threads
     let mut handles: Vec<JoinHandle<WorkerResult>> = Vec::with_capacity(num_threads);
@@ -235,27 +249,16 @@ pub fn smp_search(
     for worker_id in 0..num_threads {
         let board_clone = board.clone();
         let shared_clone = Arc::clone(&shared);
-        let info_cb = if worker_id == 0 {
-            info_callback.clone()
-        } else {
-            None // Only main worker reports info
-        };
+        let mut worker_cfg = worker_config.clone();
+        // Only main worker reports info
+        if worker_id != 0 {
+            worker_cfg.info_callback = None;
+        }
 
         let handle = thread::Builder::new()
             .name(format!("search-{worker_id}"))
             .stack_size(SEARCH_STACK_SIZE)
-            .spawn(move || {
-                run_worker(
-                    worker_id,
-                    board_clone,
-                    shared_clone,
-                    max_depth,
-                    time_limit_ms,
-                    node_limit,
-                    info_cb,
-                    start_time,
-                )
-            })
+            .spawn(move || run_worker(worker_id, board_clone, shared_clone, worker_cfg))
             .expect("failed to spawn search worker");
 
         handles.push(handle);
@@ -308,16 +311,12 @@ pub fn smp_search(
 }
 
 /// Run a single worker thread
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)]
 fn run_worker(
     worker_id: usize,
     mut board: Board,
     shared: Arc<SharedSearchState>,
-    max_depth: u32,
-    time_limit_ms: u64,
-    node_limit: u64,
-    info_callback: Option<SearchInfoCallback>,
-    _start_time: Instant,
+    config: WorkerSearchConfig,
 ) -> WorkerResult {
     // Create local SearchState for this worker with shared TT, pawn hash, and NNUE
     let mut local_state = SearchState::with_shared_tables(
@@ -336,7 +335,7 @@ fn run_worker(
     // Calculate this worker's depth offset
     // Helper threads search slightly deeper to populate TT for main thread
     let depth_offset = worker_depth_offset(worker_id);
-    let search_depth = ((max_depth as i32) + depth_offset).max(1) as u32;
+    let search_depth = ((config.max_depth as i32) + depth_offset).max(1) as u32;
 
     // Run search with iterative deepening (handled internally by simple_search)
     // Each worker does full iterative deepening from depth 1 to search_depth
@@ -344,10 +343,10 @@ fn run_worker(
         &mut board,
         &mut local_state,
         search_depth,
-        time_limit_ms,
-        node_limit,
+        config.time_limit_ms,
+        config.node_limit,
         &shared.stop,
-        info_callback, // Main worker (id 0) reports info via callback
+        config.info_callback, // Main worker (id 0) reports info via callback
     );
 
     // Update shared stats

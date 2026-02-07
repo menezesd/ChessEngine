@@ -4,8 +4,9 @@
 
 use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS};
 use crate::board::state::Board;
-use crate::board::types::{Bitboard, Color, Piece};
+use crate::board::types::{Color, Piece};
 
+use super::helpers::AttackContext;
 use super::tables::{HANGING_PENALTY, MINOR_ON_MINOR};
 
 impl Board {
@@ -13,45 +14,21 @@ impl Board {
     /// Returns score from white's perspective.
     #[must_use]
     pub fn eval_hanging(&self) -> i32 {
-        let white_attacks = self.all_attacks(Color::White);
-        let black_attacks = self.all_attacks(Color::Black);
-        self.eval_hanging_with_attacks(white_attacks, black_attacks)
+        let ctx = self.compute_attack_context();
+        self.eval_hanging_with_context(&ctx)
     }
 
-    /// Evaluate hanging pieces using pre-computed attacks (avoids recomputation).
-    pub(super) fn eval_hanging_with_attacks(
-        &self,
-        white_attacks: Bitboard,
-        black_attacks: Bitboard,
-    ) -> i32 {
+    /// Evaluate hanging pieces using pre-computed attack context.
+    pub(super) fn eval_hanging_with_context(&self, ctx: &AttackContext) -> i32 {
         let mut score = 0;
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let color_idx = color.index();
+            let our_attacks = ctx.all_attacks(color);
+            let their_attacks = ctx.all_attacks(color.opponent());
+            let their_pawn_attacks = ctx.pawn_attacks(color.opponent());
 
-        for color_idx in 0..2 {
-            let sign = if color_idx == 0 { 1 } else { -1 };
-            let our_attacks = if color_idx == 0 {
-                white_attacks
-            } else {
-                black_attacks
-            };
-            let their_attacks = if color_idx == 0 {
-                black_attacks
-            } else {
-                white_attacks
-            };
-
-            let their_pawn_attacks = self.pawn_attacks(if color_idx == 0 {
-                Color::Black
-            } else {
-                Color::White
-            });
-
-            for piece in [
-                Piece::Pawn,
-                Piece::Knight,
-                Piece::Bishop,
-                Piece::Rook,
-                Piece::Queen,
-            ] {
+            for piece in Piece::NON_KING {
                 let our_pieces = self.pieces[color_idx][piece.index()];
 
                 for sq_idx in our_pieces.iter() {
@@ -69,36 +46,30 @@ impl Board {
         }
 
         // Minor piece attacking minor piece
-        let white_knights = self.pieces[0][Piece::Knight.index()];
-        let white_bishops = self.pieces[0][Piece::Bishop.index()];
-        let black_knights = self.pieces[1][Piece::Knight.index()];
-        let black_bishops = self.pieces[1][Piece::Bishop.index()];
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let our_idx = color.index();
+            let their_idx = color.opponent().index();
 
-        for sq_idx in white_bishops.iter() {
-            let attacks = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
-            if (attacks & black_knights.0) != 0 {
-                score += MINOR_ON_MINOR;
+            let our_bishops = self.pieces[our_idx][Piece::Bishop.index()];
+            let our_knights = self.pieces[our_idx][Piece::Knight.index()];
+            let their_bishops = self.pieces[their_idx][Piece::Bishop.index()];
+            let their_knights = self.pieces[their_idx][Piece::Knight.index()];
+
+            // Our bishops attacking their knights
+            for sq_idx in our_bishops.iter() {
+                let attacks = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
+                if (attacks & their_knights.0) != 0 {
+                    score += sign * MINOR_ON_MINOR;
+                }
             }
-        }
 
-        for sq_idx in white_knights.iter() {
-            let attacks = KNIGHT_ATTACKS[sq_idx.index()];
-            if (attacks & black_bishops.0) != 0 {
-                score += MINOR_ON_MINOR;
-            }
-        }
-
-        for sq_idx in black_bishops.iter() {
-            let attacks = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
-            if (attacks & white_knights.0) != 0 {
-                score -= MINOR_ON_MINOR;
-            }
-        }
-
-        for sq_idx in black_knights.iter() {
-            let attacks = KNIGHT_ATTACKS[sq_idx.index()];
-            if (attacks & white_bishops.0) != 0 {
-                score -= MINOR_ON_MINOR;
+            // Our knights attacking their bishops
+            for sq_idx in our_knights.iter() {
+                let attacks = KNIGHT_ATTACKS[sq_idx.index()];
+                if (attacks & their_bishops.0) != 0 {
+                    score += sign * MINOR_ON_MINOR;
+                }
             }
         }
 
