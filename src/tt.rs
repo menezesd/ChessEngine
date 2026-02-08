@@ -29,13 +29,25 @@ impl BoundType {
     }
 
     fn from_u8(v: u8) -> Self {
-        match v & 0x3 {
+        match v & BOUND_MASK {
             0 => BoundType::Exact,
             1 => BoundType::LowerBound,
             _ => BoundType::UpperBound,
         }
     }
 }
+
+// Bit masks and shifts for packed TT entry
+const BOUND_MASK: u8 = 0x3; // 2-bit bound type field
+const GENERATION_MASK: u8 = 0x3F; // 6-bit generation field
+const GENERATION_SHIFT: u8 = 2; // Shift amount for generation within bound_gen byte
+
+// Bit positions in packed 64-bit entry
+const MOVE_MASK: u64 = 0xFFFF; // bits 0-15: move
+const SCORE_SHIFT: usize = 16; // bits 16-31: score
+const DEPTH_SHIFT: usize = 32; // bits 32-39: depth
+const BOUND_GEN_SHIFT: usize = 40; // bits 40-47: bound type + generation
+const BYTE_MASK: u64 = 0xFF;
 
 /// Unpacked TT entry for reading
 #[derive(Clone, Debug)]
@@ -85,19 +97,23 @@ fn pack_entry(
 ) -> u64 {
     let mv: u16 = best_move.map_or(0, Move::as_u16);
     let sc: u16 = score as u16;
-    let bound_gen: u8 = (bound_type.to_u8() & 0x3) | ((generation & 0x3F) << 2);
+    let bound_gen: u8 =
+        (bound_type.to_u8() & BOUND_MASK) | ((generation & GENERATION_MASK) << GENERATION_SHIFT);
 
-    (mv as u64) | ((sc as u64) << 16) | ((depth as u64) << 32) | ((bound_gen as u64) << 40)
+    (mv as u64)
+        | ((sc as u64) << SCORE_SHIFT)
+        | ((depth as u64) << DEPTH_SHIFT)
+        | ((bound_gen as u64) << BOUND_GEN_SHIFT)
 }
 
 fn unpack_entry(data: u64) -> TTEntry {
-    let mv_bits = (data & 0xFFFF) as u16;
-    let score = ((data >> 16) & 0xFFFF) as i16;
-    let depth = ((data >> 32) & 0xFF) as u8;
-    let bound_gen = ((data >> 40) & 0xFF) as u8;
+    let mv_bits = (data & MOVE_MASK) as u16;
+    let score = ((data >> SCORE_SHIFT) & MOVE_MASK) as i16;
+    let depth = ((data >> DEPTH_SHIFT) & BYTE_MASK) as u8;
+    let bound_gen = ((data >> BOUND_GEN_SHIFT) & BYTE_MASK) as u8;
 
-    let bound_type = BoundType::from_u8(bound_gen & 0x3);
-    let generation = (bound_gen >> 2) & 0x3F;
+    let bound_type = BoundType::from_u8(bound_gen & BOUND_MASK);
+    let generation = (bound_gen >> GENERATION_SHIFT) & GENERATION_MASK;
 
     let best_move = if mv_bits == 0 {
         None
@@ -165,13 +181,14 @@ impl TTSlot {
         if data == 0 {
             0
         } else {
-            (((data >> 40) & 0xFF) as u8 >> 2) & 0x3F
+            let bound_gen = ((data >> BOUND_GEN_SHIFT) & BYTE_MASK) as u8;
+            (bound_gen >> GENERATION_SHIFT) & GENERATION_MASK
         }
     }
 
     fn depth(&self) -> u8 {
         let data = self.data.load(Ordering::Relaxed);
-        ((data >> 32) & 0xFF) as u8
+        ((data >> DEPTH_SHIFT) & BYTE_MASK) as u8
     }
 }
 
@@ -379,10 +396,7 @@ mod tests {
             assert_eq!(unpacked.depth, depth);
             assert_eq!(unpacked.score, score);
             assert_eq!(unpacked.bound_type, bound);
-            assert_eq!(
-                unpacked.best_move.map(|m| m.as_u16()),
-                mv.map(|m| m.as_u16())
-            );
+            assert_eq!(unpacked.best_move.map(Move::as_u16), mv.map(Move::as_u16));
             assert_eq!(unpacked.generation, gen);
         }
     }
@@ -452,7 +466,7 @@ mod tests {
         tt.store(hash, 5, 100, BoundType::LowerBound, Some(mv), 1);
 
         let entry = tt.probe(hash).expect("should find entry");
-        assert_eq!(entry.best_move.map(|m| m.as_u16()), Some(0x1234));
+        assert_eq!(entry.best_move.map(Move::as_u16), Some(0x1234));
     }
 
     #[test]

@@ -4,57 +4,18 @@ mod pawns;
 mod sliders;
 
 use self::sliders::SliderType;
-use super::{Board, Color, Move, MoveList, Piece, Square};
+use super::{Board, Move, MoveList, Piece, Square};
 
 impl Board {
     fn generate_pseudo_moves(&self) -> MoveList {
         let mut moves = MoveList::new();
-        let color = if self.white_to_move {
-            Color::White
-        } else {
-            Color::Black
-        };
-        let c_idx = color.index();
+        let color = self.side_to_move();
 
-        for from_idx in self.pieces[c_idx][Piece::Pawn.index()].iter() {
-            let from = from_idx;
-            for m in &self.generate_pawn_moves(from) {
-                moves.push(*m);
-            }
-        }
-
-        for from_idx in self.pieces[c_idx][Piece::Knight.index()].iter() {
-            let from = from_idx;
-            for m in &self.generate_knight_moves(from) {
-                moves.push(*m);
-            }
-        }
-
-        for from_idx in self.pieces[c_idx][Piece::Bishop.index()].iter() {
-            let from = from_idx;
-            for m in &self.generate_slider_moves(from, SliderType::Bishop) {
-                moves.push(*m);
-            }
-        }
-
-        for from_idx in self.pieces[c_idx][Piece::Rook.index()].iter() {
-            let from = from_idx;
-            for m in &self.generate_slider_moves(from, SliderType::Rook) {
-                moves.push(*m);
-            }
-        }
-
-        for from_idx in self.pieces[c_idx][Piece::Queen.index()].iter() {
-            let from = from_idx;
-            for m in &self.generate_slider_moves(from, SliderType::Queen) {
-                moves.push(*m);
-            }
-        }
-
-        for from_idx in self.pieces[c_idx][Piece::King.index()].iter() {
-            let from = from_idx;
-            for m in &self.generate_king_moves(from) {
-                moves.push(*m);
+        for piece in Piece::ALL {
+            for from in self.pieces_of(color, piece).iter() {
+                for m in &self.generate_piece_moves(from, piece) {
+                    moves.push(*m);
+                }
             }
         }
         moves
@@ -71,47 +32,33 @@ impl Board {
         }
     }
 
-    /// Create a move, determining the correct type based on context
-    fn create_move(
-        &self,
-        from: Square,
-        to: Square,
-        promotion: Option<Piece>,
-        is_castling: bool,
-        is_en_passant: bool,
-        is_double_pawn_push: bool,
-    ) -> Move {
-        // Handle special move types
-        if is_en_passant {
-            return Move::en_passant(from, to);
-        }
-
-        if is_castling {
-            return if to.file() == 6 {
-                Move::castle_kingside(from, to)
-            } else {
-                Move::castle_queenside(from, to)
-            };
-        }
-
-        if is_double_pawn_push {
-            return Move::double_pawn_push(from, to);
-        }
-
-        // Check for promotion
-        if let Some(promo_piece) = promotion {
-            return if self.piece_at(to).is_some() {
-                Move::new_promotion_capture(from, to, promo_piece)
-            } else {
-                Move::new_promotion(from, to, promo_piece)
-            };
-        }
-
-        // Regular move - check for capture
+    /// Create a simple move (quiet or capture), the most common case.
+    #[inline]
+    fn create_simple_move(&self, from: Square, to: Square) -> Move {
         if self.piece_at(to).is_some() {
             Move::capture(from, to)
         } else {
             Move::quiet(from, to)
+        }
+    }
+
+    /// Create a promotion move (with or without capture).
+    #[inline]
+    fn create_promotion_move(&self, from: Square, to: Square, piece: Piece) -> Move {
+        if self.piece_at(to).is_some() {
+            Move::new_promotion_capture(from, to, piece)
+        } else {
+            Move::new_promotion(from, to, piece)
+        }
+    }
+
+    /// Create a castling move (kingside or queenside based on target file).
+    #[inline]
+    fn create_castling_move(from: Square, to: Square) -> Move {
+        if to.file() == 6 {
+            Move::castle_kingside(from, to)
+        } else {
+            Move::castle_queenside(from, to)
         }
     }
 
@@ -218,11 +165,9 @@ impl Board {
     pub(crate) fn generate_tactical_moves(&mut self) -> MoveList {
         let current_color = self.side_to_move();
         let mut pseudo_tactical_moves = MoveList::new();
-        let c_idx = current_color.index();
 
         // Pawns have special tactical move generation (includes promotions)
-        for from_idx in self.pieces[c_idx][Piece::Pawn.index()].iter() {
-            let from = from_idx;
+        for from in self.pieces_of(current_color, Piece::Pawn).iter() {
             self.generate_pawn_tactical_moves(from, &mut pseudo_tactical_moves);
         }
 
@@ -234,8 +179,7 @@ impl Board {
             Piece::Queen,
             Piece::King,
         ] {
-            for from_idx in self.pieces[c_idx][piece.index()].iter() {
-                let from = from_idx;
+            for from in self.pieces_of(current_color, piece).iter() {
                 let piece_moves = self.generate_piece_moves(from, piece);
                 Self::collect_captures(&piece_moves, &mut pseudo_tactical_moves);
             }

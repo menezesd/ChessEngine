@@ -37,7 +37,7 @@ impl Default for NnueAccumulator {
 
 impl NnueAccumulator {
     /// Create a new accumulator initialized with biases
-    #[must_use] 
+    #[must_use]
     pub fn new(biases: &[i16; HIDDEN_SIZE]) -> Self {
         Self {
             white: *biases,
@@ -151,7 +151,7 @@ impl NnueNetwork {
     /// Evaluate position given accumulator and side to move
     /// Returns evaluation in centipawns from side-to-move perspective
     #[inline]
-    #[must_use] 
+    #[must_use]
     pub fn evaluate(&self, acc: &NnueAccumulator, white_to_move: bool) -> i32 {
         let (us_acc, them_acc, us_weights, them_weights) = if white_to_move {
             (
@@ -183,8 +183,13 @@ impl NnueNetwork {
 
 /// Compute feature index for a piece at a square from a perspective
 #[inline]
-#[must_use] 
-pub fn feature_index(piece_type: usize, piece_color: usize, square: usize, perspective: usize) -> usize {
+#[must_use]
+pub fn feature_index(
+    piece_type: usize,
+    piece_color: usize,
+    square: usize,
+    perspective: usize,
+) -> usize {
     let (oriented_sq, oriented_color) = if perspective == 1 {
         // Black's perspective - flip board vertically
         (square ^ 56, 1 - piece_color)
@@ -202,7 +207,7 @@ pub static EMBEDDED_NETWORK: &[u8] = include_bytes!("nets/default.nnue");
 #[cfg(feature = "embedded_nnue")]
 impl NnueNetwork {
     /// Load network from embedded bytes
-    #[must_use] 
+    #[must_use]
     pub fn from_embedded() -> Self {
         Self::from_bytes(EMBEDDED_NETWORK).expect("Embedded NNUE is invalid")
     }

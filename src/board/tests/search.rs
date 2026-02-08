@@ -3,6 +3,7 @@
 //! Tests for alpha-beta, quiescence, pruning, and extensions.
 
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use crate::board::search::{find_best_move, search, SearchConfig, SearchState, MATE_SCORE};
 use crate::board::{Board, Piece, EMPTY_MOVE};
@@ -40,9 +41,8 @@ fn alphabeta_returns_mate_score_for_checkmate() {
         let score = entry.score();
         // Mate scores are near MATE_SCORE
         assert!(
-            score > MATE_SCORE - 100 || score < -MATE_SCORE + 100,
-            "Expected mate score, got {}",
-            score
+            !(-MATE_SCORE + 100..=MATE_SCORE - 100).contains(&score),
+            "Expected mate score, got {score}"
         );
     }
 }
@@ -154,7 +154,7 @@ fn search_finds_knight_fork() {
 
     let mv = best.unwrap();
     // Nf4+ is the winning move - forks king and queen
-    assert_eq!(mv.to_string(), "g2f4", "Should find Nf4+ fork, got {}", mv);
+    assert_eq!(mv.to_string(), "g2f4", "Should find Nf4+ fork, got {mv}");
 }
 
 #[test]
@@ -173,8 +173,7 @@ fn search_captures_hanging_queen() {
     assert_eq!(
         mv.to_string(),
         "c3d5",
-        "Should capture queen with Nxd5, got {}",
-        mv
+        "Should capture queen with Nxd5, got {mv}"
     );
 }
 
@@ -276,7 +275,6 @@ fn search_completes_with_pruning_enabled() {
     let mut state = SearchState::new(1);
     let stop = AtomicBool::new(false);
 
-    use std::time::Instant;
     let start = Instant::now();
 
     let best = find_best_move(&mut board, &mut state, 8, &stop);
@@ -285,8 +283,7 @@ fn search_completes_with_pruning_enabled() {
     assert!(best.is_some(), "Should find a move at depth 8");
     assert!(
         elapsed.as_secs() < 30,
-        "Depth 8 should complete in under 30s, took {:?}",
-        elapsed
+        "Depth 8 should complete in under 30s, took {elapsed:?}"
     );
 }
 
@@ -525,11 +522,7 @@ fn finds_back_rank_mate() {
     board.make_move(mv);
 
     // Rh8 is checkmate - verify the engine finds it
-    assert!(
-        board.is_checkmate(),
-        "Engine should find Rh8#, played {}",
-        mv
-    );
+    assert!(board.is_checkmate(), "Engine should find Rh8#, played {mv}");
 }
 
 #[test]

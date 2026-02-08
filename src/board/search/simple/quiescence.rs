@@ -1,4 +1,4 @@
-use super::super::constants::{MATE_THRESHOLD, MAX_QSEARCH_DEPTH};
+use super::super::constants::{MATE_THRESHOLD, MAX_QSEARCH_DEPTH, SCORE_INFINITE};
 use super::super::move_order::piece_value;
 use super::SimpleSearchContext;
 use crate::board::{ScoredMoveList, EMPTY_MOVE};
@@ -33,7 +33,7 @@ impl SimpleSearchContext<'_> {
         }
 
         let in_check = self.board.is_in_check(self.board.side_to_move());
-        let mut best_score = if in_check { -30000 } else { stand_pat };
+        let mut best_score = if in_check { -SCORE_INFINITE } else { stand_pat };
 
         // Generate moves: all moves if in check, captures only otherwise
         let moves = if in_check {

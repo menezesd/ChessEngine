@@ -417,7 +417,7 @@ mod tests {
         let mut board = Board::new();
         let moves = board.generate_moves();
 
-        for mv in moves.iter() {
+        for mv in &moves {
             let san = board.move_to_san(mv);
             let parsed = board.parse_san(&san).unwrap();
             assert_eq!(mv.from(), parsed.from());

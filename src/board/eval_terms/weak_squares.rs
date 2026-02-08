@@ -26,10 +26,6 @@ pub const HOLE_PENALTY_EG: i32 = -3;
 pub const COLOR_WEAKNESS_MG: i32 = -8;
 pub const COLOR_WEAKNESS_EG: i32 = -5;
 
-/// Light and dark square masks
-const LIGHT_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
-const DARK_SQUARES: u64 = 0xAA55_AA55_AA55_AA55;
-
 impl Board {
     /// Evaluate weak squares.
     ///
@@ -52,16 +48,13 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let c_idx = color.index();
-        let _opp_idx = color.opponent().index();
-
         // Get holes in enemy territory
         let enemy_holes = self.find_holes(color.opponent());
         let own_holes = self.find_holes(color);
 
         // Bonus for occupying enemy holes with minor pieces
-        let knights = self.pieces[c_idx][Piece::Knight.index()];
-        let bishops = self.pieces[c_idx][Piece::Bishop.index()];
+        let knights = self.pieces_of(color, Piece::Knight);
+        let bishops = self.pieces_of(color, Piece::Bishop);
         let minor_pieces = Bitboard(knights.0 | bishops.0);
 
         for sq in minor_pieces.iter() {
@@ -89,26 +82,20 @@ impl Board {
         (mg, eg)
     }
 
+    /// Half-board masks for each color (our half = opponent's side for outposts/holes)
+    const HALF_BOARD: [u64; 2] = [
+        0xFFFF_FFFF_0000_0000u64, // White: ranks 5-8
+        0x0000_0000_FFFF_FFFFu64, // Black: ranks 1-4
+    ];
+
     /// Find holes in a color's position.
     /// A hole is a square that cannot be defended by that color's pawns.
     fn find_holes(&self, color: Color) -> Bitboard {
-        let c_idx = color.index();
-        let _pawns = self.pieces[c_idx][Piece::Pawn.index()];
-
         // Squares that can potentially be defended by pawns (pawn attack spans)
         let pawn_attack_span = self.pawn_attack_span(color);
 
-        // Holes are squares in enemy half that can never be defended by pawns
-        let _enemy_half = match color {
-            Color::White => 0x0000_0000_FFFF_FFFFu64, // Ranks 1-4 (black's territory from white's view)
-            Color::Black => 0xFFFF_FFFF_0000_0000u64, // Ranks 5-8 (white's territory from black's view)
-        };
-
         // Holes: squares in our half that our pawns can never defend
-        let our_half = match color {
-            Color::White => 0xFFFF_FFFF_0000_0000u64, // Ranks 5-8
-            Color::Black => 0x0000_0000_FFFF_FFFFu64, // Ranks 1-4
-        };
+        let our_half = Self::HALF_BOARD[color.index()];
 
         // Squares that are holes for this color
         Bitboard(!pawn_attack_span.0 & our_half)
@@ -116,8 +103,7 @@ impl Board {
 
     /// Calculate the span of squares that pawns could potentially attack.
     fn pawn_attack_span(&self, color: Color) -> Bitboard {
-        let c_idx = color.index();
-        let pawns = self.pieces[c_idx][Piece::Pawn.index()];
+        let pawns = self.pieces_of(color, Piece::Pawn);
 
         if pawns.0 == 0 {
             return Bitboard(0);
@@ -127,8 +113,8 @@ impl Board {
         let mut span = 0u64;
 
         for sq in pawns.iter() {
-            let file = sq.index() % 8;
-            let rank = sq.index() / 8;
+            let file = sq.file();
+            let rank = sq.rank();
 
             // Get adjacent file mask
             let adj_files = ADJACENT_FILES[file].0;
@@ -163,21 +149,20 @@ impl Board {
     /// Penalize when many weak squares are on the same color complex,
     /// especially if we've traded the bishop that controls that color.
     fn eval_color_weakness(&self, color: Color) -> (i32, i32) {
-        let c_idx = color.index();
-        let bishops = self.pieces[c_idx][Piece::Bishop.index()];
+        let bishops = self.pieces_of(color, Piece::Bishop);
 
         let holes = self.find_holes(color);
 
         // Count holes on each color complex
-        let light_holes = (holes.0 & LIGHT_SQUARES).count_ones();
-        let dark_holes = (holes.0 & DARK_SQUARES).count_ones();
+        let light_holes = (holes.0 & Bitboard::LIGHT_SQUARES.0).count_ones();
+        let dark_holes = (holes.0 & Bitboard::DARK_SQUARES.0).count_ones();
 
         let mut mg = 0;
         let mut eg = 0;
 
         // Check if we have a bishop for each color complex
-        let has_light_bishop = (bishops.0 & LIGHT_SQUARES) != 0;
-        let has_dark_bishop = (bishops.0 & DARK_SQUARES) != 0;
+        let has_light_bishop = (bishops.0 & Bitboard::LIGHT_SQUARES.0) != 0;
+        let has_dark_bishop = (bishops.0 & Bitboard::DARK_SQUARES.0) != 0;
 
         // Penalty if we have many holes on a color complex without the corresponding bishop
         if !has_light_bishop && light_holes >= 3 {
@@ -203,10 +188,9 @@ mod tests {
         let board: Board = "rnbqkb1r/pp2pppp/5n2/2pp4/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq - 0 4"
             .parse()
             .unwrap();
-        // Just verify it runs
         let holes = board.find_holes(Color::Black);
         // The function should identify some holes
-        assert!(holes.0 != u64::MAX); // Not all squares are holes
+        assert!(holes.0 != u64::MAX, "not all squares should be holes");
     }
 
     #[test]
@@ -214,6 +198,52 @@ mod tests {
         let board: Board = "8/8/8/8/3P4/8/8/8 w - - 0 1".parse().unwrap();
         let span = board.pawn_attack_span(Color::White);
         // Pawn on d4 - attack span should include c5, e5 and squares ahead on c,e files
-        assert!(span.0 != 0);
+        assert!(span.0 != 0, "pawn should have attack span");
+    }
+
+    #[test]
+    fn test_weak_squares_evaluation() {
+        // Just verify the function runs and produces a value
+        let board: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let ctx = board.compute_attack_context();
+        let (mg, eg) = board.eval_weak_squares(&ctx);
+        // Starting position should be roughly balanced
+        assert!(mg.abs() < 30, "starting position weak squares mg: {mg}");
+        assert!(eg.abs() < 30, "starting position weak squares eg: {eg}");
+    }
+
+    #[test]
+    fn test_color_weakness_no_bishop() {
+        // White has traded light-squared bishop, many holes on light squares
+        let board: Board = "8/8/8/8/8/8/PPPPPPPP/RNBQK1NR w KQ - 0 1".parse().unwrap();
+        let (mg, eg) = board.eval_color_weakness(Color::White);
+        // Without considering pawn structure, this is just checking the function works
+        assert!(mg <= 0 && eg <= 0, "color weakness should not give bonus");
+    }
+
+    #[test]
+    fn test_weak_squares_symmetry() {
+        // Symmetric position should be balanced
+        let board = Board::new();
+        let ctx = board.compute_attack_context();
+        let (mg, eg) = board.eval_weak_squares(&ctx);
+        assert!(
+            mg.abs() < 20,
+            "symmetric weak squares should be near zero: {mg}"
+        );
+        assert!(
+            eg.abs() < 20,
+            "symmetric weak squares eg should be near zero: {eg}"
+        );
+    }
+
+    #[test]
+    fn test_no_pawns_no_span() {
+        // No pawns means no attack span
+        let board: Board = "8/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
+        let span = board.pawn_attack_span(Color::White);
+        assert_eq!(span.0, 0, "no pawns should mean no attack span");
     }
 }

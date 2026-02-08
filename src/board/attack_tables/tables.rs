@@ -1,12 +1,5 @@
 //! Precomputed attack tables for leaper pieces (knights, kings, pawns).
 
-#[allow(dead_code)]
-pub(crate) fn pop_lsb_u64(bb: &mut u64) -> usize {
-    let idx = bb.trailing_zeros() as usize;
-    *bb &= *bb - 1;
-    idx
-}
-
 pub(crate) static KNIGHT_ATTACKS: std::sync::LazyLock<[u64; 64]> = std::sync::LazyLock::new(|| {
     let mut attacks = [0u64; 64];
     let deltas = [

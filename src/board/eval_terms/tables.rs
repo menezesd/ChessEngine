@@ -6,24 +6,34 @@
 // MOBILITY TABLES
 // ============================================================================
 
+/// Maximum mobility index for each piece type (`table_size - 1`)
+pub const KNIGHT_MOB_MAX: usize = 8;
+pub const BISHOP_MOB_MAX: usize = 13;
+pub const ROOK_MOB_MAX: usize = 14;
+pub const QUEEN_MOB_MAX: usize = 27;
+
 /// Knight mobility bonus (0-8 squares)
-pub const KNIGHT_MOB_MG: [i32; 9] = [-28, -14, -2, 4, 8, 12, 17, 21, 25];
-pub const KNIGHT_MOB_EG: [i32; 9] = [-28, -18, -8, 0, 6, 10, 14, 18, 22];
+pub const KNIGHT_MOB_MG: [i32; KNIGHT_MOB_MAX + 1] = [-28, -14, -2, 4, 8, 12, 17, 21, 25];
+pub const KNIGHT_MOB_EG: [i32; KNIGHT_MOB_MAX + 1] = [-28, -18, -8, 0, 6, 10, 14, 18, 22];
 
 /// Bishop mobility bonus (0-13 squares)
-pub const BISHOP_MOB_MG: [i32; 14] = [-30, -18, -8, 0, 6, 12, 17, 21, 24, 27, 29, 31, 33, 35];
-pub const BISHOP_MOB_EG: [i32; 14] = [-30, -18, -8, 0, 6, 10, 14, 17, 20, 22, 24, 26, 28, 30];
+pub const BISHOP_MOB_MG: [i32; BISHOP_MOB_MAX + 1] =
+    [-30, -18, -8, 0, 6, 12, 17, 21, 24, 27, 29, 31, 33, 35];
+pub const BISHOP_MOB_EG: [i32; BISHOP_MOB_MAX + 1] =
+    [-30, -18, -8, 0, 6, 10, 14, 17, 20, 22, 24, 26, 28, 30];
 
 /// Rook mobility bonus (0-14 squares)
-pub const ROOK_MOB_MG: [i32; 15] = [-14, -8, -3, 0, 3, 6, 9, 12, 14, 16, 18, 20, 21, 22, 23];
-pub const ROOK_MOB_EG: [i32; 15] = [-28, -16, -8, 0, 6, 12, 17, 21, 25, 28, 31, 34, 36, 38, 40];
+pub const ROOK_MOB_MG: [i32; ROOK_MOB_MAX + 1] =
+    [-14, -8, -3, 0, 3, 6, 9, 12, 14, 16, 18, 20, 21, 22, 23];
+pub const ROOK_MOB_EG: [i32; ROOK_MOB_MAX + 1] =
+    [-28, -16, -8, 0, 6, 12, 17, 21, 25, 28, 31, 34, 36, 38, 40];
 
 /// Queen mobility bonus (0-27 squares)
-pub const QUEEN_MOB_MG: [i32; 28] = [
+pub const QUEEN_MOB_MG: [i32; QUEEN_MOB_MAX + 1] = [
     -14, -10, -6, -3, 0, 2, 4, 6, 8, 10, 11, 12, 13, 14, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20,
     20, 20, 21, 21,
 ];
-pub const QUEEN_MOB_EG: [i32; 28] = [
+pub const QUEEN_MOB_EG: [i32; QUEEN_MOB_MAX + 1] = [
     -28, -18, -10, -4, 0, 4, 8, 11, 14, 17, 19, 21, 23, 25, 26, 27, 28, 29, 30, 31, 32, 32, 33, 33,
     34, 34, 35, 35,
 ];

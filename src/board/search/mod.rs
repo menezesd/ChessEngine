@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::tt::TranspositionTable;
+use constants::SCORE_NEAR_MATE;
 
 use super::nnue::NnueNetwork;
 use super::{Board, Move, Piece, MAX_PLY};
@@ -41,6 +42,7 @@ pub const DEFAULT_TT_MB: usize = 1024;
 pub(crate) const MATE_SCORE: i32 = constants::MATE_THRESHOLD + MAX_PLY as i32;
 
 /// Statistics tracked during search
+#[derive(Default)]
 pub struct SearchStats {
     pub nodes: u64,
     pub seldepth: u32,
@@ -122,9 +124,7 @@ impl KillerTable {
 
     pub fn reset(&mut self) {
         for killers in &mut self.slots {
-            killers[0] = super::EMPTY_MOVE;
-            killers[1] = super::EMPTY_MOVE;
-            killers[2] = super::EMPTY_MOVE;
+            killers.fill(super::EMPTY_MOVE);
         }
     }
 }
@@ -147,18 +147,12 @@ impl HistoryTable {
 
     #[must_use]
     pub fn score(&self, mv: &Move) -> i32 {
-        let from = mv.from().index();
-        let to = mv.to().index();
-        let idx = from * 64 + to;
-        self.entries.get(idx).copied().unwrap_or(0)
+        self.entries.get(mv.history_index()).copied().unwrap_or(0)
     }
 
     /// Update history score for a move that caused a beta cutoff
     pub fn update(&mut self, mv: &Move, depth: u32, _ply: usize) {
-        let from = mv.from().index();
-        let to = mv.to().index();
-        let idx = from * 64 + to;
-        if let Some(entry) = self.entries.get_mut(idx) {
+        if let Some(entry) = self.entries.get_mut(mv.history_index()) {
             let bonus = (depth * depth * depth) as i32;
             *entry = entry.saturating_add(bonus);
         }
@@ -166,10 +160,7 @@ impl HistoryTable {
 
     /// Penalize a move that failed to cause a cutoff (negative history)
     pub fn penalize(&mut self, mv: &Move, depth: u32, _ply: usize) {
-        let from = mv.from().index();
-        let to = mv.to().index();
-        let idx = from * 64 + to;
-        if let Some(entry) = self.entries.get_mut(idx) {
+        if let Some(entry) = self.entries.get_mut(mv.history_index()) {
             let penalty = (depth * depth) as i32;
             *entry = entry.saturating_sub(penalty);
         }
@@ -221,9 +212,7 @@ impl CounterMoveTable {
 
     pub fn reset(&mut self) {
         for counters in &mut self.entries {
-            for mv in counters {
-                *mv = super::EMPTY_MOVE;
-            }
+            counters.fill(super::EMPTY_MOVE);
         }
     }
 }
@@ -456,7 +445,7 @@ impl CorrectionHistory {
     /// Uses exponential moving average: new = old * (1-weight) + correction * weight
     pub fn update(&mut self, pawn_hash: u64, static_eval: i32, search_score: i32, depth: u32) {
         // Only update for reasonable depths and non-mate scores
-        if depth < 2 || search_score.abs() > 20000 {
+        if depth < 2 || search_score.abs() > SCORE_NEAR_MATE {
             return;
         }
 
@@ -505,6 +494,89 @@ pub struct SearchTables {
 }
 
 impl SearchTables {
+    /// Create new per-thread tables (killer, history, counter moves, etc.).
+    ///
+    /// This is used internally by the factory methods.
+    fn new_per_thread_tables() -> (
+        KillerTable,
+        HistoryTable,
+        CounterMoveTable,
+        ContinuationHistory,
+        CountermoveHistory,
+        CaptureHistory,
+        CorrectionHistory,
+    ) {
+        (
+            KillerTable::new(),
+            HistoryTable::new(),
+            CounterMoveTable::new(),
+            ContinuationHistory::new(),
+            CountermoveHistory::new(),
+            CaptureHistory::new(),
+            CorrectionHistory::new(),
+        )
+    }
+
+    /// Create a new `SearchTables` with a fresh transposition table of the given size.
+    #[must_use]
+    pub fn new(tt_mb: usize) -> Self {
+        let (
+            killer_moves,
+            history,
+            counter_moves,
+            continuation_history,
+            countermove_history,
+            capture_history,
+            correction_history,
+        ) = Self::new_per_thread_tables();
+
+        SearchTables {
+            tt: Arc::new(TranspositionTable::new(tt_mb)),
+            pawn_hash: Arc::new(crate::pawn_hash::PawnHashTable::default()),
+            nnue: None,
+            killer_moves,
+            history,
+            counter_moves,
+            continuation_history,
+            countermove_history,
+            capture_history,
+            correction_history,
+        }
+    }
+
+    /// Create a new `SearchTables` with shared TT, pawn hash, and NNUE.
+    ///
+    /// Used for SMP workers that share these tables but have separate per-thread tables.
+    #[must_use]
+    pub fn with_shared(
+        tt: Arc<TranspositionTable>,
+        pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
+        nnue: Option<Arc<NnueNetwork>>,
+    ) -> Self {
+        let (
+            killer_moves,
+            history,
+            counter_moves,
+            continuation_history,
+            countermove_history,
+            capture_history,
+            correction_history,
+        ) = Self::new_per_thread_tables();
+
+        SearchTables {
+            tt,
+            pawn_hash,
+            nnue,
+            killer_moves,
+            history,
+            counter_moves,
+            continuation_history,
+            countermove_history,
+            capture_history,
+            correction_history,
+        }
+    }
+
     /// MVV-LVA score for a capture move, enhanced with capture history
     /// Prioritizes capturing high-value pieces with low-value attackers,
     /// with capture history as a secondary factor
@@ -538,11 +610,7 @@ impl SearchTables {
         let mvv_lva = captured * 10 - attacker;
 
         // Check if capture is near enemy king (sacrifices near king often have tactics)
-        let enemy_king_sq = board.find_king(if board.white_to_move {
-            crate::board::Color::Black
-        } else {
-            crate::board::Color::White
-        });
+        let enemy_king_sq = board.find_king(board.side_to_move().opponent());
         let near_king = enemy_king_sq.is_some_and(|king_sq| {
             let to_sq = mv.to();
             let rank_diff = (to_sq.rank() as i32 - king_sq.rank() as i32).abs();
@@ -604,25 +672,8 @@ impl SearchState {
     #[must_use]
     pub fn new(tt_mb: usize) -> Self {
         SearchState {
-            stats: SearchStats {
-                nodes: 0,
-                seldepth: 0,
-                total_nodes: 0,
-                max_nodes: 0,
-                tt_hits: 0,
-            },
-            tables: SearchTables {
-                tt: Arc::new(TranspositionTable::new(tt_mb)),
-                pawn_hash: Arc::new(crate::pawn_hash::PawnHashTable::default()),
-                nnue: None,
-                killer_moves: KillerTable::new(),
-                history: HistoryTable::new(),
-                counter_moves: CounterMoveTable::new(),
-                continuation_history: ContinuationHistory::new(),
-                countermove_history: CountermoveHistory::new(),
-                capture_history: CaptureHistory::new(),
-                correction_history: CorrectionHistory::new(),
-            },
+            stats: SearchStats::default(),
+            tables: SearchTables::new(tt_mb),
             generation: 0,
             last_move: super::EMPTY_MOVE,
             hard_stop_at: None,
@@ -641,25 +692,8 @@ impl SearchState {
         generation: u16,
     ) -> Self {
         SearchState {
-            stats: SearchStats {
-                nodes: 0,
-                seldepth: 0,
-                total_nodes: 0,
-                max_nodes: 0,
-                tt_hits: 0,
-            },
-            tables: SearchTables {
-                tt,
-                pawn_hash,
-                nnue,
-                killer_moves: KillerTable::new(),
-                history: HistoryTable::new(),
-                counter_moves: CounterMoveTable::new(),
-                continuation_history: ContinuationHistory::new(),
-                countermove_history: CountermoveHistory::new(),
-                capture_history: CaptureHistory::new(),
-                correction_history: CorrectionHistory::new(),
-            },
+            stats: SearchStats::default(),
+            tables: SearchTables::with_shared(tt, pawn_hash, nnue),
             generation,
             last_move: super::EMPTY_MOVE,
             hard_stop_at: None,

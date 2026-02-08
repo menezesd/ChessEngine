@@ -67,7 +67,7 @@ fn test_all_perft_positions() {
             let nodes = board.perft(depth);
             let duration = start.elapsed();
 
-            println!("  Depth {}: {} nodes in {:?}", depth, nodes, duration);
+            println!("  Depth {depth}: {nodes} nodes in {duration:?}");
 
             assert_eq!(
                 nodes, expected,

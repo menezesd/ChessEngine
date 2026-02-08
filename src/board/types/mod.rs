@@ -27,9 +27,8 @@ pub use square::Square;
 // Re-export internal utilities
 pub(crate) use bitboard::bit_for_square;
 pub(crate) use castling::{
-    castle_bit, ALL_CASTLING_RIGHTS, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K,
-    CASTLE_WHITE_Q,
+    castle_bit, ALL_CASTLING_RIGHTS, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q,
 };
 pub(crate) use moves::{EMPTY_MOVE, MAX_PLY};
 pub(crate) use piece::PROMOTION_PIECES;
-pub(crate) use square::{file_to_index, rank_to_index, BOARD_SIZE, NUM_SQUARES};
+pub(crate) use square::{file_to_index, rank_to_index};

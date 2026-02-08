@@ -13,7 +13,7 @@ impl Board {
     pub(crate) fn generate_slider_moves(&self, from: Square, slider: SliderType) -> MoveList {
         let mut moves = MoveList::new();
         let color = self.side_to_move();
-        let own_occ = self.occupied[color.index()].0;
+        let own_occ = self.occupied_by(color).0;
         let from_idx = from.index();
 
         let targets_raw = match slider {
@@ -27,7 +27,7 @@ impl Board {
 
         for to_idx in Bitboard(targets_raw).iter() {
             let to_sq = to_idx;
-            moves.push(self.create_move(from, to_sq, None, false, false, false));
+            moves.push(self.create_simple_move(from, to_sq));
         }
         moves
     }

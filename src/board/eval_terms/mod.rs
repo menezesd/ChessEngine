@@ -54,8 +54,8 @@ mod tests {
         let board = make_board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         let (mg, eg) = board.eval_mobility();
         // Should be roughly equal in starting position
-        assert!(mg.abs() < 20, "mobility mg = {}", mg);
-        assert!(eg.abs() < 20, "mobility eg = {}", eg);
+        assert!(mg.abs() < 20, "mobility mg = {mg}");
+        assert!(eg.abs() < 20, "mobility eg = {eg}");
     }
 
     #[test]
@@ -63,8 +63,8 @@ mod tests {
         // White has a passed pawn on d5
         let board = make_board("8/8/8/3P4/8/8/8/8 w - - 0 1");
         let (mg, eg) = board.eval_passed_pawns();
-        assert!(mg > 0, "passed pawn mg should be positive: {}", mg);
-        assert!(eg > 0, "passed pawn eg should be positive: {}", eg);
+        assert!(mg > 0, "passed pawn mg should be positive: {mg}");
+        assert!(eg > 0, "passed pawn eg should be positive: {eg}");
     }
 
     #[test]
@@ -72,7 +72,7 @@ mod tests {
         // White has doubled pawns on d-file
         let board = make_board("8/8/8/3P4/3P4/8/8/8 w - - 0 1");
         let (mg, _) = board.eval_pawn_structure();
-        assert!(mg < 0, "doubled pawns should be penalized: {}", mg);
+        assert!(mg < 0, "doubled pawns should be penalized: {mg}");
     }
 
     #[test]
@@ -80,7 +80,7 @@ mod tests {
         // White rook on open e-file
         let board = make_board("8/8/8/8/8/8/8/4R3 w - - 0 1");
         let (mg, eg) = board.eval_rooks();
-        assert!(mg > 0, "rook on open file mg = {}", mg);
-        assert!(eg > 0, "rook on open file eg = {}", eg);
+        assert!(mg > 0, "rook on open file mg = {mg}");
+        assert!(eg > 0, "rook on open file eg = {eg}");
     }
 }

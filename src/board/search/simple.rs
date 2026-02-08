@@ -28,7 +28,8 @@ use crate::tt::BoundType;
 
 use super::constants::{
     COUNTER_SCORE, KILLER1_SCORE, KILLER2_SCORE, KILLER3_SCORE, LMR_IDX_BASE, LMR_SCORE_THRESHOLD,
-    LMR_TABLE_MAX_DEPTH, LMR_TABLE_MAX_IDX, MATE_THRESHOLD, TT_MOVE_SCORE,
+    LMR_TABLE_MAX_DEPTH, LMR_TABLE_MAX_IDX, MATE_THRESHOLD, PAWN_EXTENSION_RANK_BLACK,
+    PAWN_EXTENSION_RANK_WHITE, SCORE_INFINITE, SCORE_NEAR_MATE, SCORE_SAFE_MAX, TT_MOVE_SCORE,
 };
 use super::{SearchInfoCallback, SearchState, MATE_SCORE};
 use crate::board::{Board, Move, MoveList, ScoredMoveList, EMPTY_MOVE, MAX_PLY};
@@ -100,7 +101,7 @@ impl SimpleSearchContext<'_> {
         if extension == 0 && !ctx.m.is_promotion() {
             if let Some(crate::board::Piece::Pawn) = ctx.moving_piece {
                 let to_rank = ctx.m.to().rank();
-                if to_rank == 6 || to_rank == 1 {
+                if to_rank == PAWN_EXTENSION_RANK_WHITE || to_rank == PAWN_EXTENSION_RANK_BLACK {
                     extension += 1;
                 }
             }
@@ -266,11 +267,10 @@ impl SimpleSearchContext<'_> {
         let move_count = scored_moves.len();
         let tt_tactical = node.tt_move.is_capture() || node.tt_move.is_promotion();
 
-        let mut best_score = -30000i32;
+        let mut best_score = -SCORE_INFINITE;
         let mut best_move = EMPTY_MOVE;
         let mut raised_alpha = false;
         let mut moves_tried = 0;
-        let mut _quiet_moves_tried = 0;
 
         // Track quiet moves for negative history on beta cutoff
         let mut quiets_tried: [Move; 64] = [EMPTY_MOVE; 64];
@@ -306,13 +306,10 @@ impl SimpleSearchContext<'_> {
                 continue;
             }
 
-            if is_quiet {
-                _quiet_moves_tried += 1;
-                // Track for negative history (only if not the cutoff move)
-                if quiets_count < 64 {
-                    quiets_tried[quiets_count] = m;
-                    quiets_count += 1;
-                }
+            if is_quiet && quiets_count < 64 {
+                // Track quiet moves for negative history (only if not the cutoff move)
+                quiets_tried[quiets_count] = m;
+                quiets_count += 1;
             }
 
             // Get the piece that's moving for continuation history (before make_move)
@@ -437,16 +434,18 @@ impl SimpleSearchContext<'_> {
         self.store_tt(depth, best_score, raised_alpha, best_move);
 
         // Update correction history for exact bounds (when we have reliable score vs static eval)
-        if raised_alpha && ply < MAX_PLY && !in_check && best_score.abs() < 20000 {
+        if raised_alpha && ply < MAX_PLY && !in_check && best_score.abs() < SCORE_NEAR_MATE {
             let pawn_hash = self.board.pawn_hash();
             let raw_eval = self.static_eval[ply];
             // Remove the previously applied correction to get raw eval
             let old_correction = self.state.tables.correction_history.get(pawn_hash);
             let static_eval_raw = raw_eval - old_correction;
-            self.state
-                .tables
-                .correction_history
-                .update(pawn_hash, static_eval_raw, best_score, depth);
+            self.state.tables.correction_history.update(
+                pawn_hash,
+                static_eval_raw,
+                best_score,
+                depth,
+            );
         }
 
         best_score
@@ -813,7 +812,7 @@ impl SimpleSearchContext<'_> {
 
         // Check for missing king (illegal position)
         if self.board.find_king(self.board.side_to_move()).is_none() {
-            return -29000;
+            return -SCORE_SAFE_MAX;
         }
 
         let in_check = self.board.is_in_check(self.board.side_to_move());
@@ -869,7 +868,7 @@ impl SimpleSearchContext<'_> {
 
         // Static evaluation for pruning decisions
         let raw_eval = if in_check {
-            -30000 // Don't use static eval when in check
+            -SCORE_INFINITE // Don't use static eval when in check
         } else {
             self.evaluate_simple()
         };
@@ -880,7 +879,7 @@ impl SimpleSearchContext<'_> {
         } else {
             let pawn_hash = self.board.pawn_hash();
             let correction = self.state.tables.correction_history.get(pawn_hash);
-            (raw_eval + correction).clamp(-29000, 29000)
+            (raw_eval + correction).clamp(-SCORE_SAFE_MAX, SCORE_SAFE_MAX)
         };
 
         // Store eval for improving detection

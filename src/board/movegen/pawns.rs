@@ -1,10 +1,10 @@
-use super::super::{Board, Color, MoveList, Square, PROMOTION_PIECES};
+use super::super::{Board, Color, Move, MoveList, Square, PROMOTION_PIECES};
 
 impl Board {
     /// Add promotion moves for a pawn reaching the back rank
     fn add_promotions(&self, from: Square, to: Square, moves: &mut MoveList) {
         for promo in PROMOTION_PIECES {
-            moves.push(self.create_move(from, to, Some(promo), false, false, false));
+            moves.push(self.create_promotion_move(from, to, promo));
         }
     }
 
@@ -38,11 +38,11 @@ impl Board {
                     if target_sq.rank() == promotion_rank {
                         self.add_promotions(from, target_sq, moves);
                     } else {
-                        moves.push(self.create_move(from, target_sq, None, false, false, false));
+                        moves.push(self.create_simple_move(from, target_sq));
                     }
                 }
             } else if Some(target_sq) == self.en_passant_target {
-                moves.push(self.create_move(from, target_sq, None, false, true, false));
+                moves.push(Move::en_passant(from, target_sq));
             }
         }
     }
@@ -65,20 +65,13 @@ impl Board {
                 if forward_sq.rank() == promotion_rank {
                     self.add_promotions(from, forward_sq, &mut moves);
                 } else {
-                    moves.push(self.create_move(from, forward_sq, None, false, false, false));
+                    moves.push(self.create_simple_move(from, forward_sq));
                     // Double push from starting rank
                     if r == start_rank as isize {
                         let double_forward_r = r + 2 * dir;
                         let double_forward_sq = Square::new(double_forward_r as usize, f as usize);
                         if self.is_empty(double_forward_sq) {
-                            moves.push(self.create_move(
-                                from,
-                                double_forward_sq,
-                                None,
-                                false,
-                                false,
-                                true,
-                            ));
+                            moves.push(Move::double_pawn_push(from, double_forward_sq));
                         }
                     }
                 }

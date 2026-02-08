@@ -10,7 +10,7 @@
 pub mod network;
 pub mod simd;
 
-pub use network::{NnueNetwork, NnueAccumulator, HIDDEN_SIZE};
+pub use network::{NnueAccumulator, NnueNetwork, HIDDEN_SIZE};
 
 /// Weight quantization factor for feature weights
 pub const QA: i32 = 255;

@@ -109,7 +109,7 @@ fn test_double_check_only_king_can_move() {
     let mut board = Board::from_fen("4k3/8/8/1b6/8/8/3r4/3K4 w - - 0 1");
     let moves = board.generate_moves();
 
-    for mv in moves.iter() {
+    for mv in &moves {
         assert_eq!(
             mv.from(),
             Square::new(0, 3),

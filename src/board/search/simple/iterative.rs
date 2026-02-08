@@ -1,9 +1,14 @@
 use std::time::Instant;
 
-use super::{SimpleSearchContext, MATE_SCORE, MATE_THRESHOLD};
+use super::{SimpleSearchContext, MATE_SCORE, MATE_THRESHOLD, SCORE_INFINITE};
 use crate::board::search::SearchInfoCallback;
 use crate::board::{Move, SearchIterationInfo, SearchState, EMPTY_MOVE, MAX_PLY};
 use std::sync::atomic::AtomicBool;
+
+/// Aspiration window constants
+const ASPIRATION_DELTA_SHALLOW: i32 = 35; // Initial delta for depth <= 5
+const ASPIRATION_DELTA_DEEP: i32 = 20; // Initial delta for depth > 5
+const ASPIRATION_MAX_DELTA: i32 = 800; // Fall back to full window above this
 
 impl SimpleSearchContext<'_> {
     /// Check if we should stop the current iteration based on time management.
@@ -99,9 +104,9 @@ impl SimpleSearchContext<'_> {
 
             // Aspiration window - fixed delta, stability adjustments removed
             let mut delta = if depth <= 5 {
-                35
+                ASPIRATION_DELTA_SHALLOW
             } else {
-                20
+                ASPIRATION_DELTA_DEEP
             };
 
             let mut alpha = score.saturating_sub(delta);
@@ -135,9 +140,9 @@ impl SimpleSearchContext<'_> {
                 }
 
                 // Prevent infinite loop - fall back to full window
-                if delta > 800 {
-                    alpha = -30000;
-                    beta = 30000;
+                if delta > ASPIRATION_MAX_DELTA {
+                    alpha = -SCORE_INFINITE;
+                    beta = SCORE_INFINITE;
                 }
             }
 

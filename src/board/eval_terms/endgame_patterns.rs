@@ -18,9 +18,6 @@ pub const KING_CENTER_EG: i32 = 8;
 /// Wrong bishop penalty (can't control promotion square)
 pub const WRONG_BISHOP_EG: i32 = -50;
 
-/// Light square mask
-const LIGHT_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
-
 impl Board {
     /// Evaluate endgame patterns.
     ///
@@ -50,21 +47,14 @@ impl Board {
     fn eval_endgame_for_color(&self, color: Color) -> i32 {
         let mut eg = 0;
 
-        let c_idx = color.index();
-        let opp_idx = color.opponent().index();
-
         // King centralization
-        let king_bb = self.pieces[c_idx][Piece::King.index()];
-        if king_bb.0 != 0 {
-            let king_sq = king_bb.0.trailing_zeros() as usize;
-            eg += Self::king_centralization_bonus(king_sq);
-        }
+        let king_sq = self.king_square_index(color);
+        eg += Self::king_centralization_bonus(king_sq);
 
         // Rook activity - cutting off enemy king
-        let rooks = self.pieces[c_idx][Piece::Rook.index()];
-        let enemy_king_bb = self.pieces[opp_idx][Piece::King.index()];
-        if rooks.0 != 0 && enemy_king_bb.0 != 0 {
-            let enemy_king_sq = enemy_king_bb.0.trailing_zeros() as usize;
+        let rooks = self.pieces_of(color, Piece::Rook);
+        if rooks.0 != 0 {
+            let enemy_king_sq = self.king_square_index(color.opponent());
             eg += Self::eval_rook_cut_off(rooks, enemy_king_sq, color);
         }
 
@@ -96,8 +86,8 @@ impl Board {
         let mut bonus = 0;
 
         for rook_sq in rooks.iter() {
-            let rook_rank = rook_sq.index() / 8;
-            let rook_file = rook_sq.index() % 8;
+            let rook_rank = rook_sq.rank();
+            let rook_file = rook_sq.file();
 
             // Rook on rank cutting off king (between king and promotion square)
             match color {
@@ -116,9 +106,10 @@ impl Board {
             }
 
             // Rook on file cutting off king from center
-            if (rook_file == 3 || rook_file == 4) &&
-               ((rook_file < enemy_king_file && enemy_king_file >= 4) ||
-                (rook_file >= enemy_king_file && enemy_king_file < 4)) {
+            if (rook_file == 3 || rook_file == 4)
+                && ((rook_file < enemy_king_file && enemy_king_file >= 4)
+                    || (rook_file >= enemy_king_file && enemy_king_file < 4))
+            {
                 bonus += ROOK_CUT_OFF_EG / 2;
             }
         }
@@ -126,52 +117,42 @@ impl Board {
         bonus
     }
 
+    /// Whether a-file promotion square is light: [White (a8=light), Black (a1=dark)]
+    const A_PROMO_LIGHT: [bool; 2] = [true, false];
+    /// Whether h-file promotion square is light: [White (h8=dark), Black (h1=light)]
+    const H_PROMO_LIGHT: [bool; 2] = [false, true];
+
     /// Detect wrong bishop (bishop that can't control rook pawn promotion square).
     fn eval_wrong_bishop(&self, color: Color) -> i32 {
-        let c_idx = color.index();
-        let bishops = self.pieces[c_idx][Piece::Bishop.index()];
-        let pawns = self.pieces[c_idx][Piece::Pawn.index()];
+        let bishops = self.pieces_of(color, Piece::Bishop);
+        let pawns = self.pieces_of(color, Piece::Pawn);
 
-        if bishops.0.count_ones() != 1 || pawns.0 == 0 {
+        if bishops.popcount() != 1 || pawns.is_empty() {
             return 0;
         }
 
         // Check for rook pawn only situation
-        let a_file = 0x0101_0101_0101_0101u64;
-        let h_file = 0x8080_8080_8080_8080u64;
-
-        let a_pawns = pawns.0 & a_file;
-        let h_pawns = pawns.0 & h_file;
-        let other_pawns = pawns.0 & !(a_file | h_file);
+        let a_pawns = pawns.intersects(Bitboard::FILE_A);
+        let h_pawns = pawns.intersects(Bitboard::FILE_H);
+        let other_pawns = !pawns.and(Bitboard::FILE_A.or(Bitboard::FILE_H).not()).is_empty();
 
         // Only relevant if we only have rook pawns
-        if other_pawns != 0 {
+        if other_pawns {
             return 0;
         }
 
-        let is_light_bishop = (bishops.0 & LIGHT_SQUARES) != 0;
-
-        // a-file promotion square (a8 for white, a1 for black)
-        let a_promo_light = match color {
-            Color::White => true,  // a8 is light
-            Color::Black => false, // a1 is dark
-        };
-
-        // h-file promotion square (h8 for white, h1 for black)
-        let h_promo_light = match color {
-            Color::White => false, // h8 is dark
-            Color::Black => true,  // h1 is light
-        };
+        let is_light_bishop = bishops.intersects(Bitboard::LIGHT_SQUARES);
+        let color_idx = color.index();
 
         // Check if bishop is wrong color for our pawns
-        if a_pawns != 0 && h_pawns == 0 {
+        if a_pawns && !h_pawns {
             // Only a-file pawn(s)
-            if is_light_bishop != a_promo_light {
+            if is_light_bishop != Self::A_PROMO_LIGHT[color_idx] {
                 return WRONG_BISHOP_EG;
             }
-        } else if h_pawns != 0 && a_pawns == 0 {
+        } else if h_pawns && !a_pawns {
             // Only h-file pawn(s)
-            if is_light_bishop != h_promo_light {
+            if is_light_bishop != Self::H_PROMO_LIGHT[color_idx] {
                 return WRONG_BISHOP_EG;
             }
         }
@@ -185,10 +166,10 @@ impl Board {
         // Full implementation would recognize specific patterns
 
         // Check for common fortress: rook+pawn vs rook with blocked pawn
-        let white_rooks = self.pieces[0][Piece::Rook.index()].0.count_ones();
-        let black_rooks = self.pieces[1][Piece::Rook.index()].0.count_ones();
-        let white_pawns = self.pieces[0][Piece::Pawn.index()].0.count_ones();
-        let black_pawns = self.pieces[1][Piece::Pawn.index()].0.count_ones();
+        let white_rooks = self.piece_count(Color::White, Piece::Rook);
+        let black_rooks = self.piece_count(Color::Black, Piece::Rook);
+        let white_pawns = self.piece_count(Color::White, Piece::Pawn);
+        let black_pawns = self.piece_count(Color::Black, Piece::Pawn);
 
         // Very simplified: if material is roughly equal and few pawns, might be fortress-ish
         if white_rooks == 1 && black_rooks == 1 && white_pawns <= 1 && black_pawns <= 1 {
@@ -209,7 +190,18 @@ mod tests {
     fn test_king_centralization() {
         // King on d5 - central
         let bonus = Board::king_centralization_bonus(35); // d5 = 35
-        assert!(bonus > 0);
+        assert!(bonus > 0, "central king should have positive bonus");
+    }
+
+    #[test]
+    fn test_king_corner_less_central() {
+        // King in corner vs center
+        let corner_bonus = Board::king_centralization_bonus(0); // a1
+        let center_bonus = Board::king_centralization_bonus(35); // d5
+        assert!(
+            center_bonus > corner_bonus,
+            "central king should have more bonus than corner king"
+        );
     }
 
     #[test]
@@ -218,6 +210,45 @@ mod tests {
         let board: Board = "8/7P/8/8/8/8/B7/8 w - - 0 1".parse().unwrap();
         let penalty = board.eval_wrong_bishop(Color::White);
         // a1 bishop is dark-squared, h8 is light - this is wrong bishop
-        assert!(penalty < 0);
+        assert!(penalty < 0, "wrong bishop should have penalty");
+    }
+
+    #[test]
+    fn test_correct_bishop() {
+        // White has h-pawn and light-squared bishop (h8 is dark, bishop is light)
+        let board: Board = "8/7P/8/8/8/8/1B6/8 w - - 0 1".parse().unwrap();
+        let penalty = board.eval_wrong_bishop(Color::White);
+        // b2 bishop is light-squared, h8 is dark - this is correct bishop
+        assert_eq!(penalty, 0, "correct bishop should have no penalty");
+    }
+
+    #[test]
+    fn test_rook_cut_off_black_king() {
+        // White rook on 7th rank cutting off black king on 6th rank
+        // Rook is between the king and the promotion square
+        let rooks = Bitboard(1u64 << 48); // a7 (rank 6)
+        let bonus = Board::eval_rook_cut_off(rooks, 44, Color::White); // Black king on e6 (rank 5)
+                                                                       // Rook on rank 6 cutting off king on rank 5 from rank 8
+        assert!(bonus > 0, "rook cutting off king should give bonus");
+    }
+
+    #[test]
+    fn test_no_wrong_bishop_with_multiple_pawns() {
+        // Wrong bishop only applies to rook pawn only situations
+        let board: Board = "8/7P/8/3P4/8/8/B7/8 w - - 0 1".parse().unwrap();
+        let penalty = board.eval_wrong_bishop(Color::White);
+        assert_eq!(penalty, 0, "wrong bishop only applies to rook pawn only");
+    }
+
+    #[test]
+    fn test_endgame_patterns_symmetry() {
+        // Symmetric endgame should be balanced
+        let board: Board = "4k3/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
+        let (mg, eg) = board.eval_endgame_patterns();
+        assert_eq!(mg, 0, "endgame patterns mg should be 0");
+        assert!(
+            eg.abs() < 10,
+            "symmetric kings should have near-zero eg: {eg}"
+        );
     }
 }

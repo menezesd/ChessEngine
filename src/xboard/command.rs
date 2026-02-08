@@ -33,7 +33,7 @@ pub enum XBoardCommand {
     /// Set time control: level <mps> <base> <inc>
     Level {
         moves_per_session: u32,
-        base_minutes: u32,
+        base_seconds: u32,
         increment_seconds: u32,
     },
     /// Set exact seconds per move
@@ -198,7 +198,7 @@ fn parse_complex_command(trimmed: &str, parts: &[&str]) -> XBoardCommand {
             let inc = parts.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
             XBoardCommand::Level {
                 moves_per_session: mps,
-                base_minutes: base,
+                base_seconds: base,
                 increment_seconds: inc,
             }
         }
@@ -269,15 +269,18 @@ fn is_likely_move(s: &str) -> bool {
     false
 }
 
-/// Parse time control string (supports "5" or "5:30" format)
+/// Parse time control string (supports "5" or "5:30" format).
+/// Returns total seconds.
 fn parse_time_control(s: &str) -> Option<u32> {
     if s.contains(':') {
         let parts: Vec<&str> = s.split(':').collect();
         let mins: u32 = parts.first()?.parse().ok()?;
         let secs: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        Some(mins + secs / 60)
+        Some(mins * 60 + secs)
     } else {
-        s.parse().ok()
+        // Plain number is minutes, convert to seconds
+        let mins: u32 = s.parse().ok()?;
+        Some(mins * 60)
     }
 }
 
@@ -351,5 +354,20 @@ mod tests {
             }
             _ => panic!("Expected SetBoard"),
         }
+    }
+
+    #[test]
+    fn test_parse_time_control() {
+        // Plain minutes
+        assert_eq!(parse_time_control("5"), Some(300)); // 5 min = 300 sec
+        assert_eq!(parse_time_control("10"), Some(600)); // 10 min = 600 sec
+
+        // Minutes:seconds format
+        assert_eq!(parse_time_control("5:30"), Some(330)); // 5:30 = 330 sec
+        assert_eq!(parse_time_control("0:30"), Some(30)); // 30 sec
+        assert_eq!(parse_time_control("1:00"), Some(60)); // 1 min
+
+        // Invalid input
+        assert_eq!(parse_time_control("abc"), None);
     }
 }

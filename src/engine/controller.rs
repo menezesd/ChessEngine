@@ -16,6 +16,12 @@ use crate::board::{
 const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
 const HARD_STOP_MARGIN_MS: u64 = 5;
 
+/// Maximum sleep duration when polling time limits (avoids excessive CPU wake-ups)
+const MAX_POLL_SLEEP_MS: u64 = 5;
+
+/// Poll interval when waiting for ponder to complete
+const PONDER_POLL_MS: u64 = 10;
+
 /// Active search job state
 pub struct SearchJob {
     /// Stop flag for the search
@@ -109,11 +115,7 @@ pub struct EngineController {
 
 /// Default NNUE file paths to try loading (used when embedded_nnue is disabled)
 #[cfg(not(feature = "embedded_nnue"))]
-const DEFAULT_NNUE_PATHS: &[&str] = &[
-    "trained_new_combined.nnue",
-    "trained.nnue",
-    "default.nnue",
-];
+const DEFAULT_NNUE_PATHS: &[&str] = &["trained_new_combined.nnue", "trained.nnue", "default.nnue"];
 
 impl EngineController {
     /// Create a new engine controller
@@ -296,7 +298,7 @@ impl EngineController {
                     stop.store(true, Ordering::Relaxed);
                     break;
                 }
-                let sleep_for = (deadline - now).min(Duration::from_millis(5));
+                let sleep_for = (deadline - now).min(Duration::from_millis(MAX_POLL_SLEEP_MS));
                 thread::sleep(sleep_for);
             })
         })
@@ -374,7 +376,7 @@ impl EngineController {
                     while pondering_clone.load(Ordering::Relaxed)
                         && !stop_clone.load(Ordering::Relaxed)
                     {
-                        thread::sleep(Duration::from_millis(10));
+                        thread::sleep(Duration::from_millis(PONDER_POLL_MS));
                     }
 
                     on_complete(result);
@@ -407,7 +409,7 @@ impl EngineController {
                     while pondering_clone.load(Ordering::Relaxed)
                         && !stop_clone.load(Ordering::Relaxed)
                     {
-                        thread::sleep(Duration::from_millis(10));
+                        thread::sleep(Duration::from_millis(PONDER_POLL_MS));
                     }
 
                     on_complete(result);
