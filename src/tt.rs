@@ -257,8 +257,21 @@ impl TranspositionTable {
         let idx = self.index(hash);
         let bucket_ptr = self.buckets.as_ptr().wrapping_add(idx);
 
-        // Use a volatile read as a cross-platform prefetch hint
-        // The compiler can't optimize this away, and it brings the cache line in
+        // Use CPU prefetch instructions where available
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            _mm_prefetch(bucket_ptr.cast::<i8>(), _MM_HINT_T0);
+        }
+
+        #[cfg(target_arch = "x86")]
+        unsafe {
+            use std::arch::x86::{_mm_prefetch, _MM_HINT_T0};
+            _mm_prefetch(bucket_ptr.cast::<i8>(), _MM_HINT_T0);
+        }
+
+        // Fallback for other architectures: volatile read brings cache line in
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
         unsafe {
             std::ptr::read_volatile(bucket_ptr.cast::<u8>());
         }

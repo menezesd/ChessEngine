@@ -82,6 +82,14 @@ struct MoveContext {
     moving_piece: Option<crate::board::Piece>,
 }
 
+/// Result of trying TT move before full move generation
+struct StagedMoveResult {
+    /// Score from searching the TT move
+    score: i32,
+    /// Whether TT move raised alpha (but didn't cause cutoff)
+    raised_alpha: bool,
+}
+
 impl SimpleSearchContext<'_> {
     /// Compute extensions for a move
     fn compute_extensions(ctx: &MoveContext, node: &NodeContext) -> u32 {
@@ -249,6 +257,7 @@ impl SimpleSearchContext<'_> {
         mut alpha: i32,
         beta: i32,
         moves: &MoveList,
+        staged: Option<StagedMoveResult>,
     ) -> i32 {
         let ply = node.ply;
         let in_check = node.in_check;
@@ -267,10 +276,20 @@ impl SimpleSearchContext<'_> {
         let move_count = scored_moves.len();
         let tt_tactical = node.tt_move.is_capture() || node.tt_move.is_promotion();
 
-        let mut best_score = -SCORE_INFINITE;
-        let mut best_move = EMPTY_MOVE;
-        let mut raised_alpha = false;
-        let mut moves_tried = 0;
+        // If TT move was already searched (staged), use its result as initial state
+        let (mut best_score, mut best_move, mut raised_alpha, tt_move_searched) =
+            if let Some(result) = staged {
+                // TT move was searched, didn't cause cutoff
+                // Update alpha if TT move raised it
+                if result.raised_alpha {
+                    alpha = result.score;
+                }
+                (result.score, node.tt_move, result.raised_alpha, true)
+            } else {
+                (-SCORE_INFINITE, EMPTY_MOVE, false, false)
+            };
+
+        let mut moves_tried = if tt_move_searched { 1 } else { 0 };
 
         // Track quiet moves for negative history on beta cutoff
         let mut quiets_tried: [Move; 64] = [EMPTY_MOVE; 64];
@@ -289,6 +308,11 @@ impl SimpleSearchContext<'_> {
 
             // Skip excluded move (for singular extension search)
             if m == node.excluded_move {
+                continue;
+            }
+
+            // Skip TT move if already searched in staged generation
+            if tt_move_searched && m == node.tt_move {
                 continue;
             }
 
@@ -848,25 +872,7 @@ impl SimpleSearchContext<'_> {
             }
         }
 
-        // Generate moves (at root, use root_moves if available for MultiPV)
-        let moves = if is_root && !self.root_moves.is_empty() {
-            let mut move_list = MoveList::new();
-            for m in &self.root_moves {
-                move_list.push(*m);
-            }
-            move_list
-        } else {
-            self.board.generate_moves()
-        };
-        if moves.is_empty() {
-            return if in_check {
-                -MATE_SCORE + ply as i32 // Checkmate
-            } else {
-                0 // Stalemate
-            };
-        }
-
-        // Static evaluation for pruning decisions
+        // Static evaluation for pruning decisions (needed before node-level pruning)
         let raw_eval = if in_check {
             -SCORE_INFINITE // Don't use static eval when in check
         } else {
@@ -900,6 +906,52 @@ impl SimpleSearchContext<'_> {
             {
                 return score;
             }
+        }
+
+        // ========================================================================
+        // STAGED MOVE GENERATION: Try TT move before generating all moves
+        // ========================================================================
+        // After node-level pruning, try TT move first. If it causes a beta cutoff,
+        // we avoid the cost of generating all moves.
+        let staged_result = if tt_move != EMPTY_MOVE
+            && !excluded_move_active
+            && !is_root // At root we need all moves for proper PV
+            && !in_check // Simpler handling when not in check
+        {
+            self.try_tt_move_first(tt_move, &node, depth, alpha, beta)
+        } else {
+            None
+        };
+
+        // If TT move caused beta cutoff, return immediately
+        if let Some(ref result) = staged_result {
+            if result.score >= beta {
+                return result.score;
+            }
+        }
+
+        // Generate moves (at root, use root_moves if available for MultiPV)
+        let moves = if is_root && !self.root_moves.is_empty() {
+            let mut move_list = MoveList::new();
+            for m in &self.root_moves {
+                move_list.push(*m);
+            }
+            move_list
+        } else {
+            self.board.generate_moves()
+        };
+
+        // Handle empty move list (checkmate/stalemate)
+        // Note: if staged_result is Some, TT move was legal so we have at least one move
+        if moves.is_empty() {
+            return if staged_result.is_some() {
+                // TT move was the only legal move, return its score
+                staged_result.unwrap().score
+            } else if in_check {
+                -MATE_SCORE + ply as i32 // Checkmate
+            } else {
+                0 // Stalemate
+            };
         }
 
         // ========================================================================
@@ -941,6 +993,85 @@ impl SimpleSearchContext<'_> {
             depth
         };
 
-        self.search_moves(&node, search_depth, alpha, beta, &moves)
+        // Convert staged_result: if it caused cutoff we already returned above,
+        // so here it's either None or Some with score < beta
+        let staged = staged_result.filter(|r| r.score < beta);
+
+        self.search_moves(&node, search_depth, alpha, beta, &moves, staged)
+    }
+
+    /// Try the TT move before generating all moves.
+    /// Returns Some(result) if TT move was legal and searched.
+    /// The result contains the score and whether it raised alpha.
+    /// If score >= beta, caller should return immediately (beta cutoff).
+    fn try_tt_move_first(
+        &mut self,
+        tt_move: Move,
+        node: &NodeContext,
+        depth: u32,
+        alpha: i32,
+        beta: i32,
+    ) -> Option<StagedMoveResult> {
+        // Validate TT move is legal (much cheaper than generating all moves)
+        if !self.board.is_legal_move(tt_move) {
+            return None;
+        }
+
+        let ply = node.ply;
+
+        // Get the piece that's moving for continuation history
+        let moving_piece = self.board.piece_at(tt_move.from()).map(|(_, p)| p);
+
+        // Make the move
+        let info = self.board.make_move(tt_move);
+
+        // Prefetch TT entry for the new position
+        self.state.tables.tt.prefetch(self.board.hash);
+
+        // Check if move gives check
+        let gives_check = self.board.is_in_check(self.board.side_to_move());
+
+        if ply < MAX_PLY {
+            self.previous_move[ply] = tt_move;
+            self.previous_piece[ply] = moving_piece;
+        }
+
+        // Compute extensions for TT move
+        let is_quiet = !tt_move.is_capture() && !tt_move.is_promotion();
+        let move_ctx = MoveContext {
+            m: tt_move,
+            move_score: TT_MOVE_SCORE,
+            is_quiet,
+            gives_check,
+            moving_piece,
+        };
+        let extension = Self::compute_extensions(&move_ctx, node);
+        // Standard depth reduction when descending into child node
+        let new_depth = depth.saturating_sub(1) + extension;
+
+        // Full window search for TT move (it's the first move)
+        let score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, EMPTY_MOVE);
+
+        self.board.unmake_move(tt_move, info);
+
+        if self.should_stop() {
+            return None;
+        }
+
+        // Check for beta cutoff
+        if score >= beta {
+            // Update history heuristics on cutoff
+            self.handle_beta_cutoff(tt_move, ply, depth, score, tt_move);
+            return Some(StagedMoveResult {
+                score,
+                raised_alpha: true,
+            });
+        }
+
+        // TT move didn't cause cutoff, but may have raised alpha
+        Some(StagedMoveResult {
+            score,
+            raised_alpha: score > alpha,
+        })
     }
 }
