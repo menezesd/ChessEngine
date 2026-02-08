@@ -248,4 +248,95 @@ mod tests {
         assert!(board.piece_at(Square::new(0, 0)).is_none());
         assert!(board.piece_at(Square::new(0, 1)).is_some()); // Knight still there
     }
+
+    #[test]
+    fn test_en_passant() {
+        let board = BoardBuilder::new()
+            .piece(Square::new(0, 4), Color::White, Piece::King)
+            .piece(Square::new(7, 4), Color::Black, Piece::King)
+            .piece(Square::new(4, 3), Color::White, Piece::Pawn)
+            .piece(Square::new(4, 4), Color::Black, Piece::Pawn)
+            .en_passant(Square::new(5, 4)) // e6
+            .build();
+
+        assert_eq!(board.en_passant_target, Some(Square::new(5, 4)));
+    }
+
+    #[test]
+    fn test_clear_en_passant() {
+        let board = BoardBuilder::new()
+            .piece(Square::new(0, 4), Color::White, Piece::King)
+            .piece(Square::new(7, 4), Color::Black, Piece::King)
+            .en_passant(Square::new(5, 4))
+            .clear_en_passant()
+            .build();
+
+        assert!(board.en_passant_target.is_none());
+    }
+
+    #[test]
+    fn test_halfmove_clock() {
+        let board = BoardBuilder::new()
+            .piece(Square::new(0, 4), Color::White, Piece::King)
+            .piece(Square::new(7, 4), Color::Black, Piece::King)
+            .halfmove_clock(50)
+            .build();
+
+        assert_eq!(board.halfmove_clock, 50);
+    }
+
+    #[test]
+    fn test_castle_queenside() {
+        let board = BoardBuilder::starting_position()
+            .no_castling_rights()
+            .castle_queenside(Color::Black)
+            .build();
+
+        let rights = CastlingRights::from_u8(board.castling_rights);
+        assert!(!rights.has(Color::White, true));
+        assert!(!rights.has(Color::White, false));
+        assert!(!rights.has(Color::Black, true));
+        assert!(rights.has(Color::Black, false)); // Black queenside
+    }
+
+    #[test]
+    fn test_all_castling_rights() {
+        let board = BoardBuilder::starting_position()
+            .no_castling_rights()
+            .all_castling_rights()
+            .build();
+
+        let rights = CastlingRights::from_u8(board.castling_rights);
+        assert!(rights.has(Color::White, true));
+        assert!(rights.has(Color::White, false));
+        assert!(rights.has(Color::Black, true));
+        assert!(rights.has(Color::Black, false));
+    }
+
+    #[test]
+    fn test_piece_replacement() {
+        // Adding a piece to an occupied square should replace it
+        let board = BoardBuilder::new()
+            .piece(Square::new(0, 4), Color::White, Piece::King)
+            .piece(Square::new(7, 4), Color::Black, Piece::King)
+            .piece(Square::new(3, 3), Color::White, Piece::Pawn)
+            .piece(Square::new(3, 3), Color::White, Piece::Queen) // Replace pawn with queen
+            .build();
+
+        let (color, piece) = board.piece_at(Square::new(3, 3)).unwrap();
+        assert_eq!(color, Color::White);
+        assert_eq!(piece, Piece::Queen);
+    }
+
+    #[test]
+    fn test_default_builder() {
+        let builder = BoardBuilder::default();
+        let board = builder
+            .piece(Square::new(0, 4), Color::White, Piece::King)
+            .piece(Square::new(7, 4), Color::Black, Piece::King)
+            .build();
+
+        // Default is white to move
+        assert!(board.white_to_move());
+    }
 }

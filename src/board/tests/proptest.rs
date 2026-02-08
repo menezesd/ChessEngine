@@ -121,7 +121,7 @@ proptest! {
 
             // Verify each legal move doesn't leave king in check
             let current_color = board.side_to_move();
-            for mv in moves.iter() {
+            for mv in &moves {
                 let info = board.make_move(*mv);
                 prop_assert!(!board.is_in_check(current_color),
                     "Legal move left king in check: {:?}", mv);
@@ -159,7 +159,7 @@ proptest! {
 
         // Check SEE for all captures
         let moves = board.generate_moves();
-        for mv in moves.iter() {
+        for mv in &moves {
             if mv.is_capture() {
                 let see = board.see(mv.from(), mv.to());
 
@@ -188,7 +188,7 @@ proptest! {
         let mut board: Board = "8/8/8/3p4/4N3/8/8/8 w - - 0 1".parse().unwrap();
         let moves = board.generate_moves();
 
-        for mv in moves.iter() {
+        for mv in &moves {
             if mv.is_capture() {
                 let see = board.see(mv.from(), mv.to());
                 // Undefended pawn capture should equal pawn value
@@ -370,7 +370,7 @@ proptest! {
         tt.store(hash, depth, score, BoundType::Exact, None, 1);
 
         if let Some(entry) = tt.probe(hash) {
-            prop_assert_eq!(entry.depth() as u32, depth.min(255));
+            prop_assert_eq!(entry.depth(), depth.min(255));
             let clamped_score = score.clamp(i16::MIN as i32, i16::MAX as i32);
             prop_assert_eq!(entry.score(), clamped_score);
         }

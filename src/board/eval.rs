@@ -46,7 +46,10 @@ impl EvalScore {
     /// Create a score where mg and eg are the same (e.g., for bonuses).
     #[inline]
     const fn both(value: i32) -> Self {
-        EvalScore { mg: value, eg: value }
+        EvalScore {
+            mg: value,
+            eg: value,
+        }
     }
 
     /// Create a score with only middlegame component.
@@ -135,16 +138,16 @@ impl Board {
         let base_eg = self.eval_eg[0] - self.eval_eg[1];
 
         // Bishop pair bonus
-        let white_bishops = self.pieces[0][Piece::Bishop.index()].popcount();
-        let black_bishops = self.pieces[1][Piece::Bishop.index()].popcount();
+        let white_bishops = self.pieces_of(Color::White, Piece::Bishop).popcount();
+        let black_bishops = self.pieces_of(Color::Black, Piece::Bishop).popcount();
         let bishop_pair_bonus =
             BISHOP_PAIR_BONUS * ((white_bishops / 2) as i32 - (black_bishops / 2) as i32);
 
         // Bishop vs Knight imbalance: bishops better in open positions
-        let white_knights = self.pieces[0][Piece::Knight.index()].popcount();
-        let black_knights = self.pieces[1][Piece::Knight.index()].popcount();
-        let total_pawns = self.pieces[0][Piece::Pawn.index()].popcount()
-            + self.pieces[1][Piece::Pawn.index()].popcount();
+        let white_knights = self.pieces_of(Color::White, Piece::Knight).popcount();
+        let black_knights = self.pieces_of(Color::Black, Piece::Knight).popcount();
+        let total_pawns = self.pieces_of(Color::White, Piece::Pawn).popcount()
+            + self.pieces_of(Color::Black, Piece::Pawn).popcount();
         let openness = (16 - total_pawns as i32).max(0); // 0 when 16 pawns, 16 when 0 pawns
 
         // Net bishop advantage (bishops - knights for each side)
@@ -215,11 +218,7 @@ impl Board {
     /// Note: Bishop imbalance is only in full eval to keep simple eval fast.
     #[must_use]
     pub fn evaluate_simple(&self) -> i32 {
-        let stm = if self.white_to_move {
-            Color::White
-        } else {
-            Color::Black
-        };
+        let stm = self.side_to_move();
         let stm_idx = stm.index();
         let opp_idx = stm.opponent().index();
 
@@ -229,8 +228,8 @@ impl Board {
         let endeval = self.eval_eg[stm_idx] - self.eval_eg[opp_idx];
 
         // Bishop pair bonus only (imbalance is in full eval)
-        let our_bishops = self.pieces[stm_idx][Piece::Bishop.index()].popcount();
-        let opp_bishops = self.pieces[opp_idx][Piece::Bishop.index()].popcount();
+        let our_bishops = self.pieces_of(stm, Piece::Bishop).popcount();
+        let opp_bishops = self.opponent_pieces(stm, Piece::Bishop).popcount();
         let bishop_bonus =
             BISHOP_PAIR_BONUS * ((our_bishops / 2) as i32 - (opp_bishops / 2) as i32);
 
@@ -248,9 +247,9 @@ impl Board {
 
         for color in Color::BOTH {
             let color_idx = color.index();
-            for piece_idx in 0..6 {
-                let bb = self.pieces[color_idx][piece_idx];
-                for sq in bb.iter() {
+            for piece in Piece::ALL {
+                let piece_idx = piece.index();
+                for sq in self.pieces_of(color, piece).iter() {
                     let sq_idx = sq.as_index();
                     // White's perspective
                     white_features.push(feature_index(piece_idx, color_idx, sq_idx, 0));

@@ -8,7 +8,7 @@
 
 use crate::board::attack_tables::{slider_attacks, KING_ATTACKS};
 use crate::board::state::Board;
-use crate::board::types::{Color, Piece};
+use crate::board::types::{Bitboard, Color, Piece};
 
 use super::helpers::AttackContext;
 
@@ -50,14 +50,7 @@ impl Board {
         let mut mg = 0;
         let eg = 0; // Most king danger terms are MG only
 
-        let c_idx = color.index();
-        let _opp_idx = color.opponent().index();
-
-        let king_bb = self.pieces[c_idx][Piece::King.index()];
-        if king_bb.0 == 0 {
-            return (0, 0);
-        }
-        let king_sq = king_bb.0.trailing_zeros() as usize;
+        let king_sq = self.king_square_index(color);
         let king_file = king_sq % 8;
 
         // Pawnless flank attack
@@ -75,23 +68,22 @@ impl Board {
     /// Evaluate pawnless flank penalty.
     /// Extra danger when the side has no pawns on the flank where king resides.
     fn eval_pawnless_flank(&self, color: Color, king_file: usize) -> i32 {
-        let c_idx = color.index();
-        let pawns = self.pieces[c_idx][Piece::Pawn.index()];
+        let pawns = self.pieces_of(color, Piece::Pawn);
 
         // Determine which flank the king is on
-        let (flank_files, _is_castled_side) = if king_file <= 2 {
+        let flank_files = if king_file <= 2 {
             // Queenside (a, b, c files)
-            (0x0707_0707_0707_0707u64, true)
+            Bitboard::QUEENSIDE_FILES.0
         } else if king_file >= 5 {
             // Kingside (f, g, h files)
-            (0xE0E0_E0E0_E0E0_E0E0u64, true)
+            Bitboard::KINGSIDE_FILES.0
         } else {
             // Center (d, e files) - not castled, less relevant
             return 0;
         };
 
         // Check if we have any pawns on this flank
-        if (pawns.0 & flank_files) == 0 {
+        if pawns.is_disjoint(Bitboard(flank_files)) {
             return PAWNLESS_FLANK_MG;
         }
 
@@ -100,29 +92,29 @@ impl Board {
 
     /// Evaluate king exposure based on open lines.
     fn eval_king_exposure(&self, color: Color, king_sq: usize, _ctx: &AttackContext) -> i32 {
-        let opp_idx = color.opponent().index();
         let mut penalty = 0;
 
         let king_file = king_sq % 8;
 
         // Check for open files toward king
-        let file_mask = 0x0101_0101_0101_0101u64 << king_file;
-        let all_pawns = self.pieces[0][Piece::Pawn.index()].0 | self.pieces[1][Piece::Pawn.index()].0;
+        let file_mask = Bitboard::FILE_A.0 << king_file;
+        let all_pawns = self.pieces_of(Color::White, Piece::Pawn).0
+            | self.pieces_of(Color::Black, Piece::Pawn).0;
 
         // If the file is open or semi-open toward the enemy
         if (file_mask & all_pawns) == 0 {
             // Fully open file
-            let enemy_rooks = self.pieces[opp_idx][Piece::Rook.index()];
-            let enemy_queens = self.pieces[opp_idx][Piece::Queen.index()];
+            let enemy_rooks = self.opponent_pieces(color, Piece::Rook);
+            let enemy_queens = self.opponent_pieces(color, Piece::Queen);
 
             // Check if enemy has rooks/queens that could use this file
             for sq in enemy_rooks.iter() {
-                if sq.index() % 8 == king_file {
+                if sq.file() == king_file {
                     penalty += KING_EXPOSURE_FILE_MG;
                 }
             }
             for sq in enemy_queens.iter() {
-                if sq.index() % 8 == king_file {
+                if sq.file() == king_file {
                     penalty += KING_EXPOSURE_FILE_MG;
                 }
             }
@@ -131,18 +123,18 @@ impl Board {
         // Check adjacent files too
         for adj_file in [king_file.saturating_sub(1), (king_file + 1).min(7)] {
             if adj_file != king_file {
-                let adj_file_mask = 0x0101_0101_0101_0101u64 << adj_file;
+                let adj_file_mask = Bitboard::FILE_A.0 << adj_file;
                 if (adj_file_mask & all_pawns) == 0 {
-                    let enemy_rooks = self.pieces[opp_idx][Piece::Rook.index()];
-                    let enemy_queens = self.pieces[opp_idx][Piece::Queen.index()];
+                    let enemy_rooks = self.opponent_pieces(color, Piece::Rook);
+                    let enemy_queens = self.opponent_pieces(color, Piece::Queen);
 
                     for sq in enemy_rooks.iter() {
-                        if sq.index() % 8 == adj_file {
+                        if sq.file() == adj_file {
                             penalty += KING_EXPOSURE_FILE_MG / 2;
                         }
                     }
                     for sq in enemy_queens.iter() {
-                        if sq.index() % 8 == adj_file {
+                        if sq.file() == adj_file {
                             penalty += KING_EXPOSURE_FILE_MG / 2;
                         }
                     }
@@ -151,19 +143,20 @@ impl Board {
         }
 
         // Check diagonal exposure
-        let enemy_bishops = self.pieces[opp_idx][Piece::Bishop.index()];
-        let enemy_queens = self.pieces[opp_idx][Piece::Queen.index()];
+        let enemy_bishops = self.opponent_pieces(color, Piece::Bishop);
+        let enemy_queens = self.opponent_pieces(color, Piece::Queen);
 
         // Get diagonal attacks through king position
         let diag_attackers = slider_attacks(king_sq, self.all_occupied.0, true);
 
+        let diag_bb = Bitboard(diag_attackers);
         for sq in enemy_bishops.iter() {
-            if (diag_attackers & (1u64 << sq.index())) != 0 {
+            if diag_bb.has_bit(sq.index()) {
                 penalty += KING_EXPOSURE_DIAG_MG;
             }
         }
         for sq in enemy_queens.iter() {
-            if (diag_attackers & (1u64 << sq.index())) != 0 {
+            if diag_bb.has_bit(sq.index()) {
                 penalty += KING_EXPOSURE_DIAG_MG;
             }
         }
@@ -173,8 +166,7 @@ impl Board {
 
     /// Evaluate escape squares for the king.
     fn eval_escape_squares(&self, color: Color, king_sq: usize, ctx: &AttackContext) -> i32 {
-        let c_idx = color.index();
-        let own_pieces = self.occupied[c_idx];
+        let own_pieces = self.occupied_by(color);
         let enemy_attacks = ctx.all_attacks(color.opponent());
 
         let king_moves = KING_ATTACKS[king_sq];
@@ -212,17 +204,65 @@ mod tests {
         // White king on g1, no kingside pawns
         let board: Board = "8/8/8/8/8/8/PPP5/6K1 w - - 0 1".parse().unwrap();
         let penalty = board.eval_pawnless_flank(Color::White, 6); // g-file = 6
-        assert!(penalty < 0);
+        assert!(penalty < 0, "pawnless flank should have penalty");
+    }
+
+    #[test]
+    fn test_pawned_flank_no_penalty() {
+        // White king on g1 with kingside pawns
+        let board: Board = "8/8/8/8/8/8/5PPP/6K1 w - - 0 1".parse().unwrap();
+        let penalty = board.eval_pawnless_flank(Color::White, 6);
+        assert_eq!(penalty, 0, "protected flank should have no penalty");
     }
 
     #[test]
     fn test_escape_squares() {
         // King with some escape squares
         let board: Board = "8/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
-        // Just verify the function runs
         let ctx = board.compute_attack_context();
         let (mg, _) = board.eval_king_danger(&ctx);
         // Alone king should have escape squares
-        assert!(mg != i32::MIN);
+        assert!(mg != i32::MIN, "evaluation should complete");
+    }
+
+    #[test]
+    fn test_trapped_king() {
+        // King with few escape squares (cornered)
+        let board: Board = "8/8/8/8/8/8/5PPP/5RK1 w - - 0 1".parse().unwrap();
+        let ctx = board.compute_attack_context();
+        let score = board.eval_escape_squares(Color::White, 6, &ctx); // g1
+                                                                      // Cornered king should have fewer escape squares
+                                                                      // h2 is only escape, but blocked by pawn
+        assert!(
+            score <= 0,
+            "trapped king should have negative escape score: {score}"
+        );
+    }
+
+    #[test]
+    fn test_king_exposure() {
+        // King on open file with enemy rook
+        let board: Board = "4r3/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
+        let ctx = board.compute_attack_context();
+        let penalty = board.eval_king_exposure(Color::White, 4, &ctx); // e1
+        assert!(penalty < 0, "king exposed to rook should give penalty");
+    }
+
+    #[test]
+    fn test_symmetry_king_danger() {
+        // Symmetric position
+        let board: Board = "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let ctx = board.compute_attack_context();
+        let (mg, eg) = board.eval_king_danger(&ctx);
+        assert!(
+            mg.abs() < 30,
+            "symmetric king danger should be near zero: {mg}"
+        );
+        assert!(
+            eg.abs() < 30,
+            "symmetric king danger eg should be near zero: {eg}"
+        );
     }
 }

@@ -4,7 +4,7 @@ use crate::board::{Board, Color, Move, Piece, Square, UnmakeInfo};
 use rand::prelude::*;
 
 fn find_move(board: &mut Board, from: Square, to: Square, promotion: Option<Piece>) -> Move {
-    for m in board.generate_moves().iter() {
+    for m in &board.generate_moves() {
         if m.from() == from && m.to() == to && m.promotion() == promotion {
             return *m;
         }
@@ -77,16 +77,16 @@ fn test_null_move_preserves_castling_rights() {
 fn test_legal_moves_stable_after_make_unmake() {
     let mut board = Board::new();
     let initial_moves = board.generate_moves();
-    let mut initial_list: Vec<String> = initial_moves.iter().map(|m| m.to_string()).collect();
+    let mut initial_list: Vec<String> = initial_moves.iter().map(ToString::to_string).collect();
     initial_list.sort();
 
-    for mv in initial_moves.iter() {
+    for mv in &initial_moves {
         let info = board.make_move(*mv);
         board.unmake_move(*mv, info);
     }
 
     let after_moves = board.generate_moves();
-    let mut after_list: Vec<String> = after_moves.iter().map(|m| m.to_string()).collect();
+    let mut after_list: Vec<String> = after_moves.iter().map(ToString::to_string).collect();
     after_list.sort();
 
     assert_eq!(initial_list, after_list);

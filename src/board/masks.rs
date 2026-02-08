@@ -288,6 +288,15 @@ pub fn fill_forward(bb: Bitboard, color: Color) -> Bitboard {
     }
 }
 
+/// Get backward fill for a color (opposite of forward)
+#[inline]
+pub fn fill_backward(bb: Bitboard, color: Color) -> Bitboard {
+    match color {
+        Color::White => Bitboard(fill_south(bb.0)),
+        Color::Black => Bitboard(fill_north(bb.0)),
+    }
+}
+
 /// Passed pawn bonus by rank (from the pawn's perspective)
 /// Index 0 = rank 1 (impossible for pawn), 7 = rank 8 (promotion)
 pub const PASSED_PAWN_BONUS_MG: [i32; 8] = [0, 5, 10, 20, 35, 60, 100, 0];
@@ -338,5 +347,70 @@ mod tests {
         assert!(KING_ATTACK_TABLE[100] > 300);
         // Should never exceed ~480 (asymptote)
         assert!(KING_ATTACK_TABLE[255] < 480);
+    }
+
+    #[test]
+    fn test_passed_pawn_mask_white() {
+        // White pawn on e4 - check that mask includes e5-e7 and d5-d7, f5-f7
+        let mask = PASSED_PAWN_MASK[0][28]; // e4
+                                            // Should include e5 (36)
+        assert!((mask.0 & (1u64 << 36)) != 0, "e5 should be in mask");
+        // Should include d5 (35)
+        assert!((mask.0 & (1u64 << 35)) != 0, "d5 should be in mask");
+        // Should include f5 (37)
+        assert!((mask.0 & (1u64 << 37)) != 0, "f5 should be in mask");
+        // Should NOT include e4 itself
+        assert!((mask.0 & (1u64 << 28)) == 0, "e4 should not be in mask");
+    }
+
+    #[test]
+    fn test_passed_pawn_mask_black() {
+        // Black pawn on e5 - check that mask includes e4-e2 and d4-d2, f4-f2
+        let mask = PASSED_PAWN_MASK[1][36]; // e5
+                                            // Should include e4 (28)
+        assert!((mask.0 & (1u64 << 28)) != 0, "e4 should be in mask");
+        // Should include d4 (27)
+        assert!((mask.0 & (1u64 << 27)) != 0, "d4 should be in mask");
+    }
+
+    #[test]
+    fn test_pawn_shield_mask() {
+        // White king on g-file - shield should include f2, g2, h2, f3, g3, h3
+        let mask = PAWN_SHIELD_MASK[0][6]; // g-file
+        assert!((mask.0 & (1u64 << 13)) != 0, "f2 should be in shield");
+        assert!((mask.0 & (1u64 << 14)) != 0, "g2 should be in shield");
+        assert!((mask.0 & (1u64 << 15)) != 0, "h2 should be in shield");
+    }
+
+    #[test]
+    fn test_fill_north() {
+        // Single bit on a1 should fill the entire a-file
+        let filled = fill_north(1);
+        assert_eq!(filled, Bitboard::FILE_A.0);
+    }
+
+    #[test]
+    fn test_fill_south() {
+        // Single bit on a8 should fill the entire a-file
+        let filled = fill_south(1u64 << 56);
+        assert_eq!(filled, Bitboard::FILE_A.0);
+    }
+
+    #[test]
+    fn test_relative_rank() {
+        // White's rank 0 is their first rank
+        assert_eq!(relative_rank(0, Color::White), 0);
+        // Black's rank 7 is their first rank
+        assert_eq!(relative_rank(7, Color::Black), 0);
+        // White's rank 7 is promotion rank
+        assert_eq!(relative_rank(7, Color::White), 7);
+        // Black's rank 0 is promotion rank
+        assert_eq!(relative_rank(0, Color::Black), 7);
+    }
+
+    #[test]
+    fn test_files_array() {
+        assert_eq!(FILES[0], Bitboard::FILE_A);
+        assert_eq!(FILES[7], Bitboard::FILE_H);
     }
 }

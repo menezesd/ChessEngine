@@ -1,13 +1,21 @@
 use crate::board::{SearchParams, SearchState, DEFAULT_TT_MB};
 
 /// Print a UCI spin option.
-fn print_spin(name: &str, default: impl std::fmt::Display, min: impl std::fmt::Display, max: impl std::fmt::Display) {
+fn print_spin(
+    name: &str,
+    default: impl std::fmt::Display,
+    min: impl std::fmt::Display,
+    max: impl std::fmt::Display,
+) {
     println!("option name {name} type spin default {default} min {min} max {max}");
 }
 
 /// Print a UCI check option.
 fn print_check(name: &str, default: bool) {
-    println!("option name {name} type check default {}", if default { "true" } else { "false" });
+    println!(
+        "option name {name} type check default {}",
+        if default { "true" } else { "false" }
+    );
 }
 
 pub enum UciOptionAction {

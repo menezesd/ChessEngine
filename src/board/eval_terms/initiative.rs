@@ -48,9 +48,6 @@ impl Board {
     fn eval_initiative_for_color(&self, color: Color, ctx: &AttackContext) -> (i32, i32) {
         let mut mg = 0;
 
-        let _c_idx = color.index();
-        let _opp_idx = color.opponent().index();
-
         // Tempo threats (attacking undefended pieces)
         mg += self.eval_tempo_threats(color, ctx);
 
@@ -65,23 +62,21 @@ impl Board {
 
     /// Evaluate tempo threats (attacks on undefended pieces).
     fn eval_tempo_threats(&self, color: Color, ctx: &AttackContext) -> i32 {
-        let _c_idx = color.index();
-        let opp_idx = color.opponent().index();
         let mut bonus = 0;
 
         let our_attacks = ctx.all_attacks(color);
         let enemy_defenses = ctx.all_attacks(color.opponent());
 
         // Find enemy pieces that are attacked but not defended
-        for piece_type in [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
-            let enemy_pieces = self.pieces[opp_idx][piece_type.index()];
+        for piece_type in Piece::MINOR_AND_MAJOR {
+            let enemy_pieces = self.opponent_pieces(color, piece_type);
             for sq in enemy_pieces.iter() {
-                let sq_bit = 1u64 << sq.index();
+                let sq_idx = sq.index();
 
                 // Attacked by us
-                if (our_attacks.0 & sq_bit) != 0 {
+                if our_attacks.has_bit(sq_idx) {
                     // Not defended by enemy
-                    if (enemy_defenses.0 & sq_bit) == 0 {
+                    if !enemy_defenses.has_bit(sq_idx) {
                         // Undefended piece attacked = tempo
                         bonus += TEMPO_THREAT_MG;
                     }
@@ -94,47 +89,37 @@ impl Board {
 
     /// Evaluate attack momentum (multiple pieces converging on same area).
     fn eval_attack_momentum(&self, color: Color, _ctx: &AttackContext) -> i32 {
-        let c_idx = color.index();
-        let opp_idx = color.opponent().index();
-
         // Focus on enemy king area
-        let enemy_king_bb = self.pieces[opp_idx][Piece::King.index()];
-        if enemy_king_bb.0 == 0 {
-            return 0;
-        }
-
-        let enemy_king_sq = enemy_king_bb.0.trailing_zeros() as usize;
+        let enemy_king_sq = self.king_square_index(color.opponent());
         let king_zone = Self::king_zone(enemy_king_sq);
 
         // Count how many of our pieces attack the king zone
         let mut attackers = 0;
 
-        let knights = self.pieces[c_idx][Piece::Knight.index()];
-        for sq in knights.iter() {
-            if (KNIGHT_ATTACKS[sq.index()] & king_zone) != 0 {
+        let king_zone_bb = crate::board::Bitboard(king_zone);
+
+        for sq in self.pieces_of(color, Piece::Knight).iter() {
+            if crate::board::Bitboard(KNIGHT_ATTACKS[sq.index()]).intersects(king_zone_bb) {
                 attackers += 1;
             }
         }
 
-        let bishops = self.pieces[c_idx][Piece::Bishop.index()];
-        for sq in bishops.iter() {
-            if (slider_attacks(sq.index(), self.all_occupied.0, true) & king_zone) != 0 {
+        for sq in self.pieces_of(color, Piece::Bishop).iter() {
+            if crate::board::Bitboard(slider_attacks(sq.index(), self.all_occupied.0, true)).intersects(king_zone_bb) {
                 attackers += 1;
             }
         }
 
-        let rooks = self.pieces[c_idx][Piece::Rook.index()];
-        for sq in rooks.iter() {
-            if (slider_attacks(sq.index(), self.all_occupied.0, false) & king_zone) != 0 {
+        for sq in self.pieces_of(color, Piece::Rook).iter() {
+            if crate::board::Bitboard(slider_attacks(sq.index(), self.all_occupied.0, false)).intersects(king_zone_bb) {
                 attackers += 1;
             }
         }
 
-        let queens = self.pieces[c_idx][Piece::Queen.index()];
-        for sq in queens.iter() {
+        for sq in self.pieces_of(color, Piece::Queen).iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, true)
                 | slider_attacks(sq.index(), self.all_occupied.0, false);
-            if (attacks & king_zone) != 0 {
+            if crate::board::Bitboard(attacks).intersects(king_zone_bb) {
                 attackers += 2; // Queen counts double
             }
         }
@@ -152,35 +137,43 @@ impl Board {
         crate::board::attack_tables::KING_ATTACKS[king_sq] | (1u64 << king_sq)
     }
 
+    /// Castled king positions: [White (c1, g1), Black (c8, g8)]
+    const CASTLED_SQUARES: [u64; 2] = [
+        (1u64 << 2) | (1u64 << 6),   // c1 or g1
+        (1u64 << 58) | (1u64 << 62), // c8 or g8
+    ];
+
     /// Evaluate development.
     fn eval_development(&self, color: Color) -> i32 {
-        let c_idx = color.index();
         let mut score = 0;
 
         // Starting squares for pieces
-        let (back_rank, knight_starts, bishop_starts, _rook_starts, _queen_start, king_start) = match color {
-            Color::White => (
-                0x0000_0000_0000_00FFu64,
-                [1, 6],       // b1, g1
-                [2, 5],       // c1, f1
-                [0, 7],       // a1, h1
-                3,            // d1
-                4,            // e1
-            ),
-            Color::Black => (
-                0xFF00_0000_0000_0000u64,
-                [57, 62],     // b8, g8
-                [58, 61],     // c8, f8
-                [56, 63],     // a8, h8
-                59,           // d8
-                60,           // e8
-            ),
-        };
+        let (back_rank, knight_starts, bishop_starts, _rook_starts, _queen_start, king_start) =
+            match color {
+                Color::White => (
+                    0x0000_0000_0000_00FFu64,
+                    [1, 6], // b1, g1
+                    [2, 5], // c1, f1
+                    [0, 7], // a1, h1
+                    3,      // d1
+                    4,      // e1
+                ),
+                Color::Black => (
+                    0xFF00_0000_0000_0000u64,
+                    [57, 62], // b8, g8
+                    [58, 61], // c8, f8
+                    [56, 63], // a8, h8
+                    59,       // d8
+                    60,       // e8
+                ),
+            };
+
+        let back_rank_bb = crate::board::Bitboard(back_rank);
 
         // Check knights
-        let knights = self.pieces[c_idx][Piece::Knight.index()];
+        let knights = self.pieces_of(color, Piece::Knight);
         for &start_sq in &knight_starts {
-            if (knights.0 & (1u64 << start_sq)) != 0 {
+            if knights.has_bit(start_sq) {
                 score += UNDEVELOPED_PENALTY_MG;
             } else {
                 // Knight developed
@@ -192,28 +185,25 @@ impl Board {
         }
 
         // Check bishops
-        let bishops = self.pieces[c_idx][Piece::Bishop.index()];
+        let bishops = self.pieces_of(color, Piece::Bishop);
         for &start_sq in &bishop_starts {
-            if (bishops.0 & (1u64 << start_sq)) != 0 {
+            if bishops.has_bit(start_sq) {
                 score += UNDEVELOPED_PENALTY_MG;
             } else {
-                let developed = bishops.0 & !back_rank;
-                if developed.count_ones() > 0 {
+                let developed = bishops.and(back_rank_bb.not());
+                if !developed.is_empty() {
                     score += DEVELOPMENT_BONUS_MG;
                 }
             }
         }
 
         // Check if castled (king not on starting square and on castled square)
-        let kings = self.pieces[c_idx][Piece::King.index()];
-        let castled_squares = match color {
-            Color::White => (1u64 << 2) | (1u64 << 6),  // c1 or g1
-            Color::Black => (1u64 << 58) | (1u64 << 62), // c8 or g8
-        };
+        let kings = self.pieces_of(color, Piece::King);
+        let castled = crate::board::Bitboard(Self::CASTLED_SQUARES[color.index()]);
 
-        if (kings.0 & castled_squares) != 0 {
+        if kings.intersects(castled) {
             score += CASTLED_BONUS_MG;
-        } else if (kings.0 & (1u64 << king_start)) != 0 {
+        } else if kings.has_bit(king_start) {
             // King still on starting square - slight penalty in middlegame
             // (already captured by other eval terms, so minor here)
         }
@@ -235,8 +225,29 @@ mod tests {
         let w_dev = board.eval_development(Color::White);
         let b_dev = board.eval_development(Color::Black);
         // Both should have undeveloped penalties
-        assert!(w_dev < 0);
-        assert!(b_dev < 0);
+        assert!(
+            w_dev < 0,
+            "starting position should have development penalty"
+        );
+        assert!(
+            b_dev < 0,
+            "starting position should have development penalty"
+        );
+    }
+
+    #[test]
+    fn test_developed_pieces() {
+        // All minor pieces developed
+        let board: Board = "r1bqkb1r/pppppppp/2n2n2/8/8/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let w_dev = board.eval_development(Color::White);
+        // Knights are developed - should be better than starting position
+        let start_board: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let w_start = start_board.eval_development(Color::White);
+        assert!(w_dev > w_start, "developed pieces should have better score");
     }
 
     #[test]
@@ -246,6 +257,55 @@ mod tests {
         let ctx = board.compute_attack_context();
         let bonus = board.eval_tempo_threats(Color::White, &ctx);
         // Bishop attacks undefended knight
-        assert!(bonus > 0);
+        assert!(bonus > 0, "attacking undefended piece should give bonus");
+    }
+
+    #[test]
+    fn test_no_tempo_defended() {
+        // Defended piece shouldn't give tempo
+        // Black knight on d5 defended by pawn on e6 (attacks d5), attacked by bishop on b3
+        let board: Board = "8/8/4p3/3n4/8/1B6/8/8 w - - 0 1".parse().unwrap();
+        let ctx = board.compute_attack_context();
+        let bonus = board.eval_tempo_threats(Color::White, &ctx);
+        // Knight is defended by pawn - should get no tempo bonus
+        assert_eq!(
+            bonus, 0,
+            "defended piece shouldn't give tempo bonus: {bonus}"
+        );
+    }
+
+    #[test]
+    fn test_castled_bonus() {
+        // White is castled kingside
+        let board: Board = "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQK2R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let uncastled = board.eval_development(Color::White);
+
+        let castled: Board = "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQ1RK1 w kq - 0 1"
+            .parse()
+            .unwrap();
+        let castled_dev = castled.eval_development(Color::White);
+
+        assert!(
+            castled_dev > uncastled,
+            "castled position should have better development score"
+        );
+    }
+
+    #[test]
+    fn test_initiative_symmetry() {
+        // Symmetric position should have balanced initiative
+        let board = Board::new();
+        let ctx = board.compute_attack_context();
+        let (mg, eg) = board.eval_initiative(&ctx);
+        assert!(
+            mg.abs() < 20,
+            "symmetric initiative should be near zero: {mg}"
+        );
+        assert!(
+            eg.abs() < 20,
+            "symmetric initiative eg should be near zero: {eg}"
+        );
     }
 }

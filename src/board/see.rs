@@ -5,7 +5,7 @@
 
 use super::attack_tables::{slider_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS};
 use super::state::Board;
-use super::types::{Bitboard, Piece, Square};
+use super::types::{Bitboard, Color, Piece, Square};
 
 /// Piece values for SEE (simpler than eval values)
 const SEE_VALUES: [i32; 6] = [
@@ -59,13 +59,7 @@ impl Board {
     /// This avoids redundant `piece_at` lookups when the caller already knows the pieces.
     #[inline]
     #[must_use]
-    pub fn see_with_pieces(
-        &self,
-        from: Square,
-        to: Square,
-        attacker: Piece,
-        victim: Piece,
-    ) -> i32 {
+    pub fn see_with_pieces(&self, from: Square, to: Square, attacker: Piece, victim: Piece) -> i32 {
         self.see_impl(from, to, attacker, victim)
     }
 
@@ -112,7 +106,7 @@ impl Board {
                 attackers = Bitboard(attackers.0 | (new_diag.0 & occupancy));
             }
 
-            if current_attacker == Piece::Rook || current_attacker == Piece::Queen {
+            if current_attacker.attacks_straight() {
                 // Straight x-ray
                 let straight_attackers = self.straight_sliders();
                 let new_straight =
@@ -124,8 +118,12 @@ impl Board {
             side_to_move = !side_to_move;
 
             // Find the least valuable attacker for the side to move
-            let side_idx = usize::from(!side_to_move);
-            let side_pieces = self.occupied[side_idx];
+            let side_color = if side_to_move {
+                Color::White
+            } else {
+                Color::Black
+            };
+            let side_pieces = self.occupied_by(side_color);
 
             // Filter attackers to only include pieces of the side to move
             let side_attackers = Bitboard(attackers.0 & side_pieces.0);
@@ -141,7 +139,7 @@ impl Board {
             }
 
             // Find least valuable attacker
-            let (lva_piece, lva_bb) = self.find_least_valuable_attacker(side_attackers, side_idx);
+            let (lva_piece, lva_bb) = self.find_least_valuable_attacker(side_attackers, side_color);
 
             // Score from making this capture (negated, as it's opponent's gain)
             gain[depth] = SEE_VALUES[current_attacker.index()] - gain[depth - 1];
@@ -153,8 +151,8 @@ impl Board {
 
             // Don't capture with king if opponent still has attackers
             if lva_piece == Piece::King {
-                let opponent_idx = 1 - side_idx;
-                let opponent_attackers = Bitboard(attackers.0 & self.occupied[opponent_idx].0);
+                let opponent_attackers =
+                    Bitboard(attackers.0 & self.occupied_by(side_color.opponent()).0);
                 if !opponent_attackers.is_empty() {
                     break;
                 }
@@ -179,18 +177,22 @@ impl Board {
         let mut attackers = Bitboard(0);
 
         // Pawn attacks (look backwards from target to find attacking pawns)
-        let white_pawn_attackers = PAWN_ATTACKS[1][sq_idx] & self.pieces[0][Piece::Pawn.index()].0;
-        let black_pawn_attackers = PAWN_ATTACKS[0][sq_idx] & self.pieces[1][Piece::Pawn.index()].0;
+        let white_pawn_attackers =
+            PAWN_ATTACKS[1][sq_idx] & self.pieces_of(Color::White, Piece::Pawn).0;
+        let black_pawn_attackers =
+            PAWN_ATTACKS[0][sq_idx] & self.pieces_of(Color::Black, Piece::Pawn).0;
         attackers.0 |= white_pawn_attackers | black_pawn_attackers;
 
         // Knight attacks
         let knight_attackers = KNIGHT_ATTACKS[sq_idx]
-            & (self.pieces[0][Piece::Knight.index()].0 | self.pieces[1][Piece::Knight.index()].0);
+            & (self.pieces_of(Color::White, Piece::Knight).0
+                | self.pieces_of(Color::Black, Piece::Knight).0);
         attackers.0 |= knight_attackers;
 
         // King attacks
         let king_attackers = KING_ATTACKS[sq_idx]
-            & (self.pieces[0][Piece::King.index()].0 | self.pieces[1][Piece::King.index()].0);
+            & (self.pieces_of(Color::White, Piece::King).0
+                | self.pieces_of(Color::Black, Piece::King).0);
         attackers.0 |= king_attackers;
 
         // Diagonal attackers (bishops and queens)
@@ -209,26 +211,18 @@ impl Board {
     /// Get all diagonal sliding pieces (bishops and queens).
     #[inline]
     fn diagonal_sliders(&self) -> Bitboard {
-        Bitboard(
-            self.all_pieces_of_type(Piece::Bishop).0 | self.all_pieces_of_type(Piece::Queen).0,
-        )
+        Bitboard(self.all_pieces_of_type(Piece::Bishop).0 | self.all_pieces_of_type(Piece::Queen).0)
     }
 
     /// Get all straight sliding pieces (rooks and queens).
     #[inline]
     fn straight_sliders(&self) -> Bitboard {
-        Bitboard(
-            self.all_pieces_of_type(Piece::Rook).0 | self.all_pieces_of_type(Piece::Queen).0,
-        )
+        Bitboard(self.all_pieces_of_type(Piece::Rook).0 | self.all_pieces_of_type(Piece::Queen).0)
     }
 
     /// Find the least valuable attacker from a set of attackers.
     /// Returns the piece type and a bitboard with just that piece.
-    fn find_least_valuable_attacker(
-        &self,
-        attackers: Bitboard,
-        color_idx: usize,
-    ) -> (Piece, Bitboard) {
+    fn find_least_valuable_attacker(&self, attackers: Bitboard, color: Color) -> (Piece, Bitboard) {
         // Check each piece type from least to most valuable
         for piece_type in [
             Piece::Pawn,
@@ -238,8 +232,7 @@ impl Board {
             Piece::Queen,
             Piece::King,
         ] {
-            let piece_attackers =
-                Bitboard(attackers.0 & self.pieces[color_idx][piece_type.index()].0);
+            let piece_attackers = Bitboard(attackers.0 & self.pieces_of(color, piece_type).0);
             if !piece_attackers.is_empty() {
                 // Return just the first (LSB) attacker
                 let single = Bitboard(piece_attackers.0 & piece_attackers.0.wrapping_neg());
@@ -275,13 +268,12 @@ impl Board {
             return true; // No piece, shouldn't happen
         };
 
-        // Get enemy color index
-        let enemy_idx = 1 - color.index();
-        let enemy_pawns = self.pieces[enemy_idx][Piece::Pawn.index()];
+        // Get enemy pawns
+        let enemy_pawns = self.opponent_pieces(color, Piece::Pawn);
 
         // Quick check: if destination is attacked by enemy pawn and we're moving a non-pawn, it's unsafe
-        let pawn_attack_idx = 1 - enemy_idx; // White pawns attack "up", black "down"
-        let pawn_attacks_to_sq = PAWN_ATTACKS[pawn_attack_idx][to.index()];
+        // Use our color index since enemy pawn attacks come from opposite direction
+        let pawn_attacks_to_sq = PAWN_ATTACKS[color.index()][to.index()];
         if (pawn_attacks_to_sq & enemy_pawns.0) != 0 && piece != Piece::Pawn {
             return false;
         }
@@ -291,7 +283,7 @@ impl Board {
         let piece_value = SEE_VALUES[piece.index()];
 
         // Check enemy knights
-        let enemy_knights = self.pieces[enemy_idx][Piece::Knight.index()];
+        let enemy_knights = self.opponent_pieces(color, Piece::Knight);
         if (KNIGHT_ATTACKS[to.index()] & enemy_knights.0) != 0
             && SEE_VALUES[Piece::Knight.index()] < piece_value
         {
@@ -303,8 +295,8 @@ impl Board {
             let occupancy = self.all_occupied.0;
 
             // Check enemy bishops/queens on diagonals
-            let enemy_bishops = self.pieces[enemy_idx][Piece::Bishop.index()];
-            let enemy_queens = self.pieces[enemy_idx][Piece::Queen.index()];
+            let enemy_bishops = self.opponent_pieces(color, Piece::Bishop);
+            let enemy_queens = self.opponent_pieces(color, Piece::Queen);
             let diag_attacks = slider_attacks(to.index(), occupancy, true);
             if (diag_attacks & (enemy_bishops.0 | enemy_queens.0)) != 0 {
                 // There's a diagonal attacker - check if it's less valuable
@@ -317,7 +309,7 @@ impl Board {
 
             // Check enemy rooks/queens on files/ranks (for rook+ value pieces)
             if piece_value >= SEE_VALUES[Piece::Rook.index()] {
-                let enemy_rooks = self.pieces[enemy_idx][Piece::Rook.index()];
+                let enemy_rooks = self.opponent_pieces(color, Piece::Rook);
                 let straight_attacks = slider_attacks(to.index(), occupancy, false);
                 if (straight_attacks & enemy_rooks.0) != 0 {
                     return false;
@@ -562,7 +554,7 @@ mod tests {
         // Rxd5, Rxd5, Rxd5, Rxd5 = 500 - 500 + 500 - 500 = 0
         // Or white wins if they have the last recapture
         // The actual result depends on the SEE implementation
-        assert!(see >= 0, "see={}", see);
+        assert!(see >= 0, "see={see}");
     }
 
     // ========================================================================

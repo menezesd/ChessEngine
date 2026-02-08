@@ -173,7 +173,11 @@ fn compute_incremental_limits(
     let safe_ms = time_left_ms.saturating_sub(config.move_overhead_ms);
 
     // Critical time: less than overhead + safety margin
-    if time_left_ms <= config.move_overhead_ms.saturating_add(CRITICAL_TIME_MARGIN_MS) {
+    if time_left_ms
+        <= config
+            .move_overhead_ms
+            .saturating_add(CRITICAL_TIME_MARGIN_MS)
+    {
         let fallback = (time_left_ms / 2).max(1);
         return (fallback, fallback);
     }
@@ -647,7 +651,8 @@ mod tests {
             movestogo: None,
         };
 
-        let (req, (soft, hard)) = build_search_request(tc, None, None, false, false, &test_config());
+        let (req, (soft, hard)) =
+            build_search_request(tc, None, None, false, false, &test_config());
 
         assert!(!req.infinite);
         assert!(!req.ponder);

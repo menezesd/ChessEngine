@@ -136,6 +136,15 @@ impl Move {
         Square::from_index(idx)
     }
 
+    /// Get the history table index for this move (from * 64 + to)
+    #[inline]
+    #[must_use]
+    pub const fn history_index(self) -> usize {
+        let from = (self.0 & 0x3F) as usize;
+        let to = ((self.0 >> 6) & 0x3F) as usize;
+        from * 64 + to
+    }
+
     /// Get the flag bits
     #[inline]
     const fn flag(self) -> u16 {
@@ -446,6 +455,8 @@ impl ScoredMoveList {
     }
 
     /// Check if the list is empty.
+    ///
+    /// Required for API completeness with `len()` (`clippy::len_without_is_empty`).
     #[must_use]
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {

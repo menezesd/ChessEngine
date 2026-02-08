@@ -31,7 +31,7 @@ impl Board {
                 "Black"
             };
             for (piece, name) in pieces {
-                let bb = self.pieces[color.index()][piece.index()].0;
+                let bb = self.pieces_of(color, piece).0;
                 println!("{label} {name}: {bb:#018x}");
             }
         }

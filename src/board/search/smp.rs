@@ -17,6 +17,7 @@ use crate::board::nnue::NnueNetwork;
 use crate::board::{Board, Move};
 use crate::tt::TranspositionTable;
 
+use super::constants::SCORE_INFINITE;
 use super::simple::simple_search;
 use super::{SearchConfig, SearchInfoCallback, SearchParams, SearchResult, SearchState};
 
@@ -358,7 +359,7 @@ fn run_worker(
     let best_score = if let Some(entry) = shared.tt.probe(board.hash) {
         entry.score()
     } else {
-        -30000i32
+        -SCORE_INFINITE
     };
 
     WorkerResult {

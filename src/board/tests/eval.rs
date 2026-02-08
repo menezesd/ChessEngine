@@ -30,9 +30,7 @@ fn test_king_safety_castled_vs_center() {
     // (Less negative or more positive score)
     assert!(
         mg_castled >= mg_center,
-        "castled={}, center={}",
-        mg_castled,
-        mg_center
+        "castled={mg_castled}, center={mg_center}"
     );
 }
 
@@ -48,9 +46,7 @@ fn test_king_safety_under_attack() {
     // Attacked position should have worse score for white
     assert!(
         mg_attacked < mg_safe,
-        "attacked={}, safe={}",
-        mg_attacked,
-        mg_safe
+        "attacked={mg_attacked}, safe={mg_safe}"
     );
 }
 
@@ -65,9 +61,7 @@ fn test_king_shield_with_pawns() {
 
     assert!(
         mg_shield > mg_no,
-        "with_shield={}, no_shield={}",
-        mg_shield,
-        mg_no
+        "with_shield={mg_shield}, no_shield={mg_no}"
     );
 }
 
@@ -80,12 +74,7 @@ fn test_king_open_file_penalty() {
     let (mg_open, _) = open.eval_king_shield();
     let (mg_closed, _) = closed.eval_king_shield();
 
-    assert!(
-        mg_open < mg_closed,
-        "open={}, closed={}",
-        mg_open,
-        mg_closed
-    );
+    assert!(mg_open < mg_closed, "open={mg_open}, closed={mg_closed}");
 }
 
 // ============================================================================
@@ -103,15 +92,11 @@ fn test_mobility_knight_center_vs_corner() {
 
     assert!(
         mg_center > mg_corner,
-        "center={}, corner={}",
-        mg_center,
-        mg_corner
+        "center={mg_center}, corner={mg_corner}"
     );
     assert!(
         eg_center > eg_corner,
-        "center={}, corner={}",
-        eg_center,
-        eg_corner
+        "center={eg_center}, corner={eg_corner}"
     );
 }
 
@@ -124,18 +109,8 @@ fn test_mobility_bishop_open_vs_blocked() {
     let (mg_open, eg_open) = open.eval_mobility();
     let (mg_blocked, eg_blocked) = blocked.eval_mobility();
 
-    assert!(
-        mg_open > mg_blocked,
-        "open={}, blocked={}",
-        mg_open,
-        mg_blocked
-    );
-    assert!(
-        eg_open > eg_blocked,
-        "open={}, blocked={}",
-        eg_open,
-        eg_blocked
-    );
+    assert!(mg_open > mg_blocked, "open={mg_open}, blocked={mg_blocked}");
+    assert!(eg_open > eg_blocked, "open={eg_open}, blocked={eg_blocked}");
 }
 
 #[test]
@@ -147,18 +122,8 @@ fn test_mobility_rook_open_file() {
     let (mg_open, eg_open) = open.eval_mobility();
     let (mg_blocked, eg_blocked) = blocked.eval_mobility();
 
-    assert!(
-        mg_open > mg_blocked,
-        "open={}, blocked={}",
-        mg_open,
-        mg_blocked
-    );
-    assert!(
-        eg_open > eg_blocked,
-        "open={}, blocked={}",
-        eg_open,
-        eg_blocked
-    );
+    assert!(mg_open > mg_blocked, "open={mg_open}, blocked={mg_blocked}");
+    assert!(eg_open > eg_blocked, "open={eg_open}, blocked={eg_blocked}");
 }
 
 #[test]
@@ -167,8 +132,8 @@ fn test_mobility_queen() {
     let (mg, eg) = queen.eval_mobility();
 
     // Queen in center should have positive mobility
-    assert!(mg > 0, "queen mobility mg={}", mg);
-    assert!(eg > 0, "queen mobility eg={}", eg);
+    assert!(mg > 0, "queen mobility mg={mg}");
+    assert!(eg > 0, "queen mobility eg={eg}");
 }
 
 #[test]
@@ -177,8 +142,8 @@ fn test_mobility_symmetry() {
     let board = make_board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     let (mg, eg) = board.eval_mobility();
 
-    assert!(mg.abs() < 20, "startpos mobility mg={}", mg);
-    assert!(eg.abs() < 20, "startpos mobility eg={}", eg);
+    assert!(mg.abs() < 20, "startpos mobility mg={mg}");
+    assert!(eg.abs() < 20, "startpos mobility eg={eg}");
 }
 
 // ============================================================================
@@ -191,8 +156,8 @@ fn test_passed_pawn_basic() {
     let board = make_board("8/8/8/3P4/8/8/8/8 w - - 0 1");
     let (mg, eg) = board.eval_passed_pawns();
 
-    assert!(mg > 0, "passed pawn mg={}", mg);
-    assert!(eg > 0, "passed pawn eg={}", eg);
+    assert!(mg > 0, "passed pawn mg={mg}");
+    assert!(eg > 0, "passed pawn eg={eg}");
 }
 
 #[test]
@@ -206,7 +171,7 @@ fn test_passed_pawn_advanced_more_valuable() {
     let (_, eg4) = rank4.eval_passed_pawns();
     let (_, eg6) = rank6.eval_passed_pawns();
 
-    assert!(eg6 > eg4, "rank6={}, rank4={}", eg6, eg4);
+    assert!(eg6 > eg4, "rank6={eg6}, rank4={eg4}");
 }
 
 #[test]
@@ -216,8 +181,8 @@ fn test_passed_pawn_not_passed() {
     let (mg, eg) = not_passed.eval_passed_pawns();
 
     // No passed pawns, score should be 0 or close
-    assert!(mg.abs() <= 10, "not passed mg={}", mg);
-    assert!(eg.abs() <= 10, "not passed eg={}", eg);
+    assert!(mg.abs() <= 10, "not passed mg={mg}");
+    assert!(eg.abs() <= 10, "not passed eg={eg}");
 }
 
 #[test]
@@ -227,8 +192,8 @@ fn test_passed_pawn_blocked_by_adjacent() {
     let (mg, eg) = blocked.eval_passed_pawns();
 
     // Enemy pawn on e6 blocks d5 from being a passer
-    assert!(mg.abs() <= 10, "blocked passer mg={}", mg);
-    assert!(eg.abs() <= 10, "blocked passer eg={}", eg);
+    assert!(mg.abs() <= 10, "blocked passer mg={mg}");
+    assert!(eg.abs() <= 10, "blocked passer eg={eg}");
 }
 
 #[test]
@@ -238,8 +203,8 @@ fn test_passed_pawn_both_sides() {
     let (mg, eg) = board.eval_passed_pawns();
 
     // Pawns are at same relative advancement, should roughly cancel
-    assert!(mg.abs() < 20, "both passers mg={}", mg);
-    assert!(eg.abs() < 20, "both passers eg={}", eg);
+    assert!(mg.abs() < 20, "both passers mg={mg}");
+    assert!(eg.abs() < 20, "both passers eg={eg}");
 }
 
 // ============================================================================
@@ -256,9 +221,7 @@ fn test_doubled_pawns_penalty() {
 
     assert!(
         mg_doubled < mg_single,
-        "doubled={}, single={}",
-        mg_doubled,
-        mg_single
+        "doubled={mg_doubled}, single={mg_single}"
     );
 }
 
@@ -273,12 +236,7 @@ fn test_isolated_pawn_penalty() {
 
     // Note: doubled pawns also penalized, but isolated is usually worse
     // This test may need adjustment based on actual weights
-    assert!(
-        mg_iso <= mg_sup + 20,
-        "iso={}, supported={}",
-        mg_iso,
-        mg_sup
-    );
+    assert!(mg_iso <= mg_sup + 20, "iso={mg_iso}, supported={mg_sup}");
 }
 
 #[test]
@@ -287,8 +245,8 @@ fn test_pawn_structure_symmetry() {
     let (mg, eg) = board.eval_pawn_structure();
 
     // Symmetric pawn structure should be roughly 0
-    assert!(mg.abs() < 10, "symmetric pawn structure mg={}", mg);
-    assert!(eg.abs() < 10, "symmetric pawn structure eg={}", eg);
+    assert!(mg.abs() < 10, "symmetric pawn structure mg={mg}");
+    assert!(eg.abs() < 10, "symmetric pawn structure eg={eg}");
 }
 
 // ============================================================================
@@ -304,18 +262,8 @@ fn test_rook_open_file_bonus() {
     let (mg_open, eg_open) = open.eval_rooks();
     let (mg_closed, eg_closed) = closed.eval_rooks();
 
-    assert!(
-        mg_open > mg_closed,
-        "open={}, closed={}",
-        mg_open,
-        mg_closed
-    );
-    assert!(
-        eg_open > eg_closed,
-        "open={}, closed={}",
-        eg_open,
-        eg_closed
-    );
+    assert!(mg_open > mg_closed, "open={mg_open}, closed={mg_closed}");
+    assert!(eg_open > eg_closed, "open={eg_open}, closed={eg_closed}");
 }
 
 #[test]
@@ -327,12 +275,7 @@ fn test_rook_semi_open_file() {
     let (mg_semi, _) = semi_open.eval_rooks();
     let (mg_closed, _) = closed.eval_rooks();
 
-    assert!(
-        mg_semi > mg_closed,
-        "semi={}, closed={}",
-        mg_semi,
-        mg_closed
-    );
+    assert!(mg_semi > mg_closed, "semi={mg_semi}, closed={mg_closed}");
 }
 
 #[test]
@@ -344,8 +287,8 @@ fn test_rook_seventh_rank_bonus() {
     let (mg_7th, eg_7th) = seventh.eval_rooks();
     let (mg_normal, eg_normal) = normal.eval_rooks();
 
-    assert!(mg_7th >= mg_normal, "7th={}, normal={}", mg_7th, mg_normal);
-    assert!(eg_7th >= eg_normal, "7th={}, normal={}", eg_7th, eg_normal);
+    assert!(mg_7th >= mg_normal, "7th={mg_7th}, normal={mg_normal}");
+    assert!(eg_7th >= eg_normal, "7th={eg_7th}, normal={eg_normal}");
 }
 
 // ============================================================================
@@ -357,7 +300,7 @@ fn test_eval_material_advantage() {
     // White up a queen
     let board = make_board("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     let score = board.evaluate();
-    assert!(score > 800, "queen advantage score={}", score);
+    assert!(score > 800, "queen advantage score={score}");
 }
 
 #[test]
@@ -365,7 +308,7 @@ fn test_eval_symmetry() {
     // Symmetric position should evaluate close to 0
     let board = make_board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     let score = board.evaluate();
-    assert!(score.abs() < 50, "startpos eval={}", score);
+    assert!(score.abs() < 50, "startpos eval={score}");
 }
 
 #[test]
@@ -379,6 +322,6 @@ fn test_eval_perspective() {
 
     // When black is to move with same material, score should be negative
     // (from black's perspective, white has all the pieces)
-    assert!(black_eval < 0, "black to move eval={}", black_eval);
-    assert!(white_eval > 0, "white to move eval={}", white_eval);
+    assert!(black_eval < 0, "black to move eval={black_eval}");
+    assert!(white_eval > 0, "white to move eval={white_eval}");
 }

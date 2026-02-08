@@ -23,13 +23,12 @@ impl Board {
         let mut score = 0;
         for color in Color::BOTH {
             let sign = color.sign();
-            let color_idx = color.index();
             let our_attacks = ctx.all_attacks(color);
             let their_attacks = ctx.all_attacks(color.opponent());
             let their_pawn_attacks = ctx.pawn_attacks(color.opponent());
 
             for piece in Piece::NON_KING {
-                let our_pieces = self.pieces[color_idx][piece.index()];
+                let our_pieces = self.pieces_of(color, piece);
 
                 for sq_idx in our_pieces.iter() {
                     let sq_bb = 1u64 << sq_idx.index();
@@ -48,13 +47,11 @@ impl Board {
         // Minor piece attacking minor piece
         for color in Color::BOTH {
             let sign = color.sign();
-            let our_idx = color.index();
-            let their_idx = color.opponent().index();
 
-            let our_bishops = self.pieces[our_idx][Piece::Bishop.index()];
-            let our_knights = self.pieces[our_idx][Piece::Knight.index()];
-            let their_bishops = self.pieces[their_idx][Piece::Bishop.index()];
-            let their_knights = self.pieces[their_idx][Piece::Knight.index()];
+            let our_bishops = self.pieces_of(color, Piece::Bishop);
+            let our_knights = self.pieces_of(color, Piece::Knight);
+            let their_bishops = self.opponent_pieces(color, Piece::Bishop);
+            let their_knights = self.opponent_pieces(color, Piece::Knight);
 
             // Our bishops attacking their knights
             for sq_idx in our_bishops.iter() {
@@ -74,5 +71,59 @@ impl Board {
         }
 
         score
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_no_hanging_pieces() {
+        // Starting position - all pieces defended
+        let board = Board::new();
+        let score = board.eval_hanging();
+        // Should be roughly balanced
+        assert!(score.abs() < 20, "no hanging pieces in start: {score}");
+    }
+
+    #[test]
+    fn test_hanging_knight() {
+        // White knight on e4 attacked by black bishop on b7
+        let board: Board = "8/1b6/8/8/4N3/8/8/8 w - - 0 1".parse().unwrap();
+        let score = board.eval_hanging();
+        // Hanging knight should give penalty (negative for white)
+        assert!(score < 0, "hanging knight should be penalized: {score}");
+    }
+
+    #[test]
+    fn test_defended_piece_not_hanging() {
+        // White knight on e4 defended by white pawn on d3
+        let board: Board = "8/1b6/8/8/4N3/3P4/8/8 w - - 0 1".parse().unwrap();
+        let score = board.eval_hanging();
+        // Defended piece shouldn't have full hanging penalty
+        // Score may still be slightly negative due to pawn attack
+        assert!(
+            score > -50,
+            "defended piece should have less penalty: {score}"
+        );
+    }
+
+    #[test]
+    fn test_minor_attacking_minor() {
+        // White bishop attacks black knight
+        let board: Board = "8/8/4n3/8/8/8/6B1/8 w - - 0 1".parse().unwrap();
+        let score = board.eval_hanging();
+        // Minor attacking minor should give slight bonus
+        assert!(score >= 0, "minor on minor should be non-negative: {score}");
+    }
+
+    #[test]
+    fn test_pawn_attack_on_minor() {
+        // Black pawn attacks white knight
+        let board: Board = "8/8/3p4/4N3/8/8/8/8 w - - 0 1".parse().unwrap();
+        let score = board.eval_hanging();
+        // Pawn attacking knight is bad for knight's side
+        assert!(score < 0, "pawn attacking knight should penalize: {score}");
     }
 }

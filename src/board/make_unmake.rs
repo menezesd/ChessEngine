@@ -63,6 +63,29 @@ impl Board {
         self.piece_at(sq).map(|(color, _)| color)
     }
 
+    /// Get the bitboard of pieces of a specific color and type.
+    /// This is a convenience method that simplifies the common pattern:
+    /// `self.pieces[color.index()][piece.index()]`
+    #[inline]
+    #[must_use]
+    pub fn pieces_of(&self, color: Color, piece: Piece) -> super::Bitboard {
+        self.pieces[color.index()][piece.index()]
+    }
+
+    /// Get the bitboard of pieces of a specific type for the opponent of the given color.
+    #[inline]
+    #[must_use]
+    pub fn opponent_pieces(&self, color: Color, piece: Piece) -> super::Bitboard {
+        self.pieces[color.opponent().index()][piece.index()]
+    }
+
+    /// Get the bitboard of all pieces of a specific color.
+    #[inline]
+    #[must_use]
+    pub fn occupied_by(&self, color: Color) -> super::Bitboard {
+        self.occupied[color.index()]
+    }
+
     pub(crate) fn calculate_initial_hash(&self) -> u64 {
         let mut hash: u64 = 0;
 
@@ -143,10 +166,11 @@ impl Board {
         // Place king at destination
         self.set_piece(m.to(), color, Piece::King);
 
-        // Update eval for king placement (king index = 5)
-        self.eval_mg[c_idx] += MATERIAL_MG[5] + PST_MG[5][to_pst];
-        self.eval_eg[c_idx] += MATERIAL_EG[5] + PST_EG[5][to_pst];
-        self.game_phase[c_idx] += PHASE_WEIGHTS[5];
+        // Update eval for king placement
+        let king_idx = Piece::King.index();
+        self.eval_mg[c_idx] += MATERIAL_MG[king_idx] + PST_MG[king_idx][to_pst];
+        self.eval_eg[c_idx] += MATERIAL_EG[king_idx] + PST_EG[king_idx][to_pst];
+        self.game_phase[c_idx] += PHASE_WEIGHTS[king_idx];
 
         // Determine rook squares
         let (rook_from_f, rook_to_f) = if m.to().file() == 6 { (7, 5) } else { (0, 3) };
@@ -160,13 +184,14 @@ impl Board {
         self.remove_piece(rook_from, rook_info.0, rook_info.1);
         self.set_piece(rook_to, rook_info.0, rook_info.1);
 
-        // Update eval for rook move (rook index = 3)
+        // Update eval for rook move
+        let rook_idx = Piece::Rook.index();
         let rook_from_pst = pst_square(rook_from_idx, is_white);
         let rook_to_pst = pst_square(rook_to_idx, is_white);
-        self.eval_mg[c_idx] -= MATERIAL_MG[3] + PST_MG[3][rook_from_pst];
-        self.eval_eg[c_idx] -= MATERIAL_EG[3] + PST_EG[3][rook_from_pst];
-        self.eval_mg[c_idx] += MATERIAL_MG[3] + PST_MG[3][rook_to_pst];
-        self.eval_eg[c_idx] += MATERIAL_EG[3] + PST_EG[3][rook_to_pst];
+        self.eval_mg[c_idx] -= MATERIAL_MG[rook_idx] + PST_MG[rook_idx][rook_from_pst];
+        self.eval_eg[c_idx] -= MATERIAL_EG[rook_idx] + PST_EG[rook_idx][rook_from_pst];
+        self.eval_mg[c_idx] += MATERIAL_MG[rook_idx] + PST_MG[rook_idx][rook_to_pst];
+        self.eval_eg[c_idx] += MATERIAL_EG[rook_idx] + PST_EG[rook_idx][rook_to_pst];
 
         // Return hash delta for rook movement
         ZOBRIST.piece_keys[piece_to_zobrist_index(Piece::Rook)][color_to_zobrist_index(color)]

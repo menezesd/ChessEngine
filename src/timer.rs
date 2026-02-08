@@ -8,6 +8,19 @@ use std::time::{Duration, Instant};
 
 use crate::sync::StopFlag;
 
+/// Calculate the duration from now until a deadline, if the deadline is in the future.
+///
+/// Returns `None` if the deadline has already passed.
+#[inline]
+fn duration_until(deadline: Instant) -> Option<Duration> {
+    let now = Instant::now();
+    if deadline > now {
+        Some(deadline - now)
+    } else {
+        None
+    }
+}
+
 /// A timer that signals a stop flag when a deadline is reached.
 ///
 /// The timer runs in a background thread and will automatically
@@ -45,14 +58,12 @@ impl DeadlineTimer {
     #[must_use]
     pub fn start_at(deadline: Option<Instant>, stop_flag: StopFlag) -> Option<Self> {
         let deadline = deadline?;
-        let now = Instant::now();
-
-        if deadline <= now {
+        if let Some(duration) = duration_until(deadline) {
+            Self::start(duration, stop_flag)
+        } else {
             stop_flag.stop();
-            return None;
+            None
         }
-
-        Self::start(deadline - now, stop_flag)
     }
 
     /// Cancel the timer without triggering the stop flag.
@@ -88,14 +99,14 @@ impl Drop for DeadlineTimer {
 /// This is a convenience function for the common pattern of spawning
 /// a timer thread to stop search at a deadline.
 pub fn spawn_deadline_timer(deadline: Instant, stop_flag: StopFlag) {
-    let now = Instant::now();
-    if deadline > now {
-        thread::spawn(move || {
-            thread::sleep(deadline - now);
-            stop_flag.stop();
-        });
-    } else {
-        stop_flag.stop();
+    match duration_until(deadline) {
+        Some(duration) => {
+            thread::spawn(move || {
+                thread::sleep(duration);
+                stop_flag.stop();
+            });
+        }
+        None => stop_flag.stop(),
     }
 }
 
@@ -128,7 +139,9 @@ mod tests {
     #[test]
     fn test_deadline_in_past() {
         let flag = StopFlag::new();
-        let past = Instant::now() - Duration::from_secs(1);
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("1 second ago should be valid");
         let timer = DeadlineTimer::start_at(Some(past), flag.clone());
         assert!(timer.is_none());
         assert!(flag.is_stopped());

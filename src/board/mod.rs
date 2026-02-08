@@ -57,6 +57,6 @@ pub use search::{SearchParams, SearchStats, SearchTables};
 
 pub(crate) use types::{
     bit_for_square, castle_bit, file_to_index, rank_to_index, ScoredMoveList, ALL_CASTLING_RIGHTS,
-    BOARD_SIZE, CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q, EMPTY_MOVE,
-    MAX_PLY, NUM_SQUARES, PROMOTION_PIECES,
+    CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q, EMPTY_MOVE, MAX_PLY,
+    PROMOTION_PIECES,
 };

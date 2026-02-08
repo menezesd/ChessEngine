@@ -7,12 +7,12 @@ impl Board {
         let color = self.side_to_move();
         let back_rank = color.back_rank();
         let from_idx = from.index();
-        let own_occ = self.occupied[color.index()].0;
+        let own_occ = self.occupied_by(color).0;
         let targets = Bitboard(KING_ATTACKS[from_idx] & !own_occ);
 
         for to_idx in targets.iter() {
             let to_sq = to_idx;
-            moves.push(self.create_move(from, to_sq, None, false, false, false));
+            moves.push(self.create_simple_move(from, to_sq));
         }
 
         if from == Square::new(back_rank, 4) {
@@ -22,7 +22,7 @@ impl Board {
                 && self.piece_at(Square::new(back_rank, 7)) == Some((color, Piece::Rook))
             {
                 let to_sq = Square::new(back_rank, 6);
-                moves.push(self.create_move(from, to_sq, None, true, false, false));
+                moves.push(Self::create_castling_move(from, to_sq));
             }
             if self.has_castling_right(color, 'Q')
                 && self.is_empty(Square::new(back_rank, 1))
@@ -31,7 +31,7 @@ impl Board {
                 && self.piece_at(Square::new(back_rank, 0)) == Some((color, Piece::Rook))
             {
                 let to_sq = Square::new(back_rank, 2);
-                moves.push(self.create_move(from, to_sq, None, true, false, false));
+                moves.push(Self::create_castling_move(from, to_sq));
             }
         }
 
@@ -50,29 +50,28 @@ impl Board {
 
     pub(crate) fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
         let target_idx = square.index();
-        let c_idx = attacker_color.index();
 
         let pawn_sources = if attacker_color == Color::White {
             PAWN_ATTACKS[Color::Black.index()][target_idx]
         } else {
             PAWN_ATTACKS[Color::White.index()][target_idx]
         };
-        if self.pieces[c_idx][Piece::Pawn.index()].0 & pawn_sources != 0 {
+        if self.pieces_of(attacker_color, Piece::Pawn).0 & pawn_sources != 0 {
             return true;
         }
 
-        if self.pieces[c_idx][Piece::Knight.index()].0 & KNIGHT_ATTACKS[target_idx] != 0 {
+        if self.pieces_of(attacker_color, Piece::Knight).0 & KNIGHT_ATTACKS[target_idx] != 0 {
             return true;
         }
 
-        if self.pieces[c_idx][Piece::King.index()].0 & KING_ATTACKS[target_idx] != 0 {
+        if self.pieces_of(attacker_color, Piece::King).0 & KING_ATTACKS[target_idx] != 0 {
             return true;
         }
 
-        let rook_like =
-            self.pieces[c_idx][Piece::Rook.index()].0 | self.pieces[c_idx][Piece::Queen.index()].0;
-        let bishop_like = self.pieces[c_idx][Piece::Bishop.index()].0
-            | self.pieces[c_idx][Piece::Queen.index()].0;
+        let rook_like = self.pieces_of(attacker_color, Piece::Rook).0
+            | self.pieces_of(attacker_color, Piece::Queen).0;
+        let bishop_like = self.pieces_of(attacker_color, Piece::Bishop).0
+            | self.pieces_of(attacker_color, Piece::Queen).0;
 
         if slider_attacks(target_idx, self.all_occupied.0, false) & rook_like != 0 {
             return true;

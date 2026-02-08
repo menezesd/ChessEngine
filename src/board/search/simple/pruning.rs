@@ -1,3 +1,4 @@
+use super::super::constants::SCORE_NEAR_MATE;
 use super::{NodeContext, SimpleSearchContext};
 
 impl SimpleSearchContext<'_> {
@@ -9,11 +10,7 @@ impl SimpleSearchContext<'_> {
         eval: i32,
         node: &NodeContext,
     ) -> Option<i32> {
-        let dominated_phase = if self.board.white_to_move {
-            self.board.game_phase[0]
-        } else {
-            self.board.game_phase[1]
-        };
+        let dominated_phase = self.board.game_phase[self.board.side_to_move().index()];
 
         // Don't do null move in check, with no pieces, at root, or when eval is too low
         // Allow null move when eval is slightly below beta (more aggressive)
@@ -55,15 +52,10 @@ impl SimpleSearchContext<'_> {
     /// `ProbCut`: If a shallow search on good captures suggests we'll beat beta
     /// by a large margin, prune this node. Based on the idea that if a capture
     /// refutes the position at reduced depth, it will likely refute at full depth.
-    pub(super) fn try_probcut(
-        &mut self,
-        depth: u32,
-        beta: i32,
-        node: &NodeContext,
-    ) -> Option<i32> {
+    pub(super) fn try_probcut(&mut self, depth: u32, beta: i32, node: &NodeContext) -> Option<i32> {
         // Very conservative: only at high depths, not in check
         // High margin to avoid pruning tactical positions
-        if depth < 8 || node.in_check || beta.abs() > 20000 {
+        if depth < 8 || node.in_check || beta.abs() > SCORE_NEAR_MATE {
             return None;
         }
 

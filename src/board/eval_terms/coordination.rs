@@ -22,6 +22,9 @@ pub const OVERLOADED_PENALTY_MG: i32 = -12;
 pub const CLUSTER_BONUS_MG: i32 = 3;
 pub const CLUSTER_BONUS_EG: i32 = 2;
 
+/// Doubled rooks bonus (two rooks on same file)
+pub const DOUBLED_ROOKS_MG: i32 = BATTERY_FILE_MG / 2;
+
 impl Board {
     /// Evaluate piece coordination.
     ///
@@ -62,11 +65,10 @@ impl Board {
     /// Evaluate batteries (aligned heavy pieces)
     fn eval_batteries(&self, color: Color) -> i32 {
         let mut bonus = 0;
-        let c_idx = color.index();
 
-        let queens = self.pieces[c_idx][Piece::Queen.index()];
-        let bishops = self.pieces[c_idx][Piece::Bishop.index()];
-        let rooks = self.pieces[c_idx][Piece::Rook.index()];
+        let queens = self.pieces_of(color, Piece::Queen);
+        let bishops = self.pieces_of(color, Piece::Bishop);
+        let rooks = self.pieces_of(color, Piece::Rook);
 
         // Check for Queen + Bishop batteries (diagonal alignment)
         for queen_sq in queens.iter() {
@@ -74,7 +76,7 @@ impl Board {
 
             for bishop_sq in bishops.iter() {
                 // Check if bishop is on same diagonal as queen
-                if (queen_diag_attacks & (1u64 << bishop_sq.index())) != 0 {
+                if Bitboard(queen_diag_attacks).has_bit(bishop_sq.index()) {
                     // They're aligned on a diagonal
                     bonus += BATTERY_DIAGONAL_MG;
                 }
@@ -87,7 +89,7 @@ impl Board {
 
             for rook_sq in rooks.iter() {
                 // Check if rook is on same file/rank as queen
-                if (queen_file_attacks & (1u64 << rook_sq.index())) != 0 {
+                if Bitboard(queen_file_attacks).has_bit(rook_sq.index()) {
                     bonus += BATTERY_FILE_MG;
                 }
             }
@@ -95,13 +97,9 @@ impl Board {
 
         // Check for doubled rooks (Rook + Rook on same file)
         for rook1 in rooks.iter() {
-            let rook1_file = rook1.index() % 8;
             for rook2 in rooks.iter() {
-                if rook2.index() > rook1.index() {
-                    let rook2_file = rook2.index() % 8;
-                    if rook1_file == rook2_file {
-                        bonus += BATTERY_FILE_MG / 2; // Doubled rooks bonus
-                    }
+                if rook2.index() > rook1.index() && rook1.file() == rook2.file() {
+                    bonus += DOUBLED_ROOKS_MG;
                 }
             }
         }
@@ -111,42 +109,38 @@ impl Board {
 
     /// Evaluate piece clusters (pieces defending each other)
     fn eval_clusters(&self, color: Color) -> (i32, i32) {
-        let c_idx = color.index();
         let mut defended_count = 0;
 
         // Count how many of our pieces are defended by other pieces
         let own_attacks = self.all_attacks(color);
 
         // Check each piece type (except pawns, handled elsewhere)
-        for piece_type in [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
-            let pieces = self.pieces[c_idx][piece_type.index()];
-            for sq in pieces.iter() {
+        for piece_type in Piece::MINOR_AND_MAJOR {
+            for sq in self.pieces_of(color, piece_type).iter() {
                 // Is this piece defended by another of our pieces?
-                if (own_attacks.0 & (1u64 << sq.index())) != 0 {
+                if own_attacks.has_bit(sq.index()) {
                     defended_count += 1;
                 }
             }
         }
 
-        (defended_count * CLUSTER_BONUS_MG, defended_count * CLUSTER_BONUS_EG)
+        (
+            defended_count * CLUSTER_BONUS_MG,
+            defended_count * CLUSTER_BONUS_EG,
+        )
     }
 
     /// Evaluate overloaded defenders
     fn eval_overloaded(&self, color: Color, ctx: &AttackContext) -> i32 {
-        let c_idx = color.index();
         let enemy_attacks = ctx.all_attacks(color.opponent());
-        let _own_attacks = ctx.all_attacks(color);
 
         let mut penalty = 0;
 
         // Find pieces that are attacked by enemy and defended only once
-        for piece_type in [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
-            let pieces = self.pieces[c_idx][piece_type.index()];
-            for sq in pieces.iter() {
-                let sq_bit = 1u64 << sq.index();
-
+        for piece_type in Piece::MINOR_AND_MAJOR {
+            for sq in self.pieces_of(color, piece_type).iter() {
                 // Is this piece attacked?
-                if (enemy_attacks.0 & sq_bit) != 0 {
+                if enemy_attacks.has_bit(sq.index()) {
                     // Count defenders for this piece
                     let defender_count = self.count_defenders(sq.index(), color);
 
@@ -166,12 +160,9 @@ impl Board {
 
     /// Count how many pieces defend a square
     fn count_defenders(&self, sq: usize, color: Color) -> i32 {
-        let c_idx = color.index();
-        let sq_bit = 1u64 << sq;
         let mut count = 0;
 
         // Check pawn defenders
-        let _pawn_attacks = self.pawn_attacks(color);
         // Pawns that could attack this square are on adjacent files, one rank behind
         let file = sq % 8;
         let defending_pawn_sqs = match color {
@@ -200,41 +191,41 @@ impl Board {
                 sqs
             }
         };
-        count += (self.pieces[c_idx][Piece::Pawn.index()].0 & defending_pawn_sqs).count_ones() as i32;
+        count += self.pieces_of(color, Piece::Pawn).intersect_popcount(Bitboard(defending_pawn_sqs)) as i32;
 
         // Check knight defenders
-        for knight_sq in self.pieces[c_idx][Piece::Knight.index()].iter() {
-            if (KNIGHT_ATTACKS[knight_sq.index()] & sq_bit) != 0 {
+        for knight_sq in self.pieces_of(color, Piece::Knight).iter() {
+            if Bitboard(KNIGHT_ATTACKS[knight_sq.index()]).has_bit(sq) {
                 count += 1;
             }
         }
 
         // Check bishop/queen diagonal defenders
-        for bishop_sq in self.pieces[c_idx][Piece::Bishop.index()].iter() {
-            if (slider_attacks(bishop_sq.index(), self.all_occupied.0, true) & sq_bit) != 0 {
+        for bishop_sq in self.pieces_of(color, Piece::Bishop).iter() {
+            if Bitboard(slider_attacks(bishop_sq.index(), self.all_occupied.0, true)).has_bit(sq) {
                 count += 1;
             }
         }
 
         // Check rook/queen file defenders
-        for rook_sq in self.pieces[c_idx][Piece::Rook.index()].iter() {
-            if (slider_attacks(rook_sq.index(), self.all_occupied.0, false) & sq_bit) != 0 {
+        for rook_sq in self.pieces_of(color, Piece::Rook).iter() {
+            if Bitboard(slider_attacks(rook_sq.index(), self.all_occupied.0, false)).has_bit(sq) {
                 count += 1;
             }
         }
 
         // Check queen defenders (both diagonal and file)
-        for queen_sq in self.pieces[c_idx][Piece::Queen.index()].iter() {
+        for queen_sq in self.pieces_of(color, Piece::Queen).iter() {
             let attacks = slider_attacks(queen_sq.index(), self.all_occupied.0, true)
                 | slider_attacks(queen_sq.index(), self.all_occupied.0, false);
-            if (attacks & sq_bit) != 0 {
+            if Bitboard(attacks).has_bit(sq) {
                 count += 1;
             }
         }
 
         // Check king defenders
-        for king_sq in self.pieces[c_idx][Piece::King.index()].iter() {
-            if (crate::board::attack_tables::KING_ATTACKS[king_sq.index()] & sq_bit) != 0 {
+        for king_sq in self.pieces_of(color, Piece::King).iter() {
+            if Bitboard(crate::board::attack_tables::KING_ATTACKS[king_sq.index()]).has_bit(sq) {
                 count += 1;
             }
         }
@@ -247,22 +238,21 @@ impl Board {
         // Simplified: check if there are multiple attacked pieces nearby
         // A full implementation would trace the specific defender
 
-        let c_idx = color.index();
         let mut attacked_pieces_near = 0;
 
         // Count attacked pieces within knight-move distance
         let file = sq % 8;
         let rank = sq / 8;
 
-        for piece_type in [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
-            for piece_sq in self.pieces[c_idx][piece_type.index()].iter() {
-                let pf = piece_sq.index() % 8;
-                let pr = piece_sq.index() / 8;
+        for piece_type in Piece::MINOR_AND_MAJOR {
+            for piece_sq in self.pieces_of(color, piece_type).iter() {
+                let pf = piece_sq.file();
+                let pr = piece_sq.rank();
 
                 // Within 2 squares and attacked by enemy
                 if (file as i32 - pf as i32).abs() <= 2
                     && (rank as i32 - pr as i32).abs() <= 2
-                    && (enemy_attacks.0 & (1u64 << piece_sq.index())) != 0
+                    && enemy_attacks.has_bit(piece_sq.index())
                 {
                     attacked_pieces_near += 1;
                 }
@@ -282,7 +272,7 @@ mod tests {
         // Queen and bishop on same diagonal
         let board: Board = "8/8/8/8/3B4/8/1Q6/8 w - - 0 1".parse().unwrap();
         let bonus = board.eval_batteries(Color::White);
-        assert!(bonus > 0);
+        assert!(bonus > 0, "diagonal battery should give bonus");
     }
 
     #[test]
@@ -290,6 +280,55 @@ mod tests {
         // Doubled rooks on e-file
         let board: Board = "8/8/8/8/4R3/8/4R3/8 w - - 0 1".parse().unwrap();
         let bonus = board.eval_batteries(Color::White);
-        assert!(bonus > 0);
+        assert!(bonus > 0, "doubled rooks should give bonus");
+    }
+
+    #[test]
+    fn test_queen_rook_battery() {
+        // Queen and rook on same file
+        let board: Board = "8/8/8/4Q3/8/8/4R3/8 w - - 0 1".parse().unwrap();
+        let bonus = board.eval_batteries(Color::White);
+        assert!(
+            bonus >= BATTERY_FILE_MG,
+            "Q+R file battery should give bonus"
+        );
+    }
+
+    #[test]
+    fn test_no_battery_unaligned() {
+        // Queen and bishop not aligned
+        let board: Board = "8/8/8/8/3B4/8/8/1Q6 w - - 0 1".parse().unwrap();
+        let bonus = board.eval_batteries(Color::White);
+        // Should be 0 or much smaller than aligned
+        assert!(
+            bonus < BATTERY_DIAGONAL_MG,
+            "unaligned pieces should not get full battery bonus"
+        );
+    }
+
+    #[test]
+    fn test_cluster_defended_pieces() {
+        // Knight defended by bishop
+        let board: Board = "8/8/8/3N4/2B5/8/8/8 w - - 0 1".parse().unwrap();
+        let (mg, eg) = board.eval_clusters(Color::White);
+        assert!(mg > 0 || eg > 0, "defended piece should give cluster bonus");
+    }
+
+    #[test]
+    fn test_full_coordination_symmetry() {
+        // Symmetric position should give roughly equal coordination
+        let board: Board = "r1bqkb1r/pppppppp/2n2n2/8/8/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let ctx = board.compute_attack_context();
+        let (mg, eg) = board.eval_coordination(&ctx);
+        assert!(
+            mg.abs() < 20,
+            "symmetric coordination should be near zero: {mg}"
+        );
+        assert!(
+            eg.abs() < 20,
+            "symmetric coordination eg should be near zero: {eg}"
+        );
     }
 }

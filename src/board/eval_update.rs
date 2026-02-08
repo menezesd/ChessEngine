@@ -5,7 +5,7 @@
 
 use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
 use super::state::Board;
-use super::types::{Color, Piece};
+use super::types::Piece;
 
 /// Calculate PST square index for a given color.
 /// White uses the square index directly, Black mirrors vertically.
@@ -116,34 +116,6 @@ impl Board {
         self.eval_eg = state.eg;
         self.game_phase = state.phase;
     }
-
-    /// Add a piece to incremental evaluation.
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn eval_add_piece(&mut self, color: Color, piece: Piece, sq_idx: usize) {
-        let c_idx = color.index();
-        let is_white = color == Color::White;
-        let p_idx = piece.index();
-        let pst_sq = pst_square(sq_idx, is_white);
-
-        self.eval_mg[c_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
-        self.eval_eg[c_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
-        self.game_phase[c_idx] += PHASE_WEIGHTS[p_idx];
-    }
-
-    /// Remove a piece from incremental evaluation.
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn eval_remove_piece(&mut self, color: Color, piece: Piece, sq_idx: usize) {
-        let c_idx = color.index();
-        let is_white = color == Color::White;
-        let p_idx = piece.index();
-        let pst_sq = pst_square(sq_idx, is_white);
-
-        self.eval_mg[c_idx] -= MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
-        self.eval_eg[c_idx] -= MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
-        self.game_phase[c_idx] -= PHASE_WEIGHTS[p_idx];
-    }
 }
 
 #[cfg(test)]
@@ -172,12 +144,79 @@ mod tests {
 
         // Add a white pawn at e2 (index 12)
         state.add_piece(0, Piece::Pawn, 12, true);
-        assert!(state.mg[0] > 0);
-        assert!(state.eg[0] > 0);
+        assert!(state.mg[0] > 0, "adding pawn should increase mg");
+        assert!(state.eg[0] > 0, "adding pawn should increase eg");
 
         // Remove it
         state.remove_piece(0, Piece::Pawn, 12, true);
-        assert_eq!(state.mg[0], 0);
-        assert_eq!(state.eg[0], 0);
+        assert_eq!(state.mg[0], 0, "removing should restore to 0");
+        assert_eq!(state.eg[0], 0, "removing should restore to 0");
+    }
+
+    #[test]
+    fn test_eval_state_new() {
+        let state = EvalState::new();
+        assert_eq!(state.mg, [0, 0]);
+        assert_eq!(state.eg, [0, 0]);
+        assert_eq!(state.phase, [0, 0]);
+    }
+
+    #[test]
+    fn test_eval_state_default() {
+        let state = EvalState::default();
+        assert_eq!(state.mg, [0, 0]);
+        assert_eq!(state.eg, [0, 0]);
+    }
+
+    #[test]
+    fn test_move_piece() {
+        let mut state = EvalState::new();
+
+        // Add a knight at b1 (index 1)
+        state.add_piece(0, Piece::Knight, 1, true);
+        let initial_mg = state.mg[0];
+        let initial_phase = state.phase[0];
+
+        // Move to c3 (index 18)
+        state.move_piece(0, Piece::Knight, 1, 18, true);
+
+        // Knight on c3 should have different PST bonus than b1
+        // (c3 is a better square for a knight than b1)
+        assert_ne!(
+            state.mg[0], initial_mg,
+            "move_piece should update PST bonus"
+        );
+        // Phase should be the same (same piece, just moved)
+        assert_eq!(
+            state.phase[0], initial_phase,
+            "phase should not change on move"
+        );
+    }
+
+    #[test]
+    fn test_queen_has_high_phase() {
+        let mut state = EvalState::new();
+
+        state.add_piece(0, Piece::Queen, 3, true); // d1
+        assert!(state.phase[0] >= 4, "queen should have high phase weight");
+    }
+
+    #[test]
+    fn test_pawn_has_no_phase() {
+        let mut state = EvalState::new();
+
+        state.add_piece(0, Piece::Pawn, 12, true); // e2
+        assert_eq!(state.phase[0], 0, "pawns should not contribute to phase");
+    }
+
+    #[test]
+    fn test_board_eval_state() {
+        let board = Board::new();
+        let state = board.eval_state();
+
+        // Starting position should have equal material for both sides
+        assert_eq!(state.mg[0], state.mg[1], "symmetric mg");
+        assert_eq!(state.eg[0], state.eg[1], "symmetric eg");
+        assert_eq!(state.phase[0], state.phase[1], "symmetric phase");
     }
 }

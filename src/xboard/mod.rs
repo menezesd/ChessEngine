@@ -56,7 +56,7 @@ pub struct XBoardHandler {
     engine_time_cs: u64,
     opponent_time_cs: u64,
     moves_per_session: u32,
-    base_time_min: u32,
+    base_time_sec: u32,
     increment_sec: u32,
     stop_flag: Arc<AtomicBool>,
     move_history: Vec<(Move, crate::board::UnmakeInfo)>,
@@ -174,11 +174,11 @@ impl XBoardHandler {
             }
             XBoardCommand::Level {
                 moves_per_session,
-                base_minutes,
+                base_seconds,
                 increment_seconds,
             } => {
                 self.moves_per_session = *moves_per_session;
-                self.base_time_min = *base_minutes;
+                self.base_time_sec = *base_seconds;
                 self.increment_sec = *increment_seconds;
                 self.time_per_move_cs = None;
                 None
@@ -345,7 +345,7 @@ impl XBoardHandler {
             engine_time_cs: 0,
             opponent_time_cs: 0,
             moves_per_session: 40,
-            base_time_min: 5,
+            base_time_sec: 300, // 5 minutes in seconds
             increment_sec: 0,
             stop_flag: Arc::new(AtomicBool::new(false)),
             move_history: Vec::new(),

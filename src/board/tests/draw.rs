@@ -4,7 +4,7 @@ use crate::board::{Board, Move, Piece, Square};
 use crate::uci::parse_uci_move;
 
 fn find_move(board: &mut Board, from: Square, to: Square, promotion: Option<Piece>) -> Move {
-    for m in board.generate_moves().iter() {
+    for m in &board.generate_moves() {
         if m.from() == from && m.to() == to && m.promotion() == promotion {
             return *m;
         }

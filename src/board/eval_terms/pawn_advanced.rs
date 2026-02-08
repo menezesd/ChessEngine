@@ -10,6 +10,7 @@ use crate::board::masks::{relative_rank, PASSED_PAWN_MASK};
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece};
 
+use super::helpers::single_pawn_attacks;
 
 /// Pawn storm bonus by rank (relative to enemy king)
 /// Higher bonus for pawns closer to enemy king
@@ -35,12 +36,12 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let white_pawns = self.pieces[0][Piece::Pawn.index()];
-        let black_pawns = self.pieces[1][Piece::Pawn.index()];
+        let white_pawns = self.pieces_of(Color::White, Piece::Pawn);
+        let black_pawns = self.pieces_of(Color::Black, Piece::Pawn);
 
         // Get king positions
-        let white_king_sq = self.pieces[0][Piece::King.index()].0.trailing_zeros() as usize;
-        let black_king_sq = self.pieces[1][Piece::King.index()].0.trailing_zeros() as usize;
+        let white_king_sq = self.king_square_index(Color::White);
+        let black_king_sq = self.king_square_index(Color::Black);
 
         // Evaluate for both colors
         let (w_mg, w_eg) = self.eval_pawn_advanced_for_color(
@@ -76,8 +77,8 @@ impl Board {
 
         // Pawn storm - evaluate pawns on files near enemy king
         for pawn_sq in own_pawns.iter() {
-            let pawn_file = pawn_sq.index() % 8;
-            let pawn_rank = pawn_sq.index() / 8;
+            let pawn_file = pawn_sq.file();
+            let pawn_rank = pawn_sq.rank();
             let rel_rank = relative_rank(pawn_rank, color);
 
             // Check if pawn is on files near enemy king (within 2 files)
@@ -164,7 +165,6 @@ impl Board {
         color: Color,
     ) -> bool {
         let file = pawn_sq % 8;
-        let rank = pawn_sq / 8;
 
         // Only consider pawns on files near enemy king
         let file_dist = (file as i32 - enemy_king_file as i32).abs();
@@ -173,33 +173,8 @@ impl Board {
         }
 
         // Check if pawn can capture (enemy pawn on adjacent file, one rank ahead)
-        let capture_sqs = match color {
-            Color::White => {
-                if rank >= 7 {
-                    return false;
-                }
-                let mut caps = 0u64;
-                if file > 0 {
-                    caps |= 1u64 << (pawn_sq + 7);
-                }
-                if file < 7 {
-                    caps |= 1u64 << (pawn_sq + 9);
-                }
-                caps
-            }
-            Color::Black => {
-                if rank == 0 {
-                    return false;
-                }
-                let mut caps = 0u64;
-                if file > 0 {
-                    caps |= 1u64 << (pawn_sq - 9);
-                }
-                if file < 7 {
-                    caps |= 1u64 << (pawn_sq - 7);
-                }
-                caps
-            }
+        let Some(capture_sqs) = single_pawn_attacks(pawn_sq, color) else {
+            return false;
         };
 
         (enemy_pawns.0 & capture_sqs) != 0
@@ -246,8 +221,52 @@ mod tests {
     fn test_chain_links() {
         // Classic pawn chain d4-e5
         let board: Board = "8/8/8/4P3/3P4/8/8/8 w - - 0 1".parse().unwrap();
-        let white_pawns = board.pieces[0][Piece::Pawn.index()];
+        let white_pawns = board.pieces_of(Color::White, Piece::Pawn);
         let links = Board::count_chain_links(white_pawns, Color::White);
-        assert!(links >= 1); // e5 is defended by d4
+        assert!(links >= 1, "e5 should be defended by d4");
+    }
+
+    #[test]
+    fn test_no_chain() {
+        // Isolated pawns - no chain
+        let board: Board = "8/8/8/P3P3/8/8/8/8 w - - 0 1".parse().unwrap();
+        let white_pawns = board.pieces_of(Color::White, Piece::Pawn);
+        let links = Board::count_chain_links(white_pawns, Color::White);
+        assert_eq!(links, 0, "isolated pawns should have no chain links");
+    }
+
+    #[test]
+    fn test_pawn_advanced_symmetry() {
+        // Symmetric position
+        let board = Board::new();
+        let (mg, eg) = board.eval_pawn_advanced();
+        assert!(mg.abs() < 20, "starting position pawn advanced mg: {mg}");
+        assert!(eg.abs() < 20, "starting position pawn advanced eg: {eg}");
+    }
+
+    #[test]
+    fn test_candidate_passer() {
+        // e5 pawn with d6 blocker - could become passer with exd6
+        let board: Board = "8/8/3p4/4P3/8/8/8/8 w - - 0 1".parse().unwrap();
+        let (mg, eg) = board.eval_pawn_advanced();
+        // Just verify function runs
+        assert!(
+            (-100..=100).contains(&mg),
+            "candidate passer mg reasonable: {mg}"
+        );
+        assert!(
+            (-100..=100).contains(&eg),
+            "candidate passer eg reasonable: {eg}"
+        );
+    }
+
+    #[test]
+    fn test_pawn_lever() {
+        // White pawn that can capture to open a file
+        let board: Board = "4k3/8/3p4/2P5/8/8/8/4K3 w - - 0 1".parse().unwrap();
+        // The c5 pawn can capture on d6
+        let (mg, _) = board.eval_pawn_advanced();
+        // Just verify function runs
+        assert!(mg >= -100, "pawn lever evaluation should work: {mg}");
     }
 }

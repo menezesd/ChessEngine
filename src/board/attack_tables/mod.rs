@@ -169,21 +169,18 @@ pub(crate) fn slider_attacks(square: usize, occupancy: u64, bishop: bool) -> u64
 
 /// Get bishop attacks (diagonals only)
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn bishop_attacks(square: usize, occupancy: u64) -> u64 {
     diag_attacks(occupancy, square) | anti_attacks(occupancy, square)
 }
 
 /// Get rook attacks (ranks and files only)
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn rook_attacks(square: usize, occupancy: u64) -> u64 {
     file_attacks(occupancy, square) | rank_attacks(occupancy, square)
 }
 
 /// Get queen attacks (all 8 directions)
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn queen_attacks(square: usize, occupancy: u64) -> u64 {
     bishop_attacks(square, occupancy) | rook_attacks(square, occupancy)
 }

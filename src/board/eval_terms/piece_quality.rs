@@ -48,14 +48,12 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let c_idx = color.index();
-        let own_pieces = self.occupied[c_idx];
+        let own_pieces = self.occupied_by(color);
         let enemy_attacks = ctx.all_attacks(color.opponent());
         let pawn_attacks = self.pawn_attacks(color.opponent());
 
         // Evaluate each piece type
-        let knights = self.pieces[c_idx][Piece::Knight.index()];
-        for sq in knights.iter() {
+        for sq in self.pieces_of(color, Piece::Knight).iter() {
             let (piece_mg, piece_eg) = Self::eval_piece_activity(
                 sq.index(),
                 KNIGHT_ATTACKS[sq.index()],
@@ -67,8 +65,7 @@ impl Board {
             eg += piece_eg;
         }
 
-        let bishops = self.pieces[c_idx][Piece::Bishop.index()];
-        for sq in bishops.iter() {
+        for sq in self.pieces_of(color, Piece::Bishop).iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, true);
             let (piece_mg, piece_eg) = Self::eval_piece_activity(
                 sq.index(),
@@ -81,8 +78,7 @@ impl Board {
             eg += piece_eg;
         }
 
-        let rooks = self.pieces[c_idx][Piece::Rook.index()];
-        for sq in rooks.iter() {
+        for sq in self.pieces_of(color, Piece::Rook).iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, false);
             let (piece_mg, piece_eg) = Self::eval_piece_activity(
                 sq.index(),
@@ -95,8 +91,7 @@ impl Board {
             eg += piece_eg;
         }
 
-        let queens = self.pieces[c_idx][Piece::Queen.index()];
-        for sq in queens.iter() {
+        for sq in self.pieces_of(color, Piece::Queen).iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, true)
                 | slider_attacks(sq.index(), self.all_occupied.0, false);
             let (piece_mg, piece_eg) = Self::eval_piece_activity(
@@ -144,16 +139,15 @@ impl Board {
 
     /// Evaluate piece harmony (pieces supporting each other while both active).
     fn eval_piece_harmony(&self, color: Color, ctx: &AttackContext) -> i32 {
-        let c_idx = color.index();
         let own_attacks = ctx.all_attacks(color);
-        let _enemy_attacks = ctx.all_attacks(color.opponent());
         let enemy_pawn_attacks = self.pawn_attacks(color.opponent());
+        let own_occupied = self.occupied_by(color).0;
 
         let mut harmony_count = 0;
 
         // Check minor pieces defending each other
-        let knights = self.pieces[c_idx][Piece::Knight.index()];
-        let bishops = self.pieces[c_idx][Piece::Bishop.index()];
+        let knights = self.pieces_of(color, Piece::Knight);
+        let bishops = self.pieces_of(color, Piece::Bishop);
         let minor_pieces = Bitboard(knights.0 | bishops.0);
 
         for sq in minor_pieces.iter() {
@@ -168,7 +162,7 @@ impl Board {
                     slider_attacks(sq.index(), self.all_occupied.0, true)
                 };
 
-                let safe_squares = attacks & !self.occupied[c_idx].0 & !enemy_pawn_attacks.0;
+                let safe_squares = attacks & !own_occupied & !enemy_pawn_attacks.0;
                 if safe_squares.count_ones() >= 4 {
                     // Defended and active - harmony bonus
                     harmony_count += 1;
@@ -189,10 +183,9 @@ mod tests {
         // Knight trapped in corner
         let board: Board = "8/8/1p6/p7/N7/8/8/8 w - - 0 1".parse().unwrap();
         let ctx = board.compute_attack_context();
-        let (mg, eg) = board.eval_piece_quality(&ctx);
+        let (mg, _eg) = board.eval_piece_quality(&ctx);
         // Knight on a4 with pawns on a5, b6 should be very restricted
-        let _ = eg; // Silence unused variable warning
-        assert!(mg < 10); // Should have some penalty
+        assert!(mg < 10, "trapped knight should have penalty: {mg}");
     }
 
     #[test]
@@ -202,6 +195,44 @@ mod tests {
         let ctx = board.compute_attack_context();
         let (mg, _) = board.eval_piece_quality(&ctx);
         // Central knight should be active
-        assert!(mg >= 0);
+        assert!(mg >= 0, "central knight should not have penalty");
+    }
+
+    #[test]
+    fn test_bishop_activity() {
+        // Active bishop on long diagonal
+        let board: Board = "8/8/8/8/8/8/6B1/8 w - - 0 1".parse().unwrap();
+        let ctx = board.compute_attack_context();
+        let (mg, _) = board.eval_piece_quality(&ctx);
+        // Diagonal bishop should be active
+        assert!(mg >= 0, "active bishop should not have penalty");
+    }
+
+    #[test]
+    fn test_piece_quality_symmetry() {
+        // Symmetric position
+        let board: Board = "r1bqkb1r/pppppppp/2n2n2/8/8/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let ctx = board.compute_attack_context();
+        let (mg, eg) = board.eval_piece_quality(&ctx);
+        assert!(
+            mg.abs() < 30,
+            "symmetric piece quality should be near zero: {mg}"
+        );
+        assert!(
+            eg.abs() < 30,
+            "symmetric piece quality eg should be near zero: {eg}"
+        );
+    }
+
+    #[test]
+    fn test_rook_activity() {
+        // Rook on open file
+        let board: Board = "8/8/8/8/8/8/8/4R3 w - - 0 1".parse().unwrap();
+        let ctx = board.compute_attack_context();
+        let (mg, _) = board.eval_piece_quality(&ctx);
+        // Open file rook should be active
+        assert!(mg >= 0, "rook on open file should not have penalty");
     }
 }

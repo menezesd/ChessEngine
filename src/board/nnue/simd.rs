@@ -79,7 +79,7 @@ pub fn sub_weights(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
 ///
 /// Returns sum of: `screlu(acc[i]) * weights[i]` for i in `0..HIDDEN_SIZE`
 #[inline]
-#[must_use] 
+#[must_use]
 pub fn screlu_dot(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
     #[cfg(target_arch = "aarch64")]
     {
@@ -108,26 +108,38 @@ pub fn screlu_dot(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32
 
 // ============================================================================
 // Scalar fallback implementations
+// Used on x86_64 without AVX2 and non-SIMD platforms.
+// Not used on aarch64 (NEON always available).
 // ============================================================================
 
+#[cfg(any(
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(target_arch = "x86_64", not(target_feature = "avx2"))
+))]
 #[inline]
-#[allow(dead_code)]
 fn add_weights_scalar(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     for i in 0..HIDDEN_SIZE {
         acc[i] = acc[i].saturating_add(weights[i]);
     }
 }
 
+#[cfg(any(
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(target_arch = "x86_64", not(target_feature = "avx2"))
+))]
 #[inline]
-#[allow(dead_code)]
 fn sub_weights_scalar(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     for i in 0..HIDDEN_SIZE {
         acc[i] = acc[i].saturating_sub(weights[i]);
     }
 }
 
-/// Scalar fallback for `screlu_dot` (kept for reference/testing)
-#[allow(dead_code)]
+/// Scalar fallback for `screlu_dot`.
+#[cfg(any(
+    test,
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(target_arch = "x86_64", not(target_feature = "avx2"))
+))]
 #[inline]
 fn screlu_dot_scalar(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
     let mut sum = 0i32;
@@ -176,7 +188,11 @@ unsafe fn sub_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
-    use std::arch::aarch64::{vdupq_n_s16, vdupq_n_s64, vld1q_s16, vminq_s16, vmaxq_s16, vmovl_s16, vget_low_s16, vget_high_s16, vmulq_s32, vaddq_s64, vmovl_s32, vget_low_s32, vget_high_s32, vgetq_lane_s64};
+    use std::arch::aarch64::{
+        vaddq_s64, vdupq_n_s16, vdupq_n_s64, vget_high_s16, vget_high_s32, vget_low_s16,
+        vget_low_s32, vgetq_lane_s64, vld1q_s16, vmaxq_s16, vminq_s16, vmovl_s16, vmovl_s32,
+        vmulq_s32,
+    };
 
     let acc_ptr = acc.as_ptr();
     let weights_ptr = weights.as_ptr();
@@ -197,7 +213,7 @@ unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
         let clamped = vminq_s16(vmaxq_s16(a, zero), qa);
 
         // Split into low and high halves, extend to i32
-        let clamped_lo = vmovl_s16(vget_low_s16(clamped));  // 4 x i32
+        let clamped_lo = vmovl_s16(vget_low_s16(clamped)); // 4 x i32
         let clamped_hi = vmovl_s16(vget_high_s16(clamped)); // 4 x i32
 
         // Square
@@ -365,8 +381,7 @@ mod tests {
 
         assert_eq!(
             scalar_result, simd_result,
-            "SIMD result {} doesn't match scalar {}",
-            simd_result, scalar_result
+            "SIMD result {simd_result} doesn't match scalar {scalar_result}"
         );
     }
 }

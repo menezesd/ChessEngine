@@ -2,10 +2,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use super::eval_update::pst_square;
 use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
-use super::{
-    Bitboard, Color, Piece, Square, ALL_CASTLING_RIGHTS,
-};
+use super::{Bitboard, Color, Piece, Square, ALL_CASTLING_RIGHTS};
 
 #[derive(Clone, Copy, Debug)]
 pub struct UnmakeInfo {
@@ -143,11 +142,7 @@ impl Board {
             // Update incremental eval for removed piece
             let c_idx = old_color.index();
             let p_idx = old_piece.index();
-            let pst_sq = if old_color == Color::White {
-                sq.index()
-            } else {
-                sq.index() ^ 56
-            };
+            let pst_sq = pst_square(sq.index(), old_color == Color::White);
             self.eval_mg[c_idx] -= MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
             self.eval_eg[c_idx] -= MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
             self.game_phase[c_idx] -= PHASE_WEIGHTS[p_idx];
@@ -160,11 +155,7 @@ impl Board {
         // Update incremental eval
         let c_idx = color.index();
         let p_idx = piece.index();
-        let pst_sq = if color == Color::White {
-            sq.index()
-        } else {
-            sq.index() ^ 56
-        };
+        let pst_sq = pst_square(sq.index(), color == Color::White);
         self.eval_mg[c_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
         self.eval_eg[c_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
         self.game_phase[c_idx] += PHASE_WEIGHTS[p_idx];
@@ -182,11 +173,7 @@ impl Board {
             // Update incremental eval
             let c_idx = color.index();
             let p_idx = piece.index();
-            let pst_sq = if color == Color::White {
-                sq.index()
-            } else {
-                sq.index() ^ 56
-            };
+            let pst_sq = pst_square(sq.index(), color == Color::White);
             self.eval_mg[c_idx] -= MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
             self.eval_eg[c_idx] -= MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
             self.game_phase[c_idx] -= PHASE_WEIGHTS[p_idx];
@@ -199,17 +186,18 @@ impl Board {
         self.eval_eg = [0, 0];
         self.game_phase = [0, 0];
 
-        for color in [Color::White, Color::Black] {
+        for color in Color::BOTH {
             let c_idx = color.index();
-            for piece_type in 0..6 {
-                for sq_idx in self.pieces[c_idx][piece_type].iter() {
+            for piece in Piece::ALL {
+                let p_idx = piece.index();
+                for sq_idx in self.pieces_of(color, piece).iter() {
                     let sq = sq_idx.index();
                     // PST square: flip for white (tables are from black's perspective)
                     let pst_sq = if color == Color::White { sq } else { sq ^ 56 };
 
-                    self.eval_mg[c_idx] += MATERIAL_MG[piece_type] + PST_MG[piece_type][pst_sq];
-                    self.eval_eg[c_idx] += MATERIAL_EG[piece_type] + PST_EG[piece_type][pst_sq];
-                    self.game_phase[c_idx] += PHASE_WEIGHTS[piece_type];
+                    self.eval_mg[c_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
+                    self.eval_eg[c_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
+                    self.game_phase[c_idx] += PHASE_WEIGHTS[p_idx];
                 }
             }
         }
@@ -249,12 +237,12 @@ impl Board {
         let mut hash = 0u64;
 
         // Hash white pawns
-        for sq in self.pieces[0][Piece::Pawn.index()].iter() {
+        for sq in self.pieces_of(Color::White, Piece::Pawn).iter() {
             hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][0][sq.index()];
         }
 
         // Hash black pawns
-        for sq in self.pieces[1][Piece::Pawn.index()].iter() {
+        for sq in self.pieces_of(Color::Black, Piece::Pawn).iter() {
             hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][1][sq.index()];
         }
 
@@ -279,9 +267,14 @@ impl Board {
     /// Get all pieces of a given type regardless of color
     #[must_use]
     pub fn all_pieces_of_type(&self, piece: Piece) -> Bitboard {
-        Bitboard(
-            self.pieces[0][piece.index()].0 | self.pieces[1][piece.index()].0
-        )
+        Bitboard(self.pieces[0][piece.index()].0 | self.pieces[1][piece.index()].0)
+    }
+
+    /// Get the king square index (0-63) for a color
+    #[inline]
+    #[must_use]
+    pub fn king_square_index(&self, color: Color) -> usize {
+        self.king_square[color.index()].index()
     }
 
     #[must_use]
@@ -303,8 +296,8 @@ impl Board {
     }
 
     /// Count pieces of a given type for a color
-    fn piece_count(&self, color: Color, piece: Piece) -> u32 {
-        self.pieces[color.index()][piece.index()].0.count_ones()
+    pub(crate) fn piece_count(&self, color: Color, piece: Piece) -> u32 {
+        self.pieces_of(color, piece).popcount()
     }
 
     /// Count pieces of a given type for both colors combined
@@ -332,8 +325,7 @@ impl Board {
 
         // K+B vs K+B with same-colored bishops
         if total_knights == 0 && total_bishops == 2 {
-            let all_bishops = self.pieces[Color::White.index()][Piece::Bishop.index()].0
-                | self.pieces[Color::Black.index()][Piece::Bishop.index()].0;
+            let all_bishops = self.all_pieces_of_type(Piece::Bishop).0;
             return bishops_all_same_color(all_bishops);
         }
 
