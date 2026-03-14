@@ -27,7 +27,7 @@ impl SimpleSearchContext<'_> {
     /// Quiescence search for tactical stability with SEE and delta pruning.
     /// `ply` is the total ply from root (for correct mate score adjustment).
     pub fn quiesce(&mut self, mut alpha: i32, beta: i32, ply: usize, qdepth: i32) -> i32 {
-        let stand_pat = self.evaluate_simple();
+        let stand_pat = self.evaluate_simple(ply);
 
         // Depth limit
         if qdepth >= MAX_QSEARCH_DEPTH {
@@ -125,6 +125,12 @@ impl SimpleSearchContext<'_> {
             }
 
             self.nodes += 1;
+
+            // Update NNUE accumulator before make_move
+            if let Some((_, piece)) = self.board.piece_at(m.from()) {
+                self.update_accumulator_for_move(ply, m, piece, self.board.side_to_move());
+            }
+
             let info = self.board.make_move(m);
             // Prefetch TT for child position
             self.state.tables.tt.prefetch(self.board.hash);
