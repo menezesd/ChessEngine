@@ -1,5 +1,6 @@
-use super::super::constants::{MATE_THRESHOLD, MAX_QSEARCH_DEPTH, SCORE_INFINITE};
+use super::super::constants::{MAX_QSEARCH_DEPTH, SCORE_INFINITE};
 use super::super::move_order::piece_value;
+use super::super::MATE_SCORE;
 use super::SimpleSearchContext;
 use crate::board::{ScoredMoveList, EMPTY_MOVE};
 
@@ -23,8 +24,9 @@ const SEE_SHALLOW_DEPTH: i32 = 2;
 const SEE_MEDIUM_DEPTH: i32 = 5;
 
 impl SimpleSearchContext<'_> {
-    /// Quiescence search for tactical stability with SEE and delta pruning
-    pub fn quiesce(&mut self, mut alpha: i32, beta: i32, qdepth: i32) -> i32 {
+    /// Quiescence search for tactical stability with SEE and delta pruning.
+    /// `ply` is the total ply from root (for correct mate score adjustment).
+    pub fn quiesce(&mut self, mut alpha: i32, beta: i32, ply: usize, qdepth: i32) -> i32 {
         let stand_pat = self.evaluate_simple();
 
         // Depth limit
@@ -39,7 +41,7 @@ impl SimpleSearchContext<'_> {
         let moves = if in_check {
             let moves = self.board.generate_moves();
             if moves.is_empty() {
-                return -MATE_THRESHOLD; // Checkmate
+                return -MATE_SCORE + ply as i32; // Checkmate (ply-adjusted)
             }
             moves
         } else {
@@ -87,16 +89,21 @@ impl SimpleSearchContext<'_> {
             // Delta pruning: if even winning the captured piece + margin won't raise alpha, skip
             // Use slightly larger margin at deep depths to be less aggressive
             if !in_check && m.is_capture() {
-                if let Some((_, captured)) = self.board.piece_at(m.to()) {
-                    let margin = if qdepth <= SEE_SHALLOW_DEPTH {
-                        DELTA_MARGIN
-                    } else {
-                        DELTA_MARGIN + DELTA_MARGIN_DEEP
-                    };
-                    let delta = piece_value(captured) + margin;
-                    if stand_pat + delta < alpha {
-                        continue;
-                    }
+                let captured_value = if m.is_en_passant() {
+                    piece_value(crate::board::Piece::Pawn)
+                } else if let Some((_, captured)) = self.board.piece_at(m.to()) {
+                    piece_value(captured)
+                } else {
+                    0
+                };
+                let margin = if qdepth <= SEE_SHALLOW_DEPTH {
+                    DELTA_MARGIN
+                } else {
+                    DELTA_MARGIN + DELTA_MARGIN_DEEP
+                };
+                let delta = captured_value + margin;
+                if stand_pat + delta < alpha {
+                    continue;
                 }
             }
 
@@ -121,7 +128,7 @@ impl SimpleSearchContext<'_> {
             let info = self.board.make_move(m);
             // Prefetch TT for child position
             self.state.tables.tt.prefetch(self.board.hash);
-            let score = -self.quiesce(-beta, -alpha, qdepth + 1);
+            let score = -self.quiesce(-beta, -alpha, ply + 1, qdepth + 1);
             self.board.unmake_move(m, info);
 
             if score >= beta {

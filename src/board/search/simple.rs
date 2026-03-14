@@ -822,7 +822,7 @@ impl SimpleSearchContext<'_> {
 
         // Quiescence at leaf
         if depth == 0 {
-            return self.quiesce(alpha, beta, 0);
+            return self.quiesce(alpha, beta, ply, 0);
         }
 
         self.nodes += 1;
