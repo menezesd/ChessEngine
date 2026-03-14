@@ -193,7 +193,7 @@ impl Board {
                 for sq_idx in self.pieces_of(color, piece).iter() {
                     let sq = sq_idx.index();
                     // PST square: flip for white (tables are from black's perspective)
-                    let pst_sq = if color == Color::White { sq } else { sq ^ 56 };
+                    let pst_sq = if color == Color::White { sq } else { sq ^ 0b11_1000 };
 
                     self.eval_mg[c_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
                     self.eval_eg[c_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];

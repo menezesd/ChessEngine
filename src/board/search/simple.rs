@@ -290,7 +290,7 @@ impl SimpleSearchContext<'_> {
                 (-SCORE_INFINITE, EMPTY_MOVE, false, false)
             };
 
-        let mut moves_tried = if tt_move_searched { 1 } else { 0 };
+        let mut moves_tried = usize::from(tt_move_searched);
 
         // Track quiet moves for negative history on beta cutoff
         let mut quiets_tried: [Move; 64] = [EMPTY_MOVE; 64];
@@ -945,9 +945,9 @@ impl SimpleSearchContext<'_> {
         // Handle empty move list (checkmate/stalemate)
         // Note: if staged_result is Some, TT move was legal so we have at least one move
         if moves.is_empty() {
-            return if staged_result.is_some() {
+            return if let Some(result) = staged_result {
                 // TT move was the only legal move, return its score
-                staged_result.unwrap().score
+                result.score
             } else if in_check {
                 -MATE_SCORE + ply as i32 // Checkmate
             } else {

@@ -15,7 +15,7 @@ pub fn pst_square(sq_idx: usize, is_white: bool) -> usize {
     if is_white {
         sq_idx
     } else {
-        sq_idx ^ 56
+        sq_idx ^ 0b11_1000
     }
 }
 

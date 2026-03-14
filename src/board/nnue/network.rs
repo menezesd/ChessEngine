@@ -192,7 +192,7 @@ pub fn feature_index(
 ) -> usize {
     let (oriented_sq, oriented_color) = if perspective == 1 {
         // Black's perspective - flip board vertically
-        (square ^ 56, 1 - piece_color)
+        (square ^ 0b11_1000, 1 - piece_color)
     } else {
         // White's perspective
         (square, piece_color)
