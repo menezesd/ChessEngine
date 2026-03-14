@@ -158,6 +158,7 @@ fn screlu_dot_scalar(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> 
 #[cfg(target_arch = "aarch64")]
 unsafe fn add_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     use std::arch::aarch64::{vld1q_s16, vqaddq_s16, vst1q_s16};
+    const _: () = assert!(HIDDEN_SIZE % 8 == 0, "HIDDEN_SIZE must be divisible by 8 for NEON");
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -174,6 +175,7 @@ unsafe fn add_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 #[cfg(target_arch = "aarch64")]
 unsafe fn sub_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     use std::arch::aarch64::{vld1q_s16, vqsubq_s16, vst1q_s16};
+    const _: () = assert!(HIDDEN_SIZE % 8 == 0, "HIDDEN_SIZE must be divisible by 8 for NEON");
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -193,6 +195,7 @@ unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
         vget_low_s32, vgetq_lane_s64, vld1q_s16, vmaxq_s16, vminq_s16, vmovl_s16, vmovl_s32,
         vmulq_s32,
     };
+    const _: () = assert!(HIDDEN_SIZE % 8 == 0, "HIDDEN_SIZE must be divisible by 8 for NEON");
 
     let acc_ptr = acc.as_ptr();
     let weights_ptr = weights.as_ptr();
@@ -248,6 +251,7 @@ unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
 #[target_feature(enable = "avx2")]
 unsafe fn add_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     use std::arch::x86_64::*;
+    const _: () = assert!(HIDDEN_SIZE % 16 == 0, "HIDDEN_SIZE must be divisible by 16 for AVX2");
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -265,6 +269,7 @@ unsafe fn add_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 #[target_feature(enable = "avx2")]
 unsafe fn sub_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     use std::arch::x86_64::*;
+    const _: () = assert!(HIDDEN_SIZE % 16 == 0, "HIDDEN_SIZE must be divisible by 16 for AVX2");
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -281,6 +286,7 @@ unsafe fn sub_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 #[target_feature(enable = "avx2")]
 unsafe fn screlu_dot_avx2(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
     use std::arch::x86_64::*;
+    const _: () = assert!(HIDDEN_SIZE % 16 == 0, "HIDDEN_SIZE must be divisible by 16 for AVX2");
 
     let acc_ptr = acc.as_ptr();
     let weights_ptr = weights.as_ptr();
