@@ -27,6 +27,7 @@ impl SimpleSearchContext<'_> {
         let r = super::super::constants::NULL_MOVE_BASE_REDUCTION + (depth + 1) / 3;
         let reduced_depth = depth.saturating_sub(r);
 
+        self.copy_accumulator_for_null_move(node.ply);
         let info = self.board.make_null_move();
         let score = -self.alphabeta(
             reduced_depth,
@@ -69,6 +70,11 @@ impl SimpleSearchContext<'_> {
             // Only consider good captures (positive SEE)
             if self.board.see(m.from(), m.to()) < 0 {
                 continue;
+            }
+
+            // Update NNUE accumulator before make_move
+            if let Some((_, piece)) = self.board.piece_at(m.from()) {
+                self.update_accumulator_for_move(node.ply, *m, piece, self.board.side_to_move());
             }
 
             let info = self.board.make_move(*m);

@@ -32,7 +32,9 @@ use super::constants::{
     PAWN_EXTENSION_RANK_WHITE, SCORE_INFINITE, SCORE_NEAR_MATE, SCORE_SAFE_MAX, TT_MOVE_SCORE,
 };
 use super::{SearchInfoCallback, SearchState, MATE_SCORE};
-use crate::board::{Board, Move, MoveList, ScoredMoveList, EMPTY_MOVE, MAX_PLY};
+use crate::board::nnue::network::feature_index;
+use crate::board::nnue::NnueAccumulator;
+use crate::board::{Board, Color, Move, MoveList, ScoredMoveList, Square, EMPTY_MOVE, MAX_PLY};
 
 use super::super::Piece;
 
@@ -56,6 +58,8 @@ pub struct SimpleSearchContext<'a> {
     pub info_callback: Option<SearchInfoCallback>,
     /// Root moves to consider (for `MultiPV` support - empty means all moves)
     pub root_moves: Vec<Move>,
+    /// NNUE accumulator stack indexed by ply (heap-allocated)
+    pub acc_stack: Box<[NnueAccumulator]>,
 }
 
 #[derive(Clone, Copy)]
@@ -340,6 +344,11 @@ impl SimpleSearchContext<'_> {
             // Get the piece that's moving for continuation history (before make_move)
             let moving_piece = self.board.piece_at(m.from()).map(|(_, p)| p);
 
+            // Update NNUE accumulator incrementally (before make_move modifies board)
+            if let Some(piece) = moving_piece {
+                self.update_accumulator_for_move(ply, m, piece, self.board.side_to_move());
+            }
+
             // Make move first (we'll check for check after)
             let info = self.board.make_move(m);
 
@@ -495,22 +504,116 @@ impl SimpleSearchContext<'_> {
         false
     }
 
-    /// Evaluate position from side-to-move's perspective
-    /// Uses NNUE if available, otherwise falls back to HCE
+    /// Evaluate position from side-to-move's perspective.
+    /// Uses NNUE with incremental accumulator if available, otherwise HCE.
     #[inline]
-    fn evaluate(&self) -> i32 {
+    fn evaluate(&self, ply: usize) -> i32 {
         if let Some(ref nnue) = self.state.tables.nnue {
-            self.board.evaluate_nnue(nnue)
+            nnue.evaluate(&self.acc_stack[ply], self.board.white_to_move)
         } else {
             self.board.evaluate_simple()
         }
     }
 
-    /// Fast/simple evaluation for pruning decisions
-    /// Always uses HCE for speed (NNUE is more expensive)
+    /// Evaluation for pruning and qsearch (main workhorse).
+    /// Uses HCE for now; switch to NNUE once better weights are trained.
     #[inline]
-    fn evaluate_simple(&self) -> i32 {
+    fn evaluate_simple(&self, _ply: usize) -> i32 {
         self.board.evaluate_simple()
+    }
+
+    /// Initialize the accumulator at the given ply from the current board state.
+    fn init_accumulator(&mut self, ply: usize) {
+        if let Some(ref nnue) = self.state.tables.nnue {
+            let (wf, bf) = self.board.compute_nnue_features();
+            self.acc_stack[ply] = NnueAccumulator::new(&nnue.feature_bias);
+            self.acc_stack[ply].refresh(&wf, &bf, nnue);
+        }
+    }
+
+    /// Update accumulator incrementally for a move.
+    /// Must be called BEFORE `board.make_move()` while the board is in the pre-move state.
+    fn update_accumulator_for_move(
+        &mut self,
+        ply: usize,
+        m: Move,
+        moving_piece: Piece,
+        moving_color: Color,
+    ) {
+        let Some(ref nnue) = self.state.tables.nnue else {
+            return;
+        };
+        if ply + 1 >= self.acc_stack.len() {
+            return;
+        }
+
+        // Clone parent accumulator to ply+1
+        self.acc_stack[ply + 1] = self.acc_stack[ply].clone();
+        let acc = &mut self.acc_stack[ply + 1];
+
+        // Helper: compute feature indices for both perspectives
+        let feat = |piece: Piece, color: Color, sq: usize| -> (usize, usize) {
+            (
+                feature_index(piece.index(), color.index(), sq, 0),
+                feature_index(piece.index(), color.index(), sq, 1),
+            )
+        };
+
+        if m.is_castling() {
+            // King: from -> to
+            let (wf, bf) = feat(Piece::King, moving_color, m.from().index());
+            acc.sub_feature(wf, bf, nnue);
+            let (wf, bf) = feat(Piece::King, moving_color, m.to().index());
+            acc.add_feature(wf, bf, nnue);
+
+            // Rook: determine from/to based on king destination file
+            let (rook_from_file, rook_to_file) = if m.to().file() == 6 {
+                (7, 5) // Kingside
+            } else {
+                (0, 3) // Queenside
+            };
+            let rank = m.from().rank();
+            let rook_from = Square::new(rank, rook_from_file).index();
+            let rook_to = Square::new(rank, rook_to_file).index();
+            let (wf, bf) = feat(Piece::Rook, moving_color, rook_from);
+            acc.sub_feature(wf, bf, nnue);
+            let (wf, bf) = feat(Piece::Rook, moving_color, rook_to);
+            acc.add_feature(wf, bf, nnue);
+        } else {
+            // Remove captured piece if any
+            if m.is_en_passant() {
+                // En passant: captured pawn is on a different square
+                let cap_rank = if moving_color == Color::White {
+                    m.to().rank() - 1
+                } else {
+                    m.to().rank() + 1
+                };
+                let cap_sq = Square::new(cap_rank, m.to().file()).index();
+                let (wf, bf) = feat(Piece::Pawn, moving_color.opponent(), cap_sq);
+                acc.sub_feature(wf, bf, nnue);
+            } else if m.is_capture() {
+                // Normal capture: captured piece is on m.to()
+                if let Some((cap_color, cap_piece)) = self.board.piece_at(m.to()) {
+                    let (wf, bf) = feat(cap_piece, cap_color, m.to().index());
+                    acc.sub_feature(wf, bf, nnue);
+                }
+            }
+
+            // Remove moving piece from source
+            let (wf, bf) = feat(moving_piece, moving_color, m.from().index());
+            acc.sub_feature(wf, bf, nnue);
+
+            // Add piece to destination (may be promoted piece)
+            let placed_piece = m.promotion().unwrap_or(moving_piece);
+            let (wf, bf) = feat(placed_piece, moving_color, m.to().index());
+            acc.add_feature(wf, bf, nnue);
+        }
+    }
+
+    /// Copy accumulator forward for null moves (no pieces change).
+    #[inline]
+    fn copy_accumulator_for_null_move(&mut self, ply: usize) {
+        self.acc_stack[ply + 1] = self.acc_stack[ply].clone();
     }
 
     /// Check for repetition (returns true if position repeated)
@@ -877,7 +980,7 @@ impl SimpleSearchContext<'_> {
         let raw_eval = if in_check {
             -SCORE_INFINITE // Don't use static eval when in check
         } else {
-            self.evaluate_simple()
+            self.evaluate_simple(ply)
         };
 
         // Apply correction history to improve static eval accuracy
@@ -1022,6 +1125,11 @@ impl SimpleSearchContext<'_> {
 
         // Get the piece that's moving for continuation history
         let moving_piece = self.board.piece_at(tt_move.from()).map(|(_, p)| p);
+
+        // Update NNUE accumulator incrementally (before make_move modifies board)
+        if let Some(piece) = moving_piece {
+            self.update_accumulator_for_move(ply, tt_move, piece, self.board.side_to_move());
+        }
 
         // Make the move
         let info = self.board.make_move(tt_move);

@@ -65,7 +65,9 @@ impl SimpleSearchContext<'_> {
         multipv_index: u32,
     ) -> Option<Move> {
         let mut best_move: Option<Move> = None;
-        let mut score = self.evaluate();
+        // Initialize NNUE accumulator for root position
+        self.init_accumulator(0);
+        let mut score = self.evaluate(0);
 
         // Time management state
         let mut previous_best_move: Option<Move> = None;
@@ -284,6 +286,7 @@ pub fn simple_search_multipv(
         previous_piece: [None; MAX_PLY],
         info_callback,
         root_moves: available_moves,
+        acc_stack: vec![crate::board::nnue::NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
     };
 
     let result = ctx.iterative_deepening_multipv(max_depth, multipv_index);
