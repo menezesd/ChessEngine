@@ -41,10 +41,10 @@ impl SimpleSearchContext<'_> {
 
         // Node-based time check: estimate if we can complete the next depth
         if elapsed > 0 && prev_iter_nodes > 5000 && depth > 5 {
-            let nps = self.nodes * 1000 / elapsed;
+            let nps = self.nodes.saturating_mul(1000) / elapsed;
             if nps > 0 {
                 let estimated_nodes = prev_iter_nodes.saturating_mul(25) / 10;
-                let estimated_time = estimated_nodes * 1000 / nps;
+                let estimated_time = estimated_nodes.saturating_mul(1000) / nps;
                 let remaining = self.time_limit_ms.saturating_sub(elapsed);
                 if estimated_time > remaining * 2 {
                     return true;

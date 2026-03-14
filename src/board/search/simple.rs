@@ -196,7 +196,8 @@ impl SimpleSearchContext<'_> {
         let mut seen_hashes = [0u64; MAX_PLY];
         let mut unmake_infos = Vec::with_capacity(max_len);
 
-        for (seen_count, _) in (0..max_len).enumerate() {
+        let effective_max = max_len.min(MAX_PLY);
+        for (seen_count, _) in (0..effective_max).enumerate() {
             // Avoid infinite loops from TT collisions - linear scan is faster for small N
             let hash = self.board.hash;
             if seen_hashes[..seen_count].contains(&hash) {
@@ -387,7 +388,7 @@ impl SimpleSearchContext<'_> {
             let new_depth = if move_count == 1 {
                 depth + extension
             } else {
-                depth - 1 + extension
+                depth.saturating_sub(1) + extension
             };
 
             let mut score: i32;
@@ -639,15 +640,15 @@ impl SimpleSearchContext<'_> {
                 }
             }
         } else if m.is_capture() {
-            // Update capture history for captures
-            // Board is back to original state after unmake_move
+            // Update capture history for captures.
+            // After unmake_move: m.from() has the attacker, m.to() has the captured piece
+            // (restored by unmake). For en passant, the captured pawn is on a different
+            // square, so we handle it explicitly.
             if let Some((_, attacker)) = self.board.piece_at(m.from()) {
                 let victim = if m.is_en_passant() {
                     Piece::Pawn
-                } else if let Some((_, piece)) = self.board.piece_at(m.to()) {
-                    piece
                 } else {
-                    Piece::Pawn // Fallback, shouldn't happen
+                    self.board.piece_at(m.to()).map_or(Piece::Pawn, |(_, p)| p)
                 };
                 self.state
                     .tables

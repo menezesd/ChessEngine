@@ -92,30 +92,25 @@ impl Board {
                 }
             }
 
-            // Connected rooks bonus
+            // Connected rooks bonus — check all rook pairs (handles promotions to 3+ rooks)
             let rooks = self.pieces_of(color, Piece::Rook);
             if rooks.popcount() >= 2 {
-                let mut rook_squares: [usize; 2] = [0; 2];
-                let mut count = 0;
+                // Collect rook squares (max 10 rooks theoretically, but typically 2)
+                let mut rook_sqs = [0usize; 10];
+                let mut n = 0;
                 for sq in rooks.iter() {
-                    if count < 2 {
-                        rook_squares[count] = sq.as_index();
-                        count += 1;
+                    if n < 10 {
+                        rook_sqs[n] = sq.as_index();
+                        n += 1;
                     }
                 }
-
-                if count == 2 {
-                    // Check if rooks can see each other (on same rank or file with no pieces between)
-                    let r1 = rook_squares[0];
-                    let r2 = rook_squares[1];
-
-                    // Get rook attacks from first rook position
-                    let rook1_attacks = slider_attacks(r1, self.all_occupied.0, false);
-
-                    // If rook 1 can attack rook 2's square, they're connected
-                    if (rook1_attacks & (1u64 << r2)) != 0 {
-                        mg += sign * CONNECTED_ROOKS_MG;
-                        eg += sign * CONNECTED_ROOKS_EG;
+                for i in 0..n {
+                    for j in (i + 1)..n {
+                        let rook_attacks = slider_attacks(rook_sqs[i], self.all_occupied.0, false);
+                        if (rook_attacks & (1u64 << rook_sqs[j])) != 0 {
+                            mg += sign * CONNECTED_ROOKS_MG;
+                            eg += sign * CONNECTED_ROOKS_EG;
+                        }
                     }
                 }
             }

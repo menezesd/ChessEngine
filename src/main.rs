@@ -343,7 +343,7 @@ fn run_uci_session<R: BufRead>(first_line: Option<String>, reader: R) {
                 return;
             }
         }
-        stdout.flush().unwrap();
+        let _ = stdout.flush();
     }
 
     for line in reader.lines() {
@@ -358,7 +358,7 @@ fn run_uci_session<R: BufRead>(first_line: Option<String>, reader: R) {
             }
         }
 
-        stdout.flush().unwrap();
+        let _ = stdout.flush();
     }
 }
 

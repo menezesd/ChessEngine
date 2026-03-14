@@ -38,14 +38,19 @@ pub struct SearchJob {
     handle: JoinHandle<()>,
     /// Optional handle to the timer thread enforcing hard stops
     timer_handle: Option<JoinHandle<()>>,
+    /// Optional handle to the ponderhit timer thread
+    ponderhit_timer_handle: Option<JoinHandle<()>>,
 }
 
 impl SearchJob {
     /// Stop the search and wait for the thread to finish
-    pub fn stop_and_wait(self) {
+    pub fn stop_and_wait(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.handle.join();
         if let Some(timer) = self.timer_handle {
+            let _ = timer.join();
+        }
+        if let Some(timer) = self.ponderhit_timer_handle.take() {
             let _ = timer.join();
         }
     }
@@ -57,7 +62,7 @@ impl SearchJob {
     }
 
     /// Handle ponderhit - transition from pondering to real search
-    pub fn ponderhit(&self) {
+    pub fn ponderhit(&mut self) {
         if self.pondering.load(Ordering::Relaxed) {
             let start = Instant::now();
             let hard_deadline = start + Duration::from_millis(self.planned_hard_time_ms);
@@ -67,15 +72,16 @@ impl SearchJob {
                 Some(hard_deadline),
             );
 
-            // Spawn timer thread to enforce hard deadline
+            // Spawn timer thread to enforce hard deadline, storing handle for cleanup
             let stop_timer = Arc::clone(&self.stop);
-            thread::spawn(move || {
+            let handle = thread::spawn(move || {
                 let now = Instant::now();
                 if hard_deadline > now {
                     thread::sleep(hard_deadline - now);
                 }
                 stop_timer.store(true, Ordering::Relaxed);
             });
+            self.ponderhit_timer_handle = Some(handle);
 
             self.pondering.store(false, Ordering::Relaxed);
         }
@@ -223,7 +229,7 @@ impl EngineController {
 
     /// Handle ponderhit
     pub fn ponderhit(&mut self) {
-        if let Some(job) = &self.current_job {
+        if let Some(job) = &mut self.current_job {
             job.ponderhit();
         }
     }
@@ -391,6 +397,7 @@ impl EngineController {
                 planned_hard_time_ms: params.hard_time_ms,
                 handle,
                 timer_handle,
+                ponderhit_timer_handle: None,
             });
         } else {
             // Single-threaded search
@@ -424,6 +431,7 @@ impl EngineController {
                 planned_hard_time_ms: params.hard_time_ms,
                 handle,
                 timer_handle,
+                ponderhit_timer_handle: None,
             });
         }
     }
