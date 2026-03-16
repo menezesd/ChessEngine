@@ -516,7 +516,7 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Evaluation for pruning and qsearch (main workhorse).
-    /// Uses HCE for now; switch to NNUE once better weights are trained.
+    /// Uses HCE; NNUE needs more training data to surpass HCE quality.
     #[inline]
     fn evaluate_simple(&self, _ply: usize) -> i32 {
         self.board.evaluate_simple()
