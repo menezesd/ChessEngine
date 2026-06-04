@@ -10,6 +10,7 @@ pub mod command;
 pub mod options;
 pub mod print;
 pub mod report;
+pub mod session;
 pub mod time;
 
 pub use time::TimeControl;
@@ -48,6 +49,8 @@ impl From<FenError> for UciError {
     }
 }
 
+const POSITION_FEN_FIELDS: usize = 6;
+
 /// Parse a move in UCI format (e.g., "e2e4", "e7e8q").
 ///
 /// Delegates to `Board::parse_move`. Returns `None` if the move is invalid.
@@ -56,45 +59,52 @@ pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     board.parse_move(uci_string).ok()
 }
 
+fn parse_position_source(parts: &[&str]) -> Result<(Board, usize), UciError> {
+    let Some(kind) = parts.get(1) else {
+        return Err(UciError::MissingParts);
+    };
+
+    match *kind {
+        "startpos" => Ok((Board::new(), 2)),
+        "fen" => {
+            let fen_start = 2;
+            let fen_end = fen_start + POSITION_FEN_FIELDS;
+            if parts.len() < fen_end {
+                return Err(UciError::MissingParts);
+            }
+            let fen = parts[fen_start..fen_end].join(" ");
+            Ok((Board::try_from_fen(&fen)?, fen_end))
+        }
+        _ => Err(UciError::MissingParts),
+    }
+}
+
+fn apply_position_moves(board: &mut Board, moves: &[&str]) -> Result<(), UciError> {
+    for move_str in moves {
+        let mv = board
+            .parse_move(move_str)
+            .map_err(|e| UciError::InvalidMove {
+                move_str: (*move_str).to_string(),
+                error: e,
+            })?;
+        board.make_move(mv);
+    }
+    Ok(())
+}
+
 /// Parse a UCI position command, returning an error on failure.
 ///
 /// Supports both "position startpos" and "position fen <fen>" formats,
 /// optionally followed by "moves <move1> <move2> ...".
 pub fn try_parse_position_command(board: &mut Board, parts: &[&str]) -> Result<(), UciError> {
-    let mut i = 1;
-
-    if i >= parts.len() {
-        return Err(UciError::MissingParts);
-    }
-
-    if parts[i] == "startpos" {
-        *board = Board::new();
-        i += 1;
-    } else if parts[i] == "fen" {
-        if i + 6 >= parts.len() {
-            return Err(UciError::MissingParts);
-        }
-        let fen = parts[i + 1..i + 7].join(" ");
-        *board = Board::try_from_fen(&fen)?;
-        i += 7;
-    } else {
-        return Err(UciError::MissingParts);
-    }
+    let (mut parsed_board, mut i) = parse_position_source(parts)?;
 
     if i < parts.len() && parts[i] == "moves" {
         i += 1;
-        while i < parts.len() {
-            let mv = board
-                .parse_move(parts[i])
-                .map_err(|e| UciError::InvalidMove {
-                    move_str: parts[i].to_string(),
-                    error: e,
-                })?;
-            board.make_move(mv);
-            i += 1;
-        }
+        apply_position_moves(&mut parsed_board, &parts[i..])?;
     }
 
+    *board = parsed_board;
     Ok(())
 }
 
@@ -111,4 +121,69 @@ pub fn parse_position_command(board: &mut Board, parts: &[&str]) {
 #[must_use]
 pub fn format_uci_move(mv: &Move) -> String {
     mv.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_parse_position_startpos_moves() {
+        let mut board = Board::empty();
+        try_parse_position_command(&mut board, &["position", "startpos", "moves", "e2e4"]).unwrap();
+
+        assert!(!board.white_to_move());
+    }
+
+    #[test]
+    fn try_parse_position_fen() {
+        let mut board = Board::new();
+        try_parse_position_command(
+            &mut board,
+            &[
+                "position",
+                "fen",
+                "8/8/8/8/8/8/8/K1k5",
+                "b",
+                "-",
+                "-",
+                "0",
+                "1",
+            ],
+        )
+        .unwrap();
+
+        assert!(!board.white_to_move());
+    }
+
+    #[test]
+    fn try_parse_position_rejects_missing_source() {
+        let mut board = Board::new();
+        let result = try_parse_position_command(&mut board, &["position"]);
+        assert!(matches!(result, Err(UciError::MissingParts)));
+    }
+
+    #[test]
+    fn try_parse_position_rejects_invalid_move() {
+        let mut board = Board::new();
+        let result =
+            try_parse_position_command(&mut board, &["position", "startpos", "moves", "e2e5"]);
+        assert!(matches!(result, Err(UciError::InvalidMove { .. })));
+    }
+
+    #[test]
+    fn try_parse_position_leaves_board_unchanged_after_invalid_later_move() {
+        let mut board = Board::new();
+        let original_hash = board.hash;
+        let original_side = board.side_to_move();
+
+        let result = try_parse_position_command(
+            &mut board,
+            &["position", "startpos", "moves", "e2e4", "e2e5"],
+        );
+
+        assert!(matches!(result, Err(UciError::InvalidMove { .. })));
+        assert_eq!(board.hash, original_hash);
+        assert_eq!(board.side_to_move(), original_side);
+    }
 }

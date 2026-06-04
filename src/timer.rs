@@ -2,6 +2,7 @@
 //!
 //! Provides deadline-based timers that can signal stop flags.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -21,6 +22,19 @@ fn duration_until(deadline: Instant) -> Option<Duration> {
     }
 }
 
+/// Return a deadline `millis` after `start`.
+///
+/// `u64::MAX` represents an unlimited deadline, and arithmetic overflow is
+/// treated as no finite deadline.
+#[must_use]
+pub fn deadline_after_ms(start: Instant, millis: u64) -> Option<Instant> {
+    if millis == u64::MAX {
+        None
+    } else {
+        start.checked_add(Duration::from_millis(millis))
+    }
+}
+
 /// A timer that signals a stop flag when a deadline is reached.
 ///
 /// The timer runs in a background thread and will automatically
@@ -28,6 +42,7 @@ fn duration_until(deadline: Instant) -> Option<Duration> {
 pub struct DeadlineTimer {
     handle: Option<JoinHandle<()>>,
     stop_flag: StopFlag,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl DeadlineTimer {
@@ -41,14 +56,19 @@ impl DeadlineTimer {
         }
 
         let flag_clone = stop_flag.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = Arc::clone(&cancelled);
         let handle = thread::spawn(move || {
             thread::sleep(duration);
-            flag_clone.stop();
+            if !cancelled_clone.load(Ordering::Relaxed) {
+                flag_clone.stop();
+            }
         });
 
         Some(DeadlineTimer {
             handle: Some(handle),
             stop_flag,
+            cancelled,
         })
     }
 
@@ -68,8 +88,7 @@ impl DeadlineTimer {
 
     /// Cancel the timer without triggering the stop flag.
     pub fn cancel(mut self) {
-        // Drop the handle without waiting - the thread will still run
-        // but the stop flag reference will be dropped
+        self.cancelled.store(true, Ordering::Relaxed);
         self.handle.take();
     }
 
@@ -116,34 +135,4 @@ pub fn spawn_deadline_timer_arc(deadline: Instant, stop: Arc<std::sync::atomic::
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_timer_triggers() {
-        let flag = StopFlag::new();
-        let timer = DeadlineTimer::start(Duration::from_millis(50), flag.clone());
-        assert!(timer.is_some());
-
-        thread::sleep(Duration::from_millis(100));
-        assert!(flag.is_stopped());
-    }
-
-    #[test]
-    fn test_timer_zero_duration() {
-        let flag = StopFlag::new();
-        let timer = DeadlineTimer::start(Duration::ZERO, flag.clone());
-        assert!(timer.is_none());
-    }
-
-    #[test]
-    fn test_deadline_in_past() {
-        let flag = StopFlag::new();
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .expect("1 second ago should be valid");
-        let timer = DeadlineTimer::start_at(Some(past), flag.clone());
-        assert!(timer.is_none());
-        assert!(flag.is_stopped());
-    }
-}
+mod tests;

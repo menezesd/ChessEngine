@@ -7,6 +7,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::table_size::rounded_bucket_count;
+
 /// Entry returned from pawn hash table probe
 #[derive(Clone, Copy, Debug)]
 pub struct PawnHashEntry {
@@ -69,10 +71,21 @@ impl PawnSlot {
     fn is_empty(&self) -> bool {
         self.data.load(Ordering::Relaxed) == 0
     }
+
+    fn clear(&self) {
+        self.key_xor.store(0, Ordering::Relaxed);
+        self.data.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Number of slots per bucket
 const BUCKET_SIZE: usize = 2;
+const BYTES_PER_KIB: usize = 1024;
+const DEFAULT_BUCKETS: usize = 1024;
+
+fn pawn_bucket_count(size_kb: usize, bucket_size: usize) -> usize {
+    rounded_bucket_count(size_kb, BYTES_PER_KIB, bucket_size, DEFAULT_BUCKETS)
+}
 
 /// A bucket containing multiple slots for collision resolution
 #[repr(C)]
@@ -86,6 +99,27 @@ impl PawnBucket {
             slots: [PawnSlot::new(), PawnSlot::new()],
         }
     }
+
+    fn probe(&self, hash: u64) -> Option<PawnHashEntry> {
+        self.slots.iter().find_map(|slot| slot.probe(hash))
+    }
+
+    fn available_slot(&self, hash: u64) -> Option<&PawnSlot> {
+        self.slots
+            .iter()
+            .find(|slot| slot.is_empty() || slot.probe(hash).is_some())
+    }
+
+    fn store(&self, hash: u64, packed: u64) {
+        let slot = self.available_slot(hash).unwrap_or(&self.slots[0]);
+        slot.store(hash, packed);
+    }
+
+    fn clear(&self) {
+        for slot in &self.slots {
+            slot.clear();
+        }
+    }
 }
 
 /// Thread-safe pawn hash table using lockless hashing.
@@ -97,23 +131,13 @@ pub struct PawnHashTable {
     mask: usize,
 }
 
-// Safety: PawnSlot uses AtomicU64 which is Send + Sync
-unsafe impl Send for PawnHashTable {}
-unsafe impl Sync for PawnHashTable {}
-
 impl PawnHashTable {
     /// Create a new pawn hash table with the given size in kilobytes.
     /// Default is 1024 KB (1 MB).
     #[must_use]
     pub fn new(size_kb: usize) -> Self {
         let bucket_size = std::mem::size_of::<PawnBucket>();
-        let mut num_buckets = (size_kb * 1024) / bucket_size;
-
-        // Ensure power of 2 for efficient indexing
-        num_buckets = num_buckets.next_power_of_two() / 2;
-        if num_buckets == 0 {
-            num_buckets = 1024;
-        }
+        let num_buckets = pawn_bucket_count(size_kb, bucket_size);
 
         let mut buckets = Vec::with_capacity(num_buckets);
         for _ in 0..num_buckets {
@@ -134,39 +158,19 @@ impl PawnHashTable {
     /// Probe the table for cached pawn structure evaluation.
     #[must_use]
     pub fn probe(&self, pawn_hash: u64) -> Option<PawnHashEntry> {
-        let bucket = &self.buckets[self.index(pawn_hash)];
-        for slot in &bucket.slots {
-            if let Some(entry) = slot.probe(pawn_hash) {
-                return Some(entry);
-            }
-        }
-        None
+        self.buckets[self.index(pawn_hash)].probe(pawn_hash)
     }
 
     /// Store pawn structure evaluation in the table.
     pub fn store(&self, pawn_hash: u64, mg: i32, eg: i32) {
         let packed = pack_entry(mg, eg);
-        let bucket = &self.buckets[self.index(pawn_hash)];
-
-        // First pass: look for empty slot or matching hash
-        for slot in &bucket.slots {
-            if slot.is_empty() || slot.probe(pawn_hash).is_some() {
-                slot.store(pawn_hash, packed);
-                return;
-            }
-        }
-
-        // Replace first slot if no empty/matching slot found
-        bucket.slots[0].store(pawn_hash, packed);
+        self.buckets[self.index(pawn_hash)].store(pawn_hash, packed);
     }
 
     /// Clear all entries from the table.
     pub fn clear(&self) {
         for bucket in &self.buckets {
-            for slot in &bucket.slots {
-                slot.key_xor.store(0, Ordering::Relaxed);
-                slot.data.store(0, Ordering::Relaxed);
-            }
+            bucket.clear();
         }
     }
 }
@@ -178,66 +182,4 @@ impl Default for PawnHashTable {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pack_unpack_roundtrip() {
-        let test_cases = [(100, 200), (-500, 300), (0, 0), (i32::MAX, i32::MIN)];
-
-        for (mg, eg) in test_cases {
-            let packed = pack_entry(mg, eg);
-            let unpacked = unpack_entry(packed);
-            assert_eq!(unpacked.mg, mg);
-            assert_eq!(unpacked.eg, eg);
-        }
-    }
-
-    #[test]
-    fn test_store_and_probe() {
-        let table = PawnHashTable::new(64);
-        let hash = 0x123456789ABCDEF0;
-
-        table.store(hash, 150, -50);
-
-        let entry = table.probe(hash).expect("should find entry");
-        assert_eq!(entry.mg, 150);
-        assert_eq!(entry.eg, -50);
-    }
-
-    #[test]
-    fn test_no_false_positives() {
-        let table = PawnHashTable::new(64);
-        let hash1 = 0x123456789ABCDEF0;
-        let hash2 = 0xFEDCBA9876543210;
-
-        table.store(hash1, 100, 200);
-
-        assert!(table.probe(hash2).is_none());
-    }
-
-    #[test]
-    fn test_update_existing() {
-        let table = PawnHashTable::new(64);
-        let hash = 0x123456789ABCDEF0;
-
-        table.store(hash, 100, 200);
-        table.store(hash, 300, 400);
-
-        let entry = table.probe(hash).expect("should find entry");
-        assert_eq!(entry.mg, 300);
-        assert_eq!(entry.eg, 400);
-    }
-
-    #[test]
-    fn test_clear() {
-        let table = PawnHashTable::new(64);
-        let hash = 0x123456789ABCDEF0;
-
-        table.store(hash, 100, 200);
-        assert!(table.probe(hash).is_some());
-
-        table.clear();
-        assert!(table.probe(hash).is_none());
-    }
-}
+mod tests;

@@ -35,11 +35,12 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let (w_mg, w_eg) = self.eval_weak_squares_for_color(Color::White, ctx);
-        let (b_mg, b_eg) = self.eval_weak_squares_for_color(Color::Black, ctx);
-
-        mg += w_mg - b_mg;
-        eg += w_eg - b_eg;
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let (color_mg, color_eg) = self.eval_weak_squares_for_color(color, ctx);
+            mg += sign * color_mg;
+            eg += sign * color_eg;
+        }
 
         (mg, eg)
     }
@@ -179,71 +180,4 @@ impl Board {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_hole_detection() {
-        // Position with weak d5 square for black (no pawn can defend it)
-        let board: Board = "rnbqkb1r/pp2pppp/5n2/2pp4/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq - 0 4"
-            .parse()
-            .unwrap();
-        let holes = board.find_holes(Color::Black);
-        // The function should identify some holes
-        assert!(holes.0 != u64::MAX, "not all squares should be holes");
-    }
-
-    #[test]
-    fn test_pawn_attack_span() {
-        let board: Board = "8/8/8/8/3P4/8/8/8 w - - 0 1".parse().unwrap();
-        let span = board.pawn_attack_span(Color::White);
-        // Pawn on d4 - attack span should include c5, e5 and squares ahead on c,e files
-        assert!(span.0 != 0, "pawn should have attack span");
-    }
-
-    #[test]
-    fn test_weak_squares_evaluation() {
-        // Just verify the function runs and produces a value
-        let board: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let ctx = board.compute_attack_context();
-        let (mg, eg) = board.eval_weak_squares(&ctx);
-        // Starting position should be roughly balanced
-        assert!(mg.abs() < 30, "starting position weak squares mg: {mg}");
-        assert!(eg.abs() < 30, "starting position weak squares eg: {eg}");
-    }
-
-    #[test]
-    fn test_color_weakness_no_bishop() {
-        // White has traded light-squared bishop, many holes on light squares
-        let board: Board = "8/8/8/8/8/8/PPPPPPPP/RNBQK1NR w KQ - 0 1".parse().unwrap();
-        let (mg, eg) = board.eval_color_weakness(Color::White);
-        // Without considering pawn structure, this is just checking the function works
-        assert!(mg <= 0 && eg <= 0, "color weakness should not give bonus");
-    }
-
-    #[test]
-    fn test_weak_squares_symmetry() {
-        // Symmetric position should be balanced
-        let board = Board::new();
-        let ctx = board.compute_attack_context();
-        let (mg, eg) = board.eval_weak_squares(&ctx);
-        assert!(
-            mg.abs() < 20,
-            "symmetric weak squares should be near zero: {mg}"
-        );
-        assert!(
-            eg.abs() < 20,
-            "symmetric weak squares eg should be near zero: {eg}"
-        );
-    }
-
-    #[test]
-    fn test_no_pawns_no_span() {
-        // No pawns means no attack span
-        let board: Board = "8/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
-        let span = board.pawn_attack_span(Color::White);
-        assert_eq!(span.0, 0, "no pawns should mean no attack span");
-    }
-}
+mod tests;

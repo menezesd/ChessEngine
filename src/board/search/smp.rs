@@ -9,90 +9,19 @@
 //! - Helper threads searching at depth+1 populate TT for main thread
 //! - Time-to-depth speedup is modest, but playing strength gains are significant
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+mod worker;
+
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use crate::board::nnue::NnueNetwork;
-use crate::board::{Board, Move};
-use crate::tt::TranspositionTable;
+use crate::board::Board;
 
-use super::constants::SCORE_INFINITE;
-use super::simple::simple_search;
-use super::{SearchConfig, SearchInfoCallback, SearchParams, SearchResult, SearchState};
-
-/// Shared state across all worker threads
-pub struct SharedSearchState {
-    /// Thread-safe transposition table
-    pub tt: Arc<TranspositionTable>,
-    /// Thread-safe pawn hash table
-    pub pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
-    /// Shared NNUE network (optional)
-    pub nnue: Option<Arc<NnueNetwork>>,
-    /// Stop flag checked by all workers
-    pub stop: Arc<AtomicBool>,
-    /// Global node counter (sum of all workers)
-    pub total_nodes: Arc<AtomicU64>,
-    /// Maximum selective depth seen
-    pub max_seldepth: Arc<AtomicU64>,
-    /// TT generation for aging
-    pub generation: u16,
-    /// Search parameters
-    pub params: SearchParams,
-}
-
-impl SharedSearchState {
-    /// Create with a specific TT, pawn hash table, and optional NNUE network
-    pub fn new(
-        tt: Arc<TranspositionTable>,
-        pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
-        nnue: Option<Arc<NnueNetwork>>,
-        stop: Arc<AtomicBool>,
-        generation: u16,
-    ) -> Self {
-        SharedSearchState {
-            tt,
-            pawn_hash,
-            nnue,
-            stop,
-            total_nodes: Arc::new(AtomicU64::new(0)),
-            max_seldepth: Arc::new(AtomicU64::new(0)),
-            generation,
-            params: SearchParams::default(),
-        }
-    }
-
-    /// Update seldepth if this value is higher
-    pub fn update_seldepth(&self, seldepth: u32) {
-        let mut current = self.max_seldepth.load(Ordering::Relaxed);
-        while seldepth as u64 > current {
-            match self.max_seldepth.compare_exchange_weak(
-                current,
-                seldepth as u64,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(c) => current = c,
-            }
-        }
-    }
-
-    /// Add nodes to global counter
-    pub fn add_nodes(&self, nodes: u64) {
-        self.total_nodes.fetch_add(nodes, Ordering::Relaxed);
-    }
-}
-
-/// Result from a single worker thread
-#[derive(Debug, Clone)]
-pub struct WorkerResult {
-    pub worker_id: usize,
-    pub best_move: Option<Move>,
-    pub score: i32,
-    pub depth: u32,
-    pub nodes: u64,
-}
+use super::{
+    constants::DEFAULT_MAX_DEPTH, SearchConfig, SearchInfoCallback, SearchResult, SearchState,
+};
+use worker::{run_worker, WorkerSearchConfig};
+pub use worker::{SharedSearchState, WorkerResult};
 
 /// Configuration for SMP search
 #[derive(Clone)]
@@ -113,21 +42,12 @@ impl Default for SmpConfig {
     fn default() -> Self {
         SmpConfig {
             num_threads: 1,
-            max_depth: 64,
+            max_depth: DEFAULT_MAX_DEPTH,
             time_limit_ms: 0,
             node_limit: 0,
             info_callback: None,
         }
     }
-}
-
-/// Configuration passed to each worker thread
-#[derive(Clone)]
-struct WorkerSearchConfig {
-    max_depth: u32,
-    time_limit_ms: u64,
-    node_limit: u64,
-    info_callback: Option<SearchInfoCallback>,
 }
 
 impl SmpConfig {
@@ -153,7 +73,7 @@ impl SmpConfig {
     /// Set max depth
     #[must_use]
     pub fn depth(mut self, max_depth: u32) -> Self {
-        self.max_depth = max_depth;
+        self.max_depth = max_depth.min(DEFAULT_MAX_DEPTH);
         self
     }
 
@@ -179,27 +99,41 @@ impl SmpConfig {
     }
 }
 
-/// Get depth offset for a worker thread.
-///
-/// Thread 0 (main): searches at target depth
-/// Thread 1: searches at depth + 1 (populates TT with deeper entries)
-/// Thread 2: searches at depth (different move order due to separate tables)
-/// Thread 3: searches at depth + 1
-/// etc.
-fn worker_depth_offset(worker_id: usize) -> i32 {
-    // Odd workers search deeper, even workers search at target depth
-    #[allow(clippy::match_same_arms)]
-    match worker_id % 4 {
-        0 => 0, // Main worker: target depth
-        1 => 1, // Search deeper
-        2 => 0, // Same depth, different ordering
-        3 => 1, // Search deeper
-        _ => 0,
-    }
-}
-
 /// Search thread stack size (32 MB to handle deep recursion)
 const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
+
+fn best_worker_move(results: &[WorkerResult]) -> Option<crate::board::Move> {
+    let main_result = results
+        .iter()
+        .find(|r| r.worker_id == 0 && r.best_move.is_some());
+    let best_result = main_result.or_else(|| {
+        results
+            .iter()
+            .filter(|r| r.best_move.is_some())
+            .max_by_key(|r| r.depth)
+    });
+
+    best_result.and_then(|r| r.best_move)
+}
+
+fn extract_smp_ponder_move(
+    board: &Board,
+    shared: &SharedSearchState,
+    best_move: Option<crate::board::Move>,
+) -> Option<crate::board::Move> {
+    best_move.and_then(|mv| {
+        let mut temp_board = board.clone();
+        let info = temp_board.make_move(mv);
+        let legal_moves = temp_board.generate_moves();
+        let ponder = shared
+            .tt
+            .probe(temp_board.hash)
+            .and_then(|entry| entry.best_move())
+            .filter(|pmv| legal_moves.iter().any(|legal| legal == pmv));
+        temp_board.unmake_move(mv, info);
+        ponder
+    })
+}
 
 /// Run parallel search using Lazy SMP.
 ///
@@ -238,6 +172,7 @@ pub fn smp_search(
         state.shared_tt(),
         state.shared_pawn_hash(),
         state.shared_nnue(),
+        state.shared_static_nnue(),
         Arc::clone(&stop),
         state.generation,
     ));
@@ -277,33 +212,8 @@ pub fn smp_search(
     state.stats.nodes = shared.total_nodes.load(Ordering::Relaxed);
     state.stats.seldepth = shared.max_seldepth.load(Ordering::Relaxed) as u32;
 
-    // Select best result: prefer main worker (worker 0) as its search is most complete.
-    // Only use helper results if main worker has no result.
-    let main_result = results
-        .iter()
-        .find(|r| r.worker_id == 0 && r.best_move.is_some());
-    let best_result = main_result.or_else(|| {
-        results
-            .iter()
-            .filter(|r| r.best_move.is_some())
-            .max_by_key(|r| r.depth)
-    });
-
-    let best_move = best_result.and_then(|r| r.best_move);
-
-    // Extract ponder move from TT
-    let ponder_move = best_move.and_then(|mv| {
-        let mut temp_board = board.clone();
-        let info = temp_board.make_move(mv);
-        let ponder = shared.tt.probe(temp_board.hash).and_then(|entry| {
-            entry.best_move().filter(|pmv| {
-                let moves = temp_board.generate_moves();
-                moves.iter().any(|m| m == pmv)
-            })
-        });
-        temp_board.unmake_move(mv, info);
-        ponder
-    });
+    let best_move = best_worker_move(&results);
+    let ponder_move = extract_smp_ponder_move(board, &shared, best_move);
 
     SearchResult {
         best_move,
@@ -311,62 +221,15 @@ pub fn smp_search(
     }
 }
 
-/// Run a single worker thread
-#[allow(clippy::needless_pass_by_value)]
-fn run_worker(
-    worker_id: usize,
-    mut board: Board,
-    shared: Arc<SharedSearchState>,
-    config: WorkerSearchConfig,
-) -> WorkerResult {
-    // Create local SearchState for this worker with shared TT, pawn hash, and NNUE
-    let mut local_state = SearchState::with_shared_tables(
-        Arc::clone(&shared.tt),
-        Arc::clone(&shared.pawn_hash),
-        shared.nnue.clone(),
-        shared.generation,
-    );
-    local_state.params = shared.params.clone();
+#[cfg(test)]
+mod tests {
+    use super::{SmpConfig, DEFAULT_MAX_DEPTH};
 
-    // Reset local tables for this worker
-    local_state.tables.history.decay();
-    local_state.tables.killer_moves.reset();
-    local_state.tables.counter_moves.reset();
-
-    // Calculate this worker's depth offset
-    // Helper threads search slightly deeper to populate TT for main thread
-    let depth_offset = worker_depth_offset(worker_id);
-    let search_depth = ((config.max_depth as i32) + depth_offset).max(1) as u32;
-
-    // Run search with iterative deepening (handled internally by simple_search)
-    // Each worker does full iterative deepening from depth 1 to search_depth
-    let move_result = simple_search(
-        &mut board,
-        &mut local_state,
-        search_depth,
-        config.time_limit_ms,
-        config.node_limit,
-        &shared.stop,
-        config.info_callback, // Main worker (id 0) reports info via callback
-    );
-
-    // Update shared stats
-    shared.add_nodes(local_state.stats.nodes);
-    shared.update_seldepth(local_state.stats.seldepth);
-
-    // Get best move and score
-    let best_move = move_result;
-    let best_score = if let Some(entry) = shared.tt.probe(board.hash) {
-        entry.score()
-    } else {
-        -SCORE_INFINITE
-    };
-
-    WorkerResult {
-        worker_id,
-        best_move,
-        score: best_score,
-        depth: search_depth,
-        nodes: local_state.stats.total_nodes,
+    #[test]
+    fn depth_clamps_to_default_max_depth() {
+        assert_eq!(
+            SmpConfig::with_threads(2).depth(u32::MAX).max_depth,
+            DEFAULT_MAX_DEPTH
+        );
     }
 }

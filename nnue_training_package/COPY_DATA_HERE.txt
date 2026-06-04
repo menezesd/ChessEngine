@@ -1,0 +1,1 @@
+Copy data/sf18_d14_25M.txt to this directory before training

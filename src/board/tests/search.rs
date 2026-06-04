@@ -325,7 +325,7 @@ fn continuation_history_in_search_state() {
     let score = state
         .tables
         .continuation_history
-        .score(Piece::Pawn, 0, &EMPTY_MOVE);
+        .score(Piece::Pawn, 0, EMPTY_MOVE);
     assert_eq!(score, 0);
 }
 
@@ -340,12 +340,9 @@ fn continuation_history_update_via_state() {
     state
         .tables
         .continuation_history
-        .update(Piece::Pawn, 20, &mv, 5);
+        .update(Piece::Pawn, 20, mv, 5);
 
-    let score = state
-        .tables
-        .continuation_history
-        .score(Piece::Pawn, 20, &mv);
+    let score = state.tables.continuation_history.score(Piece::Pawn, 20, mv);
     assert!(score > 0, "Score should increase after update");
 }
 
@@ -359,17 +356,11 @@ fn continuation_history_decay_via_state() {
     state
         .tables
         .continuation_history
-        .update(Piece::Pawn, 20, &mv, 10);
-    let before = state
-        .tables
-        .continuation_history
-        .score(Piece::Pawn, 20, &mv);
+        .update(Piece::Pawn, 20, mv, 10);
+    let before = state.tables.continuation_history.score(Piece::Pawn, 20, mv);
 
     state.tables.continuation_history.decay();
-    let after = state
-        .tables
-        .continuation_history
-        .score(Piece::Pawn, 20, &mv);
+    let after = state.tables.continuation_history.score(Piece::Pawn, 20, mv);
 
     assert!(after < before, "Score should decrease after decay");
 }
@@ -384,13 +375,10 @@ fn continuation_history_reset_via_state() {
     state
         .tables
         .continuation_history
-        .update(Piece::Pawn, 20, &mv, 10);
+        .update(Piece::Pawn, 20, mv, 10);
     state.tables.continuation_history.reset();
 
-    let score = state
-        .tables
-        .continuation_history
-        .score(Piece::Pawn, 20, &mv);
+    let score = state.tables.continuation_history.score(Piece::Pawn, 20, mv);
     assert_eq!(score, 0, "Score should be 0 after reset");
 }
 
@@ -406,7 +394,7 @@ fn history_table_bounds() {
     // Test with edge case indices - Ra1 to h8 (an impossible quiet move but valid indices)
     let mv = board.parse_move("a2a4").unwrap();
 
-    state.tables.history.update(&mv, 10, 0);
+    state.tables.history.update(&mv, 10);
     let score = state.tables.history.score(&mv);
     assert!(score > 0);
 }
@@ -420,7 +408,7 @@ fn history_table_saturating_add() {
 
     // Update many times to test saturation
     for _ in 0..1000 {
-        state.tables.history.update(&mv, 10, 0);
+        state.tables.history.update(&mv, 10);
     }
 
     let score = state.tables.history.score(&mv);

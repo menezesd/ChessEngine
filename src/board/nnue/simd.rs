@@ -11,6 +11,8 @@
 
 use super::network::HIDDEN_SIZE;
 
+mod scalar;
+
 /// Weight quantization factor (must match parent module)
 const QA: i16 = 255;
 
@@ -37,13 +39,13 @@ pub fn add_weights(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
         if is_x86_feature_detected!("avx2") {
             unsafe { add_weights_avx2(acc, weights) }
         } else {
-            add_weights_scalar(acc, weights)
+            scalar::add_weights(acc, weights)
         }
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        add_weights_scalar(acc, weights)
+        scalar::add_weights(acc, weights)
     }
 }
 
@@ -65,13 +67,13 @@ pub fn sub_weights(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
         if is_x86_feature_detected!("avx2") {
             unsafe { sub_weights_avx2(acc, weights) }
         } else {
-            sub_weights_scalar(acc, weights)
+            scalar::sub_weights(acc, weights)
         }
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        sub_weights_scalar(acc, weights)
+        scalar::sub_weights(acc, weights)
     }
 }
 
@@ -80,7 +82,7 @@ pub fn sub_weights(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
 /// Returns sum of: `screlu(acc[i]) * weights[i]` for i in `0..HIDDEN_SIZE`
 #[inline]
 #[must_use]
-pub fn screlu_dot(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
+pub fn screlu_dot(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i64 {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe { screlu_dot_neon(acc, weights) }
@@ -96,59 +98,14 @@ pub fn screlu_dot(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32
         if is_x86_feature_detected!("avx2") {
             unsafe { screlu_dot_avx2(acc, weights) }
         } else {
-            screlu_dot_scalar(acc, weights)
+            scalar::screlu_dot(acc, weights)
         }
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        screlu_dot_scalar(acc, weights)
+        scalar::screlu_dot(acc, weights)
     }
-}
-
-// ============================================================================
-// Scalar fallback implementations
-// Used on x86_64 without AVX2 and non-SIMD platforms.
-// Not used on aarch64 (NEON always available).
-// ============================================================================
-
-#[cfg(any(
-    not(any(target_arch = "x86_64", target_arch = "aarch64")),
-    all(target_arch = "x86_64", not(target_feature = "avx2"))
-))]
-#[inline]
-fn add_weights_scalar(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
-    for i in 0..HIDDEN_SIZE {
-        acc[i] = acc[i].saturating_add(weights[i]);
-    }
-}
-
-#[cfg(any(
-    not(any(target_arch = "x86_64", target_arch = "aarch64")),
-    all(target_arch = "x86_64", not(target_feature = "avx2"))
-))]
-#[inline]
-fn sub_weights_scalar(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
-    for i in 0..HIDDEN_SIZE {
-        acc[i] = acc[i].saturating_sub(weights[i]);
-    }
-}
-
-/// Scalar fallback for `screlu_dot`.
-#[cfg(any(
-    test,
-    not(any(target_arch = "x86_64", target_arch = "aarch64")),
-    all(target_arch = "x86_64", not(target_feature = "avx2"))
-))]
-#[inline]
-fn screlu_dot_scalar(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
-    let mut sum = 0i32;
-    for i in 0..HIDDEN_SIZE {
-        let clamped = i32::from(acc[i]).clamp(0, i32::from(QA));
-        let activated = clamped * clamped;
-        sum += activated * i32::from(weights[i]);
-    }
-    sum
 }
 
 // ============================================================================
@@ -158,7 +115,10 @@ fn screlu_dot_scalar(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> 
 #[cfg(target_arch = "aarch64")]
 unsafe fn add_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     use std::arch::aarch64::{vld1q_s16, vqaddq_s16, vst1q_s16};
-    const _: () = assert!(HIDDEN_SIZE.is_multiple_of(8), "HIDDEN_SIZE must be divisible by 8 for NEON");
+    const _: () = assert!(
+        HIDDEN_SIZE.is_multiple_of(8),
+        "HIDDEN_SIZE must be divisible by 8 for NEON"
+    );
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -175,7 +135,10 @@ unsafe fn add_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 #[cfg(target_arch = "aarch64")]
 unsafe fn sub_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     use std::arch::aarch64::{vld1q_s16, vqsubq_s16, vst1q_s16};
-    const _: () = assert!(HIDDEN_SIZE.is_multiple_of(8), "HIDDEN_SIZE must be divisible by 8 for NEON");
+    const _: () = assert!(
+        HIDDEN_SIZE.is_multiple_of(8),
+        "HIDDEN_SIZE must be divisible by 8 for NEON"
+    );
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -189,13 +152,16 @@ unsafe fn sub_weights_neon(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 }
 
 #[cfg(target_arch = "aarch64")]
-unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
+unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i64 {
     use std::arch::aarch64::{
         vaddq_s64, vdupq_n_s16, vdupq_n_s64, vget_high_s16, vget_high_s32, vget_low_s16,
         vget_low_s32, vgetq_lane_s64, vld1q_s16, vmaxq_s16, vminq_s16, vmovl_s16, vmovl_s32,
         vmulq_s32,
     };
-    const _: () = assert!(HIDDEN_SIZE.is_multiple_of(8), "HIDDEN_SIZE must be divisible by 8 for NEON");
+    const _: () = assert!(
+        HIDDEN_SIZE.is_multiple_of(8),
+        "HIDDEN_SIZE must be divisible by 8 for NEON"
+    );
 
     let acc_ptr = acc.as_ptr();
     let weights_ptr = weights.as_ptr();
@@ -240,7 +206,7 @@ unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
 
     // Horizontal sum
     let total = vaddq_s64(sum0, sum1);
-    (vgetq_lane_s64(total, 0) + vgetq_lane_s64(total, 1)) as i32
+    vgetq_lane_s64(total, 0) + vgetq_lane_s64(total, 1)
 }
 
 // ============================================================================
@@ -251,7 +217,10 @@ unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
 #[target_feature(enable = "avx2")]
 unsafe fn add_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     use std::arch::x86_64::*;
-    const _: () = assert!(HIDDEN_SIZE.is_multiple_of(16), "HIDDEN_SIZE must be divisible by 16 for AVX2");
+    const _: () = assert!(
+        HIDDEN_SIZE.is_multiple_of(16),
+        "HIDDEN_SIZE must be divisible by 16 for AVX2"
+    );
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -269,7 +238,10 @@ unsafe fn add_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 #[target_feature(enable = "avx2")]
 unsafe fn sub_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
     use std::arch::x86_64::*;
-    const _: () = assert!(HIDDEN_SIZE.is_multiple_of(16), "HIDDEN_SIZE must be divisible by 16 for AVX2");
+    const _: () = assert!(
+        HIDDEN_SIZE.is_multiple_of(16),
+        "HIDDEN_SIZE must be divisible by 16 for AVX2"
+    );
 
     let acc_ptr = acc.as_mut_ptr();
     let weights_ptr = weights.as_ptr();
@@ -284,9 +256,12 @@ unsafe fn sub_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn screlu_dot_avx2(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i32 {
+unsafe fn screlu_dot_avx2(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i64 {
     use std::arch::x86_64::*;
-    const _: () = assert!(HIDDEN_SIZE.is_multiple_of(16), "HIDDEN_SIZE must be divisible by 16 for AVX2");
+    const _: () = assert!(
+        HIDDEN_SIZE.is_multiple_of(16),
+        "HIDDEN_SIZE must be divisible by 16 for AVX2"
+    );
 
     let acc_ptr = acc.as_ptr();
     let weights_ptr = weights.as_ptr();
@@ -331,63 +306,18 @@ unsafe fn screlu_dot_avx2(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
     }
 
     let total = _mm256_add_epi64(sum_lo, sum_hi);
-    let mut result: [i64; 4] = [0; 4];
-    _mm256_storeu_si256(result.as_mut_ptr() as *mut __m256i, total);
+    horizontal_sum_i64x4_avx2(total)
+}
 
-    (result[0] + result[1] + result[2] + result[3]) as i32
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn horizontal_sum_i64x4_avx2(v: std::arch::x86_64::__m256i) -> i64 {
+    use std::arch::x86_64::{__m256i, _mm256_storeu_si256};
+
+    let mut result: [i64; 4] = [0; 4];
+    _mm256_storeu_si256(result.as_mut_ptr() as *mut __m256i, v);
+    result.iter().sum()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_add_weights() {
-        let mut acc = [100i16; HIDDEN_SIZE];
-        let weights = [50i16; HIDDEN_SIZE];
-
-        add_weights(&mut acc, &weights);
-
-        for &v in &acc {
-            assert_eq!(v, 150);
-        }
-    }
-
-    #[test]
-    fn test_sub_weights() {
-        let mut acc = [100i16; HIDDEN_SIZE];
-        let weights = [30i16; HIDDEN_SIZE];
-
-        sub_weights(&mut acc, &weights);
-
-        for &v in &acc {
-            assert_eq!(v, 70);
-        }
-    }
-
-    #[test]
-    fn test_add_weights_saturating() {
-        let mut acc = [i16::MAX - 10; HIDDEN_SIZE];
-        let weights = [20i16; HIDDEN_SIZE];
-
-        add_weights(&mut acc, &weights);
-
-        for &v in &acc {
-            assert_eq!(v, i16::MAX);
-        }
-    }
-
-    #[test]
-    fn test_screlu_dot_matches_scalar() {
-        let acc: [i16; HIDDEN_SIZE] = std::array::from_fn(|i| (i as i16 % 300) - 50);
-        let weights: [i16; HIDDEN_SIZE] = std::array::from_fn(|i| ((i as i16) % 200) - 100);
-
-        let scalar_result = screlu_dot_scalar(&acc, &weights);
-        let simd_result = screlu_dot(&acc, &weights);
-
-        assert_eq!(
-            scalar_result, simd_result,
-            "SIMD result {simd_result} doesn't match scalar {scalar_result}"
-        );
-    }
-}
+mod tests;

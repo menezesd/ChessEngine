@@ -35,11 +35,12 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let (w_mg, w_eg) = self.eval_piece_quality_for_color(Color::White, ctx);
-        let (b_mg, b_eg) = self.eval_piece_quality_for_color(Color::Black, ctx);
-
-        mg += w_mg - b_mg;
-        eg += w_eg - b_eg;
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let (color_mg, color_eg) = self.eval_piece_quality_for_color(color, ctx);
+            mg += sign * color_mg;
+            eg += sign * color_eg;
+        }
 
         (mg, eg)
     }
@@ -49,60 +50,33 @@ impl Board {
         let mut eg = 0;
 
         let own_pieces = self.occupied_by(color);
-        let enemy_attacks = ctx.all_attacks(color.opponent());
         let pawn_attacks = self.pawn_attacks(color.opponent());
 
         // Evaluate each piece type
         for sq in self.pieces_of(color, Piece::Knight).iter() {
-            let (piece_mg, piece_eg) = Self::eval_piece_activity(
-                sq.index(),
+            Self::add_piece_activity_score(
+                &mut mg,
+                &mut eg,
                 KNIGHT_ATTACKS[sq.index()],
                 own_pieces,
-                enemy_attacks,
                 pawn_attacks,
             );
-            mg += piece_mg;
-            eg += piece_eg;
         }
 
         for sq in self.pieces_of(color, Piece::Bishop).iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, true);
-            let (piece_mg, piece_eg) = Self::eval_piece_activity(
-                sq.index(),
-                attacks,
-                own_pieces,
-                enemy_attacks,
-                pawn_attacks,
-            );
-            mg += piece_mg;
-            eg += piece_eg;
+            Self::add_piece_activity_score(&mut mg, &mut eg, attacks, own_pieces, pawn_attacks);
         }
 
         for sq in self.pieces_of(color, Piece::Rook).iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, false);
-            let (piece_mg, piece_eg) = Self::eval_piece_activity(
-                sq.index(),
-                attacks,
-                own_pieces,
-                enemy_attacks,
-                pawn_attacks,
-            );
-            mg += piece_mg;
-            eg += piece_eg;
+            Self::add_piece_activity_score(&mut mg, &mut eg, attacks, own_pieces, pawn_attacks);
         }
 
         for sq in self.pieces_of(color, Piece::Queen).iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, true)
                 | slider_attacks(sq.index(), self.all_occupied.0, false);
-            let (piece_mg, piece_eg) = Self::eval_piece_activity(
-                sq.index(),
-                attacks,
-                own_pieces,
-                enemy_attacks,
-                pawn_attacks,
-            );
-            mg += piece_mg;
-            eg += piece_eg;
+            Self::add_piece_activity_score(&mut mg, &mut eg, attacks, own_pieces, pawn_attacks);
         }
 
         // Piece harmony
@@ -111,12 +85,23 @@ impl Board {
         (mg, eg)
     }
 
-    /// Evaluate activity of a single piece.
-    fn eval_piece_activity(
-        _sq: usize,
+    fn add_piece_activity_score(
+        mg: &mut i32,
+        eg: &mut i32,
         attacks: u64,
         own_pieces: Bitboard,
-        _enemy_attacks: Bitboard,
+        enemy_pawn_attacks: Bitboard,
+    ) {
+        let (piece_mg, piece_eg) =
+            Self::eval_piece_activity(attacks, own_pieces, enemy_pawn_attacks);
+        *mg += piece_mg;
+        *eg += piece_eg;
+    }
+
+    /// Evaluate activity of a single piece.
+    fn eval_piece_activity(
+        attacks: u64,
+        own_pieces: Bitboard,
         enemy_pawn_attacks: Bitboard,
     ) -> (i32, i32) {
         // Safe squares: not occupied by own pieces, not attacked by enemy pawns
@@ -175,64 +160,4 @@ impl Board {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_trapped_piece() {
-        // Knight trapped in corner
-        let board: Board = "8/8/1p6/p7/N7/8/8/8 w - - 0 1".parse().unwrap();
-        let ctx = board.compute_attack_context();
-        let (mg, _eg) = board.eval_piece_quality(&ctx);
-        // Knight on a4 with pawns on a5, b6 should be very restricted
-        assert!(mg < 10, "trapped knight should have penalty: {mg}");
-    }
-
-    #[test]
-    fn test_active_piece() {
-        // Knight in center with many squares
-        let board: Board = "8/8/8/3N4/8/8/8/8 w - - 0 1".parse().unwrap();
-        let ctx = board.compute_attack_context();
-        let (mg, _) = board.eval_piece_quality(&ctx);
-        // Central knight should be active
-        assert!(mg >= 0, "central knight should not have penalty");
-    }
-
-    #[test]
-    fn test_bishop_activity() {
-        // Active bishop on long diagonal
-        let board: Board = "8/8/8/8/8/8/6B1/8 w - - 0 1".parse().unwrap();
-        let ctx = board.compute_attack_context();
-        let (mg, _) = board.eval_piece_quality(&ctx);
-        // Diagonal bishop should be active
-        assert!(mg >= 0, "active bishop should not have penalty");
-    }
-
-    #[test]
-    fn test_piece_quality_symmetry() {
-        // Symmetric position
-        let board: Board = "r1bqkb1r/pppppppp/2n2n2/8/8/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let ctx = board.compute_attack_context();
-        let (mg, eg) = board.eval_piece_quality(&ctx);
-        assert!(
-            mg.abs() < 30,
-            "symmetric piece quality should be near zero: {mg}"
-        );
-        assert!(
-            eg.abs() < 30,
-            "symmetric piece quality eg should be near zero: {eg}"
-        );
-    }
-
-    #[test]
-    fn test_rook_activity() {
-        // Rook on open file
-        let board: Board = "8/8/8/8/8/8/8/4R3 w - - 0 1".parse().unwrap();
-        let ctx = board.compute_attack_context();
-        let (mg, _) = board.eval_piece_quality(&ctx);
-        // Open file rook should be active
-        assert!(mg >= 0, "rook on open file should not have penalty");
-    }
-}
+mod tests;

@@ -12,17 +12,21 @@
 //! println!("Starting position has {} legal moves", moves.len());
 //! ```
 
+mod accessors;
 mod attack_tables;
 mod builder;
 #[cfg(debug_assertions)]
 mod debug;
+mod draw;
 mod error;
 mod eval;
 mod eval_terms;
 mod eval_update;
 mod fen;
+mod hash;
 mod make_unmake;
 mod masks;
+mod move_application;
 mod movegen;
 pub mod nnue;
 pub mod prelude;
@@ -31,6 +35,7 @@ mod san;
 pub mod search;
 mod see;
 mod state;
+mod traits;
 mod types;
 
 #[cfg(test)]
@@ -56,7 +61,6 @@ pub use state::{NullMoveInfo, UnmakeInfo};
 pub use search::{SearchParams, SearchStats, SearchTables};
 
 pub(crate) use types::{
-    bit_for_square, castle_bit, file_to_index, rank_to_index, ScoredMoveList, ALL_CASTLING_RIGHTS,
-    CASTLE_BLACK_K, CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q, EMPTY_MOVE, MAX_PLY,
-    PROMOTION_PIECES,
+    bit_for_square, castle_bit, ScoredMoveList, ALL_CASTLING_RIGHTS, CASTLE_BLACK_K,
+    CASTLE_BLACK_Q, CASTLE_WHITE_K, CASTLE_WHITE_Q, EMPTY_MOVE, MAX_PLY, PROMOTION_PIECES,
 };

@@ -1,8 +1,10 @@
 //! Tests for search tables: killer moves, history, counter moves, and MVV-LVA.
 
-use crate::board::search::{CounterMoveTable, HistoryTable, KillerTable, SearchState};
+use crate::board::search::{
+    CaptureHistory, CounterMoveTable, HistoryTable, KillerTable, SearchState,
+};
 use crate::board::state::Board;
-use crate::board::{Move, Square, EMPTY_MOVE};
+use crate::board::{Move, Piece, Square, EMPTY_MOVE};
 
 fn make_board(fen: &str) -> Board {
     fen.parse().expect("valid fen")
@@ -46,6 +48,22 @@ fn test_killer_update_shifts_to_secondary() {
 
     assert_eq!(table.primary(0), mv2);
     assert_eq!(table.secondary(0), mv1);
+}
+
+#[test]
+fn test_killer_update_shifts_to_tertiary() {
+    let mut table = KillerTable::new();
+    let mv1 = make_move((1, 4), (3, 4));
+    let mv2 = make_move((1, 3), (3, 3));
+    let mv3 = make_move((1, 2), (3, 2));
+
+    table.update(0, mv1);
+    table.update(0, mv2);
+    table.update(0, mv3);
+
+    assert_eq!(table.primary(0), mv3);
+    assert_eq!(table.secondary(0), mv2);
+    assert_eq!(table.tertiary(0), mv1);
 }
 
 #[test]
@@ -97,6 +115,37 @@ fn test_killer_out_of_bounds_safe() {
 }
 
 // ============================================================================
+// Capture History Tests
+// ============================================================================
+
+#[test]
+fn test_capture_history_initial_zero() {
+    let table = CaptureHistory::new();
+
+    assert_eq!(table.score(Piece::Pawn, Piece::Queen), 0);
+}
+
+#[test]
+fn test_capture_history_update_uses_depth_cubed_bonus() {
+    let mut table = CaptureHistory::new();
+
+    table.update(Piece::Pawn, Piece::Queen, 3);
+
+    assert_eq!(table.score(Piece::Pawn, Piece::Queen), 27);
+}
+
+#[test]
+fn test_capture_history_saturates_at_max() {
+    let mut table = CaptureHistory::new();
+
+    for _ in 0..100 {
+        table.update(Piece::Pawn, Piece::Queen, 10);
+    }
+
+    assert_eq!(table.score(Piece::Pawn, Piece::Queen), 50_000);
+}
+
+// ============================================================================
 // History Table Tests
 // ============================================================================
 
@@ -112,8 +161,28 @@ fn test_history_update_increases_score() {
     let mut table = HistoryTable::new();
     let mv = make_move((1, 4), (3, 4));
 
-    table.update(&mv, 3, 0);
+    table.update(&mv, 3);
     assert!(table.score(&mv) > 0);
+}
+
+#[test]
+fn test_history_update_uses_depth_cubed_bonus() {
+    let mut table = HistoryTable::new();
+    let mv = make_move((1, 4), (3, 4));
+
+    table.update(&mv, 3);
+
+    assert_eq!(table.score(&mv), 27);
+}
+
+#[test]
+fn test_history_penalize_uses_depth_squared_penalty() {
+    let mut table = HistoryTable::new();
+    let mv = make_move((1, 4), (3, 4));
+
+    table.penalize(&mv, 4);
+
+    assert_eq!(table.score(&mv), -16);
 }
 
 #[test]
@@ -122,8 +191,8 @@ fn test_history_higher_depth_higher_bonus() {
     let mv1 = make_move((1, 4), (3, 4));
     let mv2 = make_move((1, 3), (3, 3));
 
-    table.update(&mv1, 2, 0); // depth 2: bonus = 8
-    table.update(&mv2, 4, 0); // depth 4: bonus = 64
+    table.update(&mv1, 2); // depth 2: bonus = 8
+    table.update(&mv2, 4); // depth 4: bonus = 64
 
     assert!(table.score(&mv2) > table.score(&mv1));
 }
@@ -133,9 +202,9 @@ fn test_history_accumulates() {
     let mut table = HistoryTable::new();
     let mv = make_move((1, 4), (3, 4));
 
-    table.update(&mv, 2, 0);
+    table.update(&mv, 2);
     let score1 = table.score(&mv);
-    table.update(&mv, 2, 0);
+    table.update(&mv, 2);
     let score2 = table.score(&mv);
 
     assert!(score2 > score1);
@@ -146,7 +215,7 @@ fn test_history_decay_reduces_scores() {
     let mut table = HistoryTable::new();
     let mv = make_move((1, 4), (3, 4));
 
-    table.update(&mv, 5, 0);
+    table.update(&mv, 5);
     let before = table.score(&mv);
     table.decay();
     let after = table.score(&mv);
@@ -159,7 +228,7 @@ fn test_history_reset_clears() {
     let mut table = HistoryTable::new();
     let mv = make_move((1, 4), (3, 4));
 
-    table.update(&mv, 5, 0);
+    table.update(&mv, 5);
     table.reset();
 
     assert_eq!(table.score(&mv), 0);

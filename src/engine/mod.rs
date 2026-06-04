@@ -5,9 +5,11 @@
 //! time control.
 
 mod controller;
+mod job;
 mod protocol;
 pub mod time;
 
-pub use controller::{EngineController, SearchJob, SearchParams};
+pub use controller::{EngineController, SearchParams};
+pub use job::SearchJob;
 pub use protocol::{CommandResult, Protocol, ProtocolType};
 pub use time::{build_search_request, compute_time_limits, TimeConfig, TimeControl};

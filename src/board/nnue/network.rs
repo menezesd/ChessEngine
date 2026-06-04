@@ -1,6 +1,6 @@
 //! NNUE network structure and evaluation.
 //!
-//! Implements a 768 -> 256 -> 1 architecture with:
+//! Implements a king-conditioned 49152 -> 256 -> 1 architecture with:
 //! - Dual perspective accumulators (white/black view)
 //! - Incremental updates for efficiency
 //! - `SCReLU` activation
@@ -11,8 +11,16 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-/// Input feature size: 64 squares × 6 piece types × 2 colors
-pub const INPUT_SIZE: usize = 768;
+const SQUARE_COUNT: usize = 64;
+const PIECE_TYPE_COUNT: usize = 6;
+const COLOR_COUNT: usize = 2;
+const PIECE_FEATURES_PER_COLOR: usize = PIECE_TYPE_COUNT * SQUARE_COUNT;
+const FEATURES_PER_KING_SQUARE: usize = COLOR_COUNT * PIECE_FEATURES_PER_COLOR;
+const VERTICAL_FLIP_MASK: usize = 0b11_1000;
+const BLACK_PERSPECTIVE: usize = 1;
+
+/// Input feature size: 64 king squares × 12 piece/color types × 64 piece squares.
+pub const INPUT_SIZE: usize = SQUARE_COUNT * FEATURES_PER_KING_SQUARE;
 
 /// Hidden layer size (must match trained network)
 pub const HIDDEN_SIZE: usize = 256;
@@ -83,7 +91,7 @@ impl NnueAccumulator {
 /// NNUE network weights
 pub struct NnueNetwork {
     /// Feature transformer weights `[INPUT_SIZE][HIDDEN_SIZE]`
-    pub feature_weights: Box<[[i16; HIDDEN_SIZE]; INPUT_SIZE]>,
+    pub feature_weights: Vec<[i16; HIDDEN_SIZE]>,
     /// Feature transformer biases `[HIDDEN_SIZE]`
     pub feature_bias: [i16; HIDDEN_SIZE],
     /// Output weights for white perspective `[HIDDEN_SIZE]`
@@ -99,14 +107,18 @@ impl NnueNetwork {
     pub fn load<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
+        Self::from_reader(&mut reader)
+    }
 
+    /// Load network from any reader.
+    fn from_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         // Read feature weights
-        let mut feature_weights = Box::new([[0i16; HIDDEN_SIZE]; INPUT_SIZE]);
-        for i in 0..INPUT_SIZE {
-            for j in 0..HIDDEN_SIZE {
+        let mut feature_weights = vec![[0i16; HIDDEN_SIZE]; INPUT_SIZE];
+        for row in feature_weights.iter_mut().take(INPUT_SIZE) {
+            for weight in row.iter_mut().take(HIDDEN_SIZE) {
                 let mut buf = [0u8; 2];
                 reader.read_exact(&mut buf)?;
-                feature_weights[i][j] = i16::from_le_bytes(buf);
+                *weight = i16::from_le_bytes(buf);
             }
         }
 
@@ -169,15 +181,15 @@ impl NnueNetwork {
             )
         };
 
-        // SCReLU activation and dot product
+        // SCReLU activation and dot product (returns i64 to avoid overflow)
         let us_output = simd::screlu_dot(us_acc, us_weights);
         let them_output = simd::screlu_dot(them_acc, them_weights);
 
         // Combine outputs and scale
-        let output = us_output + them_output + i32::from(self.output_bias) * QA;
+        let output = us_output + them_output + i64::from(self.output_bias) * QA as i64;
 
         // Scale to centipawns
-        output * SCALE / (QA * QA * QB)
+        (output * SCALE as i64 / (QA as i64 * QA as i64 * QB as i64)) as i32
     }
 }
 
@@ -189,15 +201,23 @@ pub fn feature_index(
     piece_color: usize,
     square: usize,
     perspective: usize,
+    king_square: usize,
 ) -> usize {
-    let (oriented_sq, oriented_color) = if perspective == 1 {
+    let (oriented_sq, oriented_king, oriented_color) = if perspective == BLACK_PERSPECTIVE {
         // Black's perspective - flip board vertically
-        (square ^ 0b11_1000, 1 - piece_color)
+        (
+            square ^ VERTICAL_FLIP_MASK,
+            king_square ^ VERTICAL_FLIP_MASK,
+            COLOR_COUNT - 1 - piece_color,
+        )
     } else {
         // White's perspective
-        (square, piece_color)
+        (square, king_square, piece_color)
     };
-    oriented_color * 384 + piece_type * 64 + oriented_sq
+    oriented_king * FEATURES_PER_KING_SQUARE
+        + oriented_color * PIECE_FEATURES_PER_COLOR
+        + piece_type * SQUARE_COUNT
+        + oriented_sq
 }
 
 /// Embedded default network (compiled into the binary)
@@ -218,54 +238,27 @@ impl NnueNetwork {
         let mut reader = Cursor::new(data);
         Self::from_reader(&mut reader)
     }
+}
 
-    /// Load network from any reader
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-        // Read feature weights
-        let mut feature_weights = Box::new([[0i16; HIDDEN_SIZE]; INPUT_SIZE]);
-        for i in 0..INPUT_SIZE {
-            for j in 0..HIDDEN_SIZE {
-                let mut buf = [0u8; 2];
-                reader.read_exact(&mut buf)?;
-                feature_weights[i][j] = i16::from_le_bytes(buf);
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::{feature_index, INPUT_SIZE};
 
-        // Read feature biases
-        let mut feature_bias = [0i16; HIDDEN_SIZE];
-        for elem in &mut feature_bias {
-            let mut buf = [0u8; 2];
-            reader.read_exact(&mut buf)?;
-            *elem = i16::from_le_bytes(buf);
-        }
+    #[test]
+    fn input_size_matches_feature_layout() {
+        assert_eq!(INPUT_SIZE, 64 * 12 * 64);
+    }
 
-        // Read output weights (white perspective)
-        let mut output_weights_white = [0i16; HIDDEN_SIZE];
-        for elem in &mut output_weights_white {
-            let mut buf = [0u8; 2];
-            reader.read_exact(&mut buf)?;
-            *elem = i16::from_le_bytes(buf);
-        }
+    #[test]
+    fn feature_index_uses_white_perspective_layout() {
+        assert_eq!(feature_index(2, 1, 10, 0, 4), 4 * 768 + 384 + 2 * 64 + 10);
+    }
 
-        // Read output weights (black perspective)
-        let mut output_weights_black = [0i16; HIDDEN_SIZE];
-        for elem in &mut output_weights_black {
-            let mut buf = [0u8; 2];
-            reader.read_exact(&mut buf)?;
-            *elem = i16::from_le_bytes(buf);
-        }
-
-        // Read output bias
-        let mut buf = [0u8; 2];
-        reader.read_exact(&mut buf)?;
-        let output_bias = i16::from_le_bytes(buf);
-
-        Ok(Self {
-            feature_weights,
-            feature_bias,
-            output_weights_white,
-            output_weights_black,
-            output_bias,
-        })
+    #[test]
+    fn feature_index_flips_square_and_color_for_black_perspective() {
+        assert_eq!(
+            feature_index(2, 1, 10, 1, 4),
+            (0b00_0100 ^ 0b11_1000) * 768 + 2 * 64 + (0b00_1010 ^ 0b11_1000)
+        );
     }
 }

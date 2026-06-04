@@ -47,11 +47,12 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let (w_mg, w_eg) = self.eval_imbalances_for_color(Color::White);
-        let (b_mg, b_eg) = self.eval_imbalances_for_color(Color::Black);
-
-        mg += w_mg - b_mg;
-        eg += w_eg - b_eg;
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let (color_mg, color_eg) = self.eval_imbalances_for_color(color);
+            mg += sign * color_mg;
+            eg += sign * color_eg;
+        }
 
         // Cross-side imbalances
         let (cross_mg, cross_eg) = self.eval_cross_imbalances();
@@ -80,8 +81,7 @@ impl Board {
         }
 
         // Knight vs bishop based on pawn count
-        let total_pawns = self.piece_count(Color::White, Piece::Pawn)
-            + self.piece_count(Color::Black, Piece::Pawn);
+        let total_pawns = self.total_pawns();
 
         // Knights are better with more pawns (closed positions)
         // Bishops are better with fewer pawns (open positions)
@@ -130,8 +130,7 @@ impl Board {
 
         // Minor piece imbalance (one side has bishop, other has knight)
         // Value depends on pawn structure
-        let total_pawns = self.piece_count(Color::White, Piece::Pawn)
-            + self.piece_count(Color::Black, Piece::Pawn);
+        let total_pawns = self.total_pawns();
 
         // In very open positions (few pawns), bishop > knight
         // In very closed positions (many pawns), knight might be better
@@ -150,79 +149,11 @@ impl Board {
 
         (mg, eg)
     }
+
+    fn total_pawns(&self) -> u32 {
+        self.piece_count(Color::White, Piece::Pawn) + self.piece_count(Color::Black, Piece::Pawn)
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bishop_pair_bonus() {
-        // Position with bishop pair for white
-        let board: Board = "8/8/8/8/8/8/8/2BB4 w - - 0 1".parse().unwrap();
-        let (mg, eg) = board.eval_imbalances_for_color(Color::White);
-        assert!(mg > 0 || eg > 0, "bishop pair should have bonus");
-    }
-
-    #[test]
-    fn test_knight_closed_position() {
-        // Closed position with many pawns
-        let board: Board = "8/pppppppp/8/8/8/8/PPPPPPPP/2N5 w - - 0 1".parse().unwrap();
-        let (mg, _) = board.eval_imbalances_for_color(Color::White);
-        // Knight should be valued more in closed position
-        assert!(mg >= 0, "knight in closed position should not be penalized");
-    }
-
-    #[test]
-    fn test_bishop_open_position() {
-        // Open position with few pawns - bishop should be better
-        let board: Board = "8/8/8/8/8/8/8/2B5 w - - 0 1".parse().unwrap();
-        let (mg, eg) = board.eval_imbalances_for_color(Color::White);
-        // Bishop should be good in open positions
-        assert!(
-            mg >= 0 || eg >= 0,
-            "bishop in open position should not be penalized"
-        );
-    }
-
-    #[test]
-    fn test_knight_pair_penalty() {
-        // Two knights - slight penalty
-        let board: Board = "8/8/8/8/8/8/8/2NN4 w - - 0 1".parse().unwrap();
-        let (mg, _) = board.eval_imbalances_for_color(Color::White);
-        // Knight pair should have penalty
-        assert!(mg < 0, "knight pair should have penalty: {mg}");
-    }
-
-    #[test]
-    fn test_rook_pair_vs_queen() {
-        // White has 2 rooks, black has queen
-        let board: Board = "4q3/8/8/8/8/8/8/R3R3 w - - 0 1".parse().unwrap();
-        let (mg, eg) = board.eval_imbalances();
-        // Two rooks vs queen should have slight bonus for rooks
-        assert!(
-            mg >= 0 || eg >= 0,
-            "rook pair vs queen should be reasonable"
-        );
-    }
-
-    #[test]
-    fn test_imbalances_symmetry() {
-        // Symmetric position
-        let board = Board::new();
-        let (mg, eg) = board.eval_imbalances();
-        assert!(mg.abs() < 20, "symmetric imbalances mg: {mg}");
-        assert!(eg.abs() < 20, "symmetric imbalances eg: {eg}");
-    }
-
-    #[test]
-    fn test_bishop_advantage_open() {
-        // Open position: white has bishop, black has knight
-        let board: Board = "8/8/8/8/8/8/8/2B2n2 w - - 0 1".parse().unwrap();
-        let (mg, eg) = board.eval_imbalances();
-        // In very open position, bishop advantage
-        // Just verify function runs
-        assert!((-50..=50).contains(&mg), "bishop vs knight mg: {mg}");
-        assert!((-50..=50).contains(&eg), "bishop vs knight eg: {eg}");
-    }
-}
+mod tests;

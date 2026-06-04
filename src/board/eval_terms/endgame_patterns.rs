@@ -28,12 +28,9 @@ impl Board {
         let mg = 0;
         let mut eg = 0;
 
-        let (w_eg, b_eg) = (
-            self.eval_endgame_for_color(Color::White),
-            self.eval_endgame_for_color(Color::Black),
-        );
-
-        eg += w_eg - b_eg;
+        for color in Color::BOTH {
+            eg += color.sign() * self.eval_endgame_for_color(color);
+        }
 
         // Check for fortress patterns
         if self.is_fortress() {
@@ -134,7 +131,9 @@ impl Board {
         // Check for rook pawn only situation
         let a_pawns = pawns.intersects(Bitboard::FILE_A);
         let h_pawns = pawns.intersects(Bitboard::FILE_H);
-        let other_pawns = !pawns.and(Bitboard::FILE_A.or(Bitboard::FILE_H).not()).is_empty();
+        let other_pawns = !pawns
+            .and(Bitboard::FILE_A.or(Bitboard::FILE_H).not())
+            .is_empty();
 
         // Only relevant if we only have rook pawns
         if other_pawns {
@@ -183,72 +182,4 @@ impl Board {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_king_centralization() {
-        // King on d5 - central
-        let bonus = Board::king_centralization_bonus(35); // d5 = 35
-        assert!(bonus > 0, "central king should have positive bonus");
-    }
-
-    #[test]
-    fn test_king_corner_less_central() {
-        // King in corner vs center
-        let corner_bonus = Board::king_centralization_bonus(0); // a1
-        let center_bonus = Board::king_centralization_bonus(35); // d5
-        assert!(
-            center_bonus > corner_bonus,
-            "central king should have more bonus than corner king"
-        );
-    }
-
-    #[test]
-    fn test_wrong_bishop() {
-        // White has h-pawn and dark-squared bishop (h8 is light, so wrong)
-        let board: Board = "8/7P/8/8/8/8/B7/8 w - - 0 1".parse().unwrap();
-        let penalty = board.eval_wrong_bishop(Color::White);
-        // a1 bishop is dark-squared, h8 is light - this is wrong bishop
-        assert!(penalty < 0, "wrong bishop should have penalty");
-    }
-
-    #[test]
-    fn test_correct_bishop() {
-        // White has h-pawn and light-squared bishop (h8 is dark, bishop is light)
-        let board: Board = "8/7P/8/8/8/8/1B6/8 w - - 0 1".parse().unwrap();
-        let penalty = board.eval_wrong_bishop(Color::White);
-        // b2 bishop is light-squared, h8 is dark - this is correct bishop
-        assert_eq!(penalty, 0, "correct bishop should have no penalty");
-    }
-
-    #[test]
-    fn test_rook_cut_off_black_king() {
-        // White rook on 7th rank cutting off black king on 6th rank
-        // Rook is between the king and the promotion square
-        let rooks = Bitboard(1u64 << 48); // a7 (rank 6)
-        let bonus = Board::eval_rook_cut_off(rooks, 44, Color::White); // Black king on e6 (rank 5)
-                                                                       // Rook on rank 6 cutting off king on rank 5 from rank 8
-        assert!(bonus > 0, "rook cutting off king should give bonus");
-    }
-
-    #[test]
-    fn test_no_wrong_bishop_with_multiple_pawns() {
-        // Wrong bishop only applies to rook pawn only situations
-        let board: Board = "8/7P/8/3P4/8/8/B7/8 w - - 0 1".parse().unwrap();
-        let penalty = board.eval_wrong_bishop(Color::White);
-        assert_eq!(penalty, 0, "wrong bishop only applies to rook pawn only");
-    }
-
-    #[test]
-    fn test_endgame_patterns_symmetry() {
-        // Symmetric endgame should be balanced
-        let board: Board = "4k3/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
-        let (mg, eg) = board.eval_endgame_patterns();
-        assert_eq!(mg, 0, "endgame patterns mg should be 0");
-        assert!(
-            eg.abs() < 10,
-            "symmetric kings should have near-zero eg: {eg}"
-        );
-    }
-}
+mod tests;

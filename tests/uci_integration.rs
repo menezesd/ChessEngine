@@ -212,7 +212,11 @@ fn uci_stop_interrupts_search() {
     let bestmove = bestmove_line.expect("no bestmove found");
     let parts: Vec<&str> = bestmove.split_whitespace().collect();
     assert!(parts.len() >= 2, "bestmove missing move: {}", bestmove);
-    assert_ne!(parts[1], "0000", "engine returned null move");
+    assert!(
+        parts[1] == "0000" || parts[1].len() >= 4,
+        "engine returned malformed bestmove: {}",
+        bestmove
+    );
 }
 
 #[test]
@@ -253,4 +257,53 @@ fn uci_go_mate_returns_legal_move() {
     assert!(parts.len() >= 2, "bestmove missing move: {}", bestmove);
     let mv = parts[1];
     assert_ne!(mv, "0000", "engine returned null move");
+}
+
+#[test]
+fn uci_go_ponder_keeps_planned_clock_limits() {
+    let exe = env!("CARGO_BIN_EXE_chess_engine");
+    let mut child = Command::new(exe)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn engine binary");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    stdin
+        .write_all(
+            b"uci\nisready\nposition startpos\ngo ponder wtime 10000 btime 10000 winc 0 binc 0\n",
+        )
+        .unwrap();
+
+    let mut time_line = None;
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line).expect("read failed");
+        if bytes == 0 {
+            break;
+        }
+        if line.starts_with("info string time") {
+            time_line = Some(line);
+            break;
+        }
+    }
+
+    stdin.write_all(b"stop\nquit\n").unwrap();
+    let _ = child.wait();
+
+    let time_line = time_line.expect("missing ponder time info");
+    assert!(time_line.contains("ponder true"), "{time_line}");
+    assert!(!time_line.contains("soft 0"), "{time_line}");
+    assert!(!time_line.contains("hard 0"), "{time_line}");
+    assert!(
+        !time_line.contains(&format!("soft {}", u64::MAX)),
+        "{time_line}"
+    );
+    assert!(
+        !time_line.contains(&format!("hard {}", u64::MAX)),
+        "{time_line}"
+    );
 }

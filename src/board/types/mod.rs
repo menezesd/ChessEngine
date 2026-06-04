@@ -31,4 +31,3 @@ pub(crate) use castling::{
 };
 pub(crate) use moves::{EMPTY_MOVE, MAX_PLY};
 pub(crate) use piece::PROMOTION_PIECES;
-pub(crate) use square::{file_to_index, rank_to_index};

@@ -1,16 +1,161 @@
 use std::time::Instant;
 
+mod aspiration;
+mod progress;
+
+use aspiration::AspirationWindow;
+use progress::SearchProgress;
+
 use super::{SimpleSearchContext, MATE_SCORE, MATE_THRESHOLD, SCORE_INFINITE};
+use crate::board::nnue::NnueAccumulator;
 use crate::board::search::SearchInfoCallback;
-use crate::board::{Move, SearchIterationInfo, SearchState, EMPTY_MOVE, MAX_PLY};
+use crate::board::{Board, Move, SearchIterationInfo, SearchState, EMPTY_MOVE, MAX_PLY};
 use std::sync::atomic::AtomicBool;
 
-/// Aspiration window constants
-const ASPIRATION_DELTA_SHALLOW: i32 = 35; // Initial delta for depth <= 5
-const ASPIRATION_DELTA_DEEP: i32 = 20; // Initial delta for depth > 5
-const ASPIRATION_MAX_DELTA: i32 = 800; // Fall back to full window above this
+const MILLISECONDS_PER_SECOND: u64 = 1000;
+const PERCENT_SCALE: u64 = 100;
+const UNSTABLE_BEST_MOVE_TIME_PERCENT: u64 = 130;
+const STABLE_BEST_MOVE_TIME_PERCENT: u64 = 80;
+const SCORE_DROP_TIME_PERCENT: u64 = 140;
+const SOFT_TIME_LIMIT_PERCENT: u64 = 40;
+const NEXT_DEPTH_NODE_ESTIMATE_NUMERATOR: u64 = 25;
+const NEXT_DEPTH_NODE_ESTIMATE_DENOMINATOR: u64 = 10;
+const NEXT_DEPTH_MIN_PREVIOUS_NODES: u64 = 5000;
+const NEXT_DEPTH_REMAINING_TIME_MULTIPLIER: u64 = 2;
+const ACCUMULATOR_STACK_EXTRA_PLY: usize = 64;
+
+fn search_context<'a>(
+    board: &'a mut Board,
+    state: &'a mut SearchState,
+    stop: &'a AtomicBool,
+    time_limit_ms: u64,
+    node_limit: u64,
+    info_callback: Option<SearchInfoCallback>,
+    root_moves: Vec<Move>,
+) -> SimpleSearchContext<'a> {
+    SimpleSearchContext {
+        board,
+        state,
+        stop,
+        start_time: Instant::now(),
+        time_limit_ms,
+        node_limit,
+        nodes: 0,
+        initial_depth: 1,
+        static_eval: [0; MAX_PLY],
+        previous_move: [EMPTY_MOVE; MAX_PLY],
+        previous_piece: [None; MAX_PLY],
+        info_callback,
+        root_moves,
+        acc_stack: vec![NnueAccumulator::default(); MAX_PLY + ACCUMULATOR_STACK_EXTRA_PLY]
+            .into_boxed_slice(),
+        static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + ACCUMULATOR_STACK_EXTRA_PLY]
+            .into_boxed_slice(),
+    }
+}
+
+fn available_root_moves(board: &mut Board, excluded_moves: &[Move]) -> Vec<Move> {
+    board
+        .generate_moves()
+        .iter()
+        .filter(|m| !excluded_moves.contains(m))
+        .copied()
+        .collect()
+}
+
+fn record_search_nodes(ctx: &mut SimpleSearchContext<'_>) {
+    ctx.state.stats.nodes = ctx.nodes;
+    ctx.state.stats.total_nodes = ctx.state.stats.total_nodes.saturating_add(ctx.nodes);
+}
+
+fn nodes_per_second(nodes: u64, elapsed_ms: u64) -> u64 {
+    nodes
+        .saturating_mul(MILLISECONDS_PER_SECOND)
+        .checked_div(elapsed_ms)
+        .unwrap_or_default()
+}
+
+fn scale_time_by_percent(time_ms: u64, percent: u64) -> u64 {
+    time_ms.saturating_mul(percent) / PERCENT_SCALE
+}
+
+fn mate_distance(score: i32) -> Option<i32> {
+    if score.abs() < MATE_THRESHOLD {
+        return None;
+    }
+
+    let mate_score = i64::from(MATE_SCORE);
+    let score = i64::from(score);
+    let distance = if score > 0 {
+        (mate_score - score + 1) / 2
+    } else {
+        -((mate_score + score + 1) / 2)
+    };
+
+    Some(distance.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+}
+
+pub struct SimpleSearchRequest<'a> {
+    pub max_depth: u32,
+    pub time_limit_ms: u64,
+    pub node_limit: u64,
+    pub info_callback: Option<SearchInfoCallback>,
+    pub excluded_moves: &'a [Move],
+    pub multipv_index: u32,
+}
+
+impl SimpleSearchRequest<'_> {
+    fn single(
+        max_depth: u32,
+        time_limit_ms: u64,
+        node_limit: u64,
+        info_callback: Option<SearchInfoCallback>,
+    ) -> Self {
+        Self {
+            max_depth,
+            time_limit_ms,
+            node_limit,
+            info_callback,
+            excluded_moves: &[],
+            multipv_index: 1,
+        }
+    }
+}
 
 impl SimpleSearchContext<'_> {
+    fn root_best_move_from_tt(&self) -> Option<Move> {
+        self.state
+            .tables
+            .tt
+            .probe(self.board.hash)
+            .and_then(|entry| entry.best_move())
+            .filter(|mv| *mv != EMPTY_MOVE && self.root_moves.contains(mv))
+    }
+
+    fn report_iteration(&self, depth: u32, score: i32, pv: &[Move], multipv_index: u32) {
+        let Some(cb) = &self.info_callback else {
+            return;
+        };
+
+        let elapsed = self.elapsed_ms();
+        let nps = nodes_per_second(self.nodes, elapsed);
+        let mate_in = mate_distance(score);
+
+        let info = SearchIterationInfo {
+            depth,
+            nodes: self.nodes,
+            nps,
+            time_ms: elapsed,
+            score,
+            mate_in,
+            pv: Self::format_pv(pv),
+            seldepth: self.state.stats.seldepth,
+            tt_hits: self.state.stats.tt_hits,
+            multipv: multipv_index,
+        };
+        cb(&info);
+    }
+
     /// Check if we should stop the current iteration based on time management.
     /// Returns true if we should stop iterating.
     fn should_stop_iteration(
@@ -26,27 +171,35 @@ impl SimpleSearchContext<'_> {
             return false;
         }
 
-        let elapsed = self.start_time.elapsed().as_millis() as u64;
+        let elapsed = self.elapsed_ms();
 
         // Base soft time, adjusted for stability and score changes
         let mut adjusted_soft_time = soft_time_ms;
         if stability_count < 3 {
-            adjusted_soft_time = adjusted_soft_time.saturating_mul(130) / 100;
+            adjusted_soft_time =
+                scale_time_by_percent(adjusted_soft_time, UNSTABLE_BEST_MOVE_TIME_PERCENT);
         } else if stability_count >= 5 {
-            adjusted_soft_time = adjusted_soft_time.saturating_mul(80) / 100;
+            adjusted_soft_time =
+                scale_time_by_percent(adjusted_soft_time, STABLE_BEST_MOVE_TIME_PERCENT);
         }
         if score < previous_score - 30 {
-            adjusted_soft_time = adjusted_soft_time.saturating_mul(140) / 100;
+            adjusted_soft_time = scale_time_by_percent(adjusted_soft_time, SCORE_DROP_TIME_PERCENT);
         }
 
         // Node-based time check: estimate if we can complete the next depth
-        if elapsed > 0 && prev_iter_nodes > 5000 && depth > 5 {
-            let nps = self.nodes.saturating_mul(1000) / elapsed;
-            if nps > 0 {
-                let estimated_nodes = prev_iter_nodes.saturating_mul(25) / 10;
-                let estimated_time = estimated_nodes.saturating_mul(1000) / nps;
+        if elapsed > 0 && prev_iter_nodes > NEXT_DEPTH_MIN_PREVIOUS_NODES && depth > 5 {
+            let nps = nodes_per_second(self.nodes, elapsed);
+            if let Some(estimated_time) = prev_iter_nodes
+                .saturating_mul(NEXT_DEPTH_NODE_ESTIMATE_NUMERATOR)
+                .checked_div(NEXT_DEPTH_NODE_ESTIMATE_DENOMINATOR)
+                .and_then(|nodes| {
+                    nodes
+                        .saturating_mul(MILLISECONDS_PER_SECOND)
+                        .checked_div(nps)
+                })
+            {
                 let remaining = self.time_limit_ms.saturating_sub(elapsed);
-                if estimated_time > remaining * 2 {
+                if estimated_time > remaining.saturating_mul(NEXT_DEPTH_REMAINING_TIME_MULTIPLIER) {
                     return true;
                 }
             }
@@ -55,10 +208,42 @@ impl SimpleSearchContext<'_> {
         elapsed >= adjusted_soft_time
     }
 
+    fn search_depth_with_aspiration(&mut self, depth: u32, score: i32) -> Option<i32> {
+        let mut window = AspirationWindow::new(depth, score);
+
+        loop {
+            let new_score = self.alphabeta(
+                depth,
+                window.alpha(),
+                window.beta(),
+                true,
+                0,
+                crate::board::EMPTY_MOVE,
+            );
+
+            if self.should_stop() {
+                return None;
+            }
+
+            if new_score.abs() >= MATE_THRESHOLD {
+                return Some(new_score);
+            }
+
+            if new_score >= window.beta() {
+                window.fail_high();
+            } else if new_score <= window.alpha() {
+                window.fail_low();
+            } else {
+                return Some(new_score);
+            }
+
+            window.use_full_window_if_needed();
+        }
+    }
+
     /// Iterative deepening with aspiration windows and time management.
     /// Uses `self.root_moves` for the moves to consider at root.
     /// `multipv_index`: which PV line this is (1 = best, 2 = second best, etc.)
-    #[allow(clippy::too_many_lines)]
     pub fn iterative_deepening_multipv(
         &mut self,
         max_depth: u32,
@@ -69,14 +254,10 @@ impl SimpleSearchContext<'_> {
         self.init_accumulator(0);
         let mut score = self.evaluate(0);
 
-        // Time management state
-        let mut previous_best_move: Option<Move> = None;
-        let mut previous_score = score;
-        let mut stability_count = 0u32;
-        let mut prev_iter_nodes = 0u64;
+        let mut progress = SearchProgress::new(score);
 
         // Soft time limit is ~40% of hard limit (can be exceeded for good reasons)
-        let soft_time_ms = self.time_limit_ms * 40 / 100;
+        let soft_time_ms = scale_time_by_percent(self.time_limit_ms, SOFT_TIME_LIMIT_PERCENT);
 
         // Reset history at start of search
         self.state.tables.reset_history();
@@ -94,83 +275,28 @@ impl SimpleSearchContext<'_> {
             if self.should_stop_iteration(
                 depth,
                 soft_time_ms,
-                stability_count,
+                progress.stability_count(),
                 score,
-                previous_score,
-                prev_iter_nodes,
+                progress.previous_score(),
+                progress.prev_iter_nodes(),
             ) {
                 break;
             }
 
             self.initial_depth = depth;
-
-            // Aspiration window - fixed delta, stability adjustments removed
-            let mut delta = if depth <= 5 {
-                ASPIRATION_DELTA_SHALLOW
-            } else {
-                ASPIRATION_DELTA_DEEP
+            let Some(new_score) = self.search_depth_with_aspiration(depth, score) else {
+                break;
             };
+            score = new_score;
 
-            let mut alpha = score.saturating_sub(delta);
-            let mut beta = score.saturating_add(delta);
-
-            loop {
-                let new_score =
-                    self.alphabeta(depth, alpha, beta, true, 0, crate::board::EMPTY_MOVE);
-
-                if self.should_stop() {
-                    break;
-                }
-
-                // If we found a mate score, accept it immediately
-                if new_score.abs() >= MATE_THRESHOLD {
-                    score = new_score;
-                    break;
-                }
-
-                if new_score >= beta {
-                    // Fail high - widen beta
-                    beta = beta.saturating_add(delta);
-                    delta = delta.saturating_mul(3) / 2; // Grow by 1.5x instead of 2x
-                } else if new_score <= alpha {
-                    // Fail low - widen alpha more aggressively
-                    alpha = alpha.saturating_sub(delta);
-                    delta = delta.saturating_mul(2); // Fail low is more critical, widen faster
-                } else {
-                    score = new_score;
-                    break;
-                }
-
-                // Prevent infinite loop - fall back to full window
-                if delta > ASPIRATION_MAX_DELTA {
-                    alpha = -SCORE_INFINITE;
-                    beta = SCORE_INFINITE;
-                }
-            }
-
-            // Get best move from TT
-            if let Some(entry) = self.state.tables.tt.probe(self.board.hash) {
-                if let Some(mv) = entry.best_move() {
-                    if mv != EMPTY_MOVE {
-                        // Verify move is in our root_moves (already filtered for MultiPV)
-                        if self.root_moves.contains(&mv) {
-                            best_move = Some(mv);
-                        }
-                    }
-                }
+            if let Some(mv) = self.root_best_move_from_tt() {
+                best_move = Some(mv);
             }
 
             // Update stability tracking for time management
-            if best_move == previous_best_move && best_move.is_some() {
-                stability_count = stability_count.saturating_add(1);
-            } else {
-                stability_count = 0;
-            }
-            previous_best_move = best_move;
-            previous_score = score;
-
             // Track nodes for this iteration (for node-based time scaling)
-            prev_iter_nodes = self.nodes.saturating_sub(iter_start_nodes);
+            let iter_nodes = self.nodes.saturating_sub(iter_start_nodes);
+            progress.update(best_move, score, iter_nodes);
 
             // Extract PV from TT, ensuring first move is our best_move
             let pv = if let Some(bm) = best_move {
@@ -178,36 +304,7 @@ impl SimpleSearchContext<'_> {
             } else {
                 self.extract_pv(depth as usize)
             };
-            let pv_str = Self::format_pv(&pv);
-
-            if let Some(cb) = &self.info_callback {
-                let elapsed = self.start_time.elapsed().as_millis() as u64;
-                let nps = if elapsed > 0 {
-                    self.nodes * 1000 / elapsed
-                } else {
-                    0
-                };
-                let mate_in = if score.abs() < MATE_THRESHOLD {
-                    None
-                } else if score > 0 {
-                    Some((MATE_SCORE - score + 1) / 2)
-                } else {
-                    Some(-(MATE_SCORE + score + 1) / 2)
-                };
-                let info = SearchIterationInfo {
-                    depth,
-                    nodes: self.nodes,
-                    nps,
-                    time_ms: elapsed,
-                    score,
-                    mate_in,
-                    pv: pv_str,
-                    seldepth: self.state.stats.seldepth,
-                    tt_hits: self.state.stats.tt_hits,
-                    multipv: multipv_index,
-                };
-                cb(&info);
-            }
+            self.report_iteration(depth, score, &pv, multipv_index);
         }
 
         best_move
@@ -227,43 +324,24 @@ pub fn simple_search(
     simple_search_multipv(
         board,
         state,
-        max_depth,
-        time_limit_ms,
-        node_limit,
         stop,
-        info_callback,
-        &[],
-        1,
+        SimpleSearchRequest::single(max_depth, time_limit_ms, node_limit, info_callback),
     )
 }
 
 /// Run the main search algorithm with `MultiPV` support
-#[allow(clippy::too_many_arguments)]
 pub fn simple_search_multipv(
     board: &mut crate::board::Board,
     state: &mut SearchState,
-    max_depth: u32,
-    time_limit_ms: u64,
-    node_limit: u64,
     stop: &AtomicBool,
-    info_callback: Option<SearchInfoCallback>,
-    excluded_moves: &[Move],
-    multipv_index: u32,
+    request: SimpleSearchRequest<'_>,
 ) -> Option<Move> {
     // Increment generation for TT aging (only on first PV line)
-    if multipv_index == 1 {
+    if request.multipv_index == 1 {
         state.generation = state.generation.wrapping_add(1);
     }
 
-    // Check for single legal move
-    let moves = board.generate_moves();
-
-    // Filter out excluded moves (for MultiPV)
-    let available_moves: Vec<Move> = moves
-        .iter()
-        .filter(|m| !excluded_moves.contains(m))
-        .copied()
-        .collect();
+    let available_moves = available_root_moves(board, request.excluded_moves);
 
     if available_moves.is_empty() {
         return None;
@@ -272,27 +350,46 @@ pub fn simple_search_multipv(
         return Some(available_moves[0]);
     }
 
-    let mut ctx = SimpleSearchContext {
+    let mut ctx = search_context(
         board,
         state,
         stop,
-        start_time: Instant::now(),
-        time_limit_ms,
-        node_limit,
-        nodes: 0,
-        initial_depth: 1,
-        static_eval: [0; MAX_PLY],
-        previous_move: [EMPTY_MOVE; MAX_PLY],
-        previous_piece: [None; MAX_PLY],
-        info_callback,
-        root_moves: available_moves,
-        acc_stack: vec![crate::board::nnue::NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-    };
+        request.time_limit_ms,
+        request.node_limit,
+        request.info_callback,
+        available_moves,
+    );
 
-    let result = ctx.iterative_deepening_multipv(max_depth, multipv_index);
-
-    ctx.state.stats.nodes = ctx.nodes;
-    ctx.state.stats.total_nodes = ctx.state.stats.total_nodes.saturating_add(ctx.nodes);
+    let result = ctx.iterative_deepening_multipv(request.max_depth, request.multipv_index);
+    record_search_nodes(&mut ctx);
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mate_distance, nodes_per_second, scale_time_by_percent, MATE_SCORE};
+
+    #[test]
+    fn nodes_per_second_handles_zero_elapsed() {
+        assert_eq!(nodes_per_second(10_000, 0), 0);
+    }
+
+    #[test]
+    fn nodes_per_second_scales_nodes_by_elapsed_ms() {
+        assert_eq!(nodes_per_second(10_000, 250), 40_000);
+    }
+
+    #[test]
+    fn scale_time_by_percent_scales_time() {
+        assert_eq!(scale_time_by_percent(1_000, 130), 1_300);
+        assert_eq!(scale_time_by_percent(1_000, 80), 800);
+    }
+
+    #[test]
+    fn mate_distance_reports_only_mate_scores() {
+        assert_eq!(mate_distance(0), None);
+        assert_eq!(mate_distance(MATE_SCORE - 1), Some(1));
+        assert_eq!(mate_distance(-MATE_SCORE + 1), Some(-1));
+    }
 }

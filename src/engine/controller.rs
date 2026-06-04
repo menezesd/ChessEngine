@@ -1,92 +1,13 @@
 //! Engine controller implementation.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::board::search::smp::{smp_search, SmpConfig};
-use crate::board::{
-    search, Board, SearchClock, SearchConfig, SearchInfoCallback, SearchResult, SearchState,
-};
+mod search_lifecycle;
 
-/// Search thread stack size (32 MB)
-const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
-const HARD_STOP_MARGIN_MS: u64 = 5;
-
-/// Maximum sleep duration when polling time limits (avoids excessive CPU wake-ups)
-const MAX_POLL_SLEEP_MS: u64 = 5;
-
-/// Poll interval when waiting for ponder to complete
-const PONDER_POLL_MS: u64 = 10;
-
-/// Active search job state
-pub struct SearchJob {
-    /// Stop flag for the search
-    pub stop: Arc<AtomicBool>,
-    /// Clock for time management
-    pub clock: Arc<SearchClock>,
-    /// Whether we're currently pondering
-    pub pondering: Arc<AtomicBool>,
-    /// Planned soft time limit (for ponderhit)
-    pub planned_soft_time_ms: u64,
-    /// Planned hard time limit (for ponderhit)
-    pub planned_hard_time_ms: u64,
-    /// Handle to the search thread
-    handle: JoinHandle<()>,
-    /// Optional handle to the timer thread enforcing hard stops
-    timer_handle: Option<JoinHandle<()>>,
-    /// Optional handle to the ponderhit timer thread
-    ponderhit_timer_handle: Option<JoinHandle<()>>,
-}
-
-impl SearchJob {
-    /// Stop the search and wait for the thread to finish
-    pub fn stop_and_wait(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.handle.join();
-        if let Some(timer) = self.timer_handle {
-            let _ = timer.join();
-        }
-        if let Some(timer) = self.ponderhit_timer_handle.take() {
-            let _ = timer.join();
-        }
-    }
-
-    /// Signal stop without waiting
-    pub fn signal_stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-        self.pondering.store(false, Ordering::Relaxed);
-    }
-
-    /// Handle ponderhit - transition from pondering to real search
-    pub fn ponderhit(&mut self) {
-        if self.pondering.load(Ordering::Relaxed) {
-            let start = Instant::now();
-            let hard_deadline = start + Duration::from_millis(self.planned_hard_time_ms);
-            self.clock.reset(
-                start,
-                Some(start + Duration::from_millis(self.planned_soft_time_ms)),
-                Some(hard_deadline),
-            );
-
-            // Spawn timer thread to enforce hard deadline, storing handle for cleanup
-            let stop_timer = Arc::clone(&self.stop);
-            let handle = thread::spawn(move || {
-                let now = Instant::now();
-                if hard_deadline > now {
-                    thread::sleep(hard_deadline - now);
-                }
-                stop_timer.store(true, Ordering::Relaxed);
-            });
-            self.ponderhit_timer_handle = Some(handle);
-
-            self.pondering.store(false, Ordering::Relaxed);
-        }
-    }
-}
+use super::job::SearchJob;
+use crate::board::{Board, SearchInfoCallback, SearchState};
 
 /// Search parameters for starting a new search
 #[derive(Default)]
@@ -146,11 +67,18 @@ impl EngineController {
         // First try embedded NNUE (if compiled in)
         #[cfg(feature = "embedded_nnue")]
         {
+            use crate::board::nnue::network::EMBEDDED_NETWORK;
             use crate::board::nnue::NnueNetwork;
-            let network = NnueNetwork::from_embedded();
-            let mut state = self.search_state.lock();
-            state.tables.nnue = Some(std::sync::Arc::new(network));
-            eprintln!("info string Using embedded NNUE");
+            match NnueNetwork::from_bytes(EMBEDDED_NETWORK) {
+                Ok(network) => {
+                    let mut state = self.search_state.lock();
+                    state.tables.nnue = Some(std::sync::Arc::new(network));
+                    eprintln!("info string Using embedded NNUE");
+                }
+                Err(err) => {
+                    eprintln!("info string Embedded NNUE ignored: {err}");
+                }
+            }
         }
 
         // Fall back to loading from file
@@ -238,202 +166,6 @@ impl EngineController {
     #[must_use]
     pub fn is_searching(&self) -> bool {
         self.current_job.is_some()
-    }
-
-    fn build_deadlines(
-        params: &SearchParams,
-        start: Instant,
-    ) -> (Option<Instant>, Option<Instant>) {
-        if params.infinite || params.ponder {
-            return (None, None);
-        }
-
-        let soft_deadline = if params.soft_time_ms > 0 {
-            Some(start + Duration::from_millis(params.soft_time_ms))
-        } else {
-            None
-        };
-
-        let hard_deadline = if params.hard_time_ms > 0 {
-            Some(
-                start
-                    + Duration::from_millis(
-                        params.hard_time_ms.saturating_sub(HARD_STOP_MARGIN_MS),
-                    ),
-            )
-        } else {
-            None
-        };
-
-        (soft_deadline, hard_deadline)
-    }
-
-    fn build_search_config(&self, params: &SearchParams, node_limit: u64) -> SearchConfig {
-        let mut config = if let Some(d) = params.depth {
-            SearchConfig::depth(d)
-        } else {
-            SearchConfig::default()
-        };
-
-        if !params.infinite && !params.ponder && params.soft_time_ms > 0 {
-            config.time_limit_ms = params.soft_time_ms;
-        }
-        if node_limit > 0 {
-            config = config.with_nodes(node_limit);
-        }
-        if let Some(cb) = &self.info_callback {
-            config = config.with_info_callback(cb.clone());
-        }
-        if params.multi_pv > 1 {
-            config = config.with_multi_pv(params.multi_pv);
-        }
-        config
-    }
-
-    fn spawn_hard_stop_timer(
-        hard_deadline: Option<Instant>,
-        stop: Arc<AtomicBool>,
-    ) -> Option<JoinHandle<()>> {
-        hard_deadline.map(|deadline| {
-            thread::spawn(move || loop {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let now = Instant::now();
-                if now >= deadline {
-                    stop.store(true, Ordering::Relaxed);
-                    break;
-                }
-                let sleep_for = (deadline - now).min(Duration::from_millis(MAX_POLL_SLEEP_MS));
-                thread::sleep(sleep_for);
-            })
-        })
-    }
-
-    /// Start a search with the given parameters
-    ///
-    /// The `on_complete` callback is called when the search finishes with the result.
-    #[allow(clippy::needless_pass_by_value)] // Params is small and intentionally consumed
-    pub fn start_search<F>(&mut self, params: SearchParams, on_complete: F)
-    where
-        F: FnOnce(SearchResult) + Send + 'static,
-    {
-        self.stop_search();
-
-        // Prepare search state
-        let node_limit = {
-            let mut guard = self.search_state.lock();
-            guard.new_search();
-            guard.stats.max_nodes
-        };
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let start = Instant::now();
-
-        // Set deadlines based on params
-        let (soft_deadline, hard_deadline) = Self::build_deadlines(&params, start);
-
-        let clock = Arc::new(SearchClock::new(start, soft_deadline, hard_deadline));
-        let pondering = Arc::new(AtomicBool::new(params.ponder));
-
-        // Spawn timer thread for hard deadline
-        let timer_handle = if !params.infinite
-            && !params.ponder
-            && params.depth.is_none()
-            && params.hard_time_ms > 0
-        {
-            Self::spawn_hard_stop_timer(hard_deadline, Arc::clone(&stop))
-        } else {
-            None
-        };
-
-        // Clone for the search thread
-        let search_board = self.board.clone();
-        let search_state = Arc::clone(&self.search_state);
-        let stop_clone = Arc::clone(&stop);
-        let pondering_clone = Arc::clone(&pondering);
-        let num_threads = self.num_threads;
-        let info_callback = self.info_callback.clone();
-
-        // Build config based on thread count
-        if num_threads > 1 {
-            // Use SMP search with multiple threads
-            let smp_config = SmpConfig {
-                num_threads,
-                max_depth: params.depth.unwrap_or(64),
-                time_limit_ms: if params.infinite || params.ponder {
-                    0
-                } else {
-                    params.soft_time_ms
-                },
-                node_limit,
-                info_callback,
-            };
-
-            let handle = thread::Builder::new()
-                .name("search-main".to_string())
-                .stack_size(SEARCH_STACK_SIZE)
-                .spawn(move || {
-                    let mut guard = search_state.lock();
-                    let result =
-                        smp_search(&search_board, &mut guard, smp_config, stop_clone.clone());
-
-                    // Wait while pondering (unless stopped)
-                    while pondering_clone.load(Ordering::Relaxed)
-                        && !stop_clone.load(Ordering::Relaxed)
-                    {
-                        thread::sleep(Duration::from_millis(PONDER_POLL_MS));
-                    }
-
-                    on_complete(result);
-                })
-                .expect("failed to spawn search thread");
-
-            self.current_job = Some(SearchJob {
-                stop,
-                clock,
-                pondering,
-                planned_soft_time_ms: params.soft_time_ms,
-                planned_hard_time_ms: params.hard_time_ms,
-                handle,
-                timer_handle,
-                ponderhit_timer_handle: None,
-            });
-        } else {
-            // Single-threaded search
-            let config = self.build_search_config(&params, node_limit);
-            let mut search_board = search_board;
-
-            let handle = thread::Builder::new()
-                .name("search".to_string())
-                .stack_size(SEARCH_STACK_SIZE)
-                .spawn(move || {
-                    let mut guard = search_state.lock();
-                    let result: SearchResult =
-                        search(&mut search_board, &mut guard, config, &stop_clone);
-
-                    // Wait while pondering (unless stopped)
-                    while pondering_clone.load(Ordering::Relaxed)
-                        && !stop_clone.load(Ordering::Relaxed)
-                    {
-                        thread::sleep(Duration::from_millis(PONDER_POLL_MS));
-                    }
-
-                    on_complete(result);
-                })
-                .expect("failed to spawn search thread");
-
-            self.current_job = Some(SearchJob {
-                stop,
-                clock,
-                pondering,
-                planned_soft_time_ms: params.soft_time_ms,
-                planned_hard_time_ms: params.hard_time_ms,
-                handle,
-                timer_handle,
-                ponderhit_timer_handle: None,
-            });
-        }
     }
 
     /// Execute a closure with mutable access to the search state.

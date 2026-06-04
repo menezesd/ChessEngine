@@ -1,5 +1,6 @@
 use super::super::attack_tables::{slider_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS};
-use super::super::{Bitboard, Board, Color, MoveList, Piece, Square};
+use super::super::types::{Bitboard, Color, MoveList, Piece, Square};
+use super::super::Board;
 
 impl Board {
     pub(crate) fn generate_king_moves(&self, from: Square) -> MoveList {
@@ -40,12 +41,9 @@ impl Board {
 
     /// Get the cached king square for a color.
     /// This is O(1) instead of iterating the bitboard.
-    /// Returns Option for API compatibility with callers checking for illegal positions.
     #[inline]
-    #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn find_king(&self, color: Color) -> Option<Square> {
-        // Use cached king square - much faster than iterating bitboard
-        Some(self.king_square[color.index()])
+    pub(crate) fn find_king(&self, color: Color) -> Square {
+        self.king_square[color.index()]
     }
 
     pub(crate) fn is_square_attacked(&self, square: Square, attacker_color: Color) -> bool {
@@ -84,10 +82,6 @@ impl Board {
     }
 
     pub(crate) fn is_in_check(&self, color: Color) -> bool {
-        if let Some(king_sq) = self.find_king(color) {
-            self.is_square_attacked(king_sq, color.opponent())
-        } else {
-            false
-        }
+        self.is_square_attacked(self.find_king(color), color.opponent())
     }
 }

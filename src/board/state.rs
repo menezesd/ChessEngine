@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-
-use super::eval_update::pst_square;
 use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
 use super::{Bitboard, Color, Piece, Square, ALL_CASTLING_RIGHTS};
+
+mod repetition;
+
+use repetition::RepetitionTable;
 
 #[derive(Clone, Copy, Debug)]
 pub struct UnmakeInfo {
@@ -25,37 +24,6 @@ pub struct UnmakeInfo {
 pub struct NullMoveInfo {
     pub(crate) previous_en_passant_target: Option<Square>,
     pub(crate) previous_hash: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct RepetitionTable {
-    counts: HashMap<u64, u32>,
-}
-
-impl RepetitionTable {
-    pub(crate) fn new() -> Self {
-        RepetitionTable {
-            counts: HashMap::new(),
-        }
-    }
-
-    pub(crate) fn get(&self, hash: u64) -> u32 {
-        self.counts.get(&hash).copied().unwrap_or(0)
-    }
-
-    pub(crate) fn set(&mut self, hash: u64, count: u32) {
-        if count == 0 {
-            self.counts.remove(&hash);
-        } else {
-            self.counts.insert(hash, count);
-        }
-    }
-
-    pub(crate) fn increment(&mut self, hash: u64) -> u32 {
-        let next = self.get(hash).saturating_add(1);
-        self.set(hash, next);
-        next
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +48,24 @@ pub struct Board {
 }
 
 impl Board {
+    fn add_piece_to_eval(&mut self, sq: Square, color: Color, piece: Piece) {
+        let mut eval = self.eval_state();
+        eval.add_piece(color.index(), piece, sq.index(), color == Color::White);
+        self.set_eval_state(eval);
+    }
+
+    fn remove_piece_from_eval(&mut self, sq: Square, color: Color, piece: Piece) {
+        let mut eval = self.eval_state();
+        eval.remove_piece(color.index(), piece, sq.index(), color == Color::White);
+        self.set_eval_state(eval);
+    }
+
+    fn clear_incremental_eval(&mut self) {
+        self.eval_mg = [0, 0];
+        self.eval_eg = [0, 0];
+        self.game_phase = [0, 0];
+    }
+
     #[must_use]
     pub fn new() -> Self {
         let mut board = Board::empty();
@@ -116,9 +102,7 @@ impl Board {
         self.castling_rights = 0;
         self.en_passant_target = None;
         self.halfmove_clock = 0;
-        self.eval_mg = [0, 0];
-        self.eval_eg = [0, 0];
-        self.game_phase = [0, 0];
+        self.clear_incremental_eval();
         self.hash = 0;
         self.mailbox = [None; 64];
     }
@@ -139,26 +123,13 @@ impl Board {
         if let Some((old_color, old_piece)) = self.piece_at(sq) {
             self.remove_piece(sq, old_color, old_piece);
             self.hash ^= ZOBRIST.piece_keys[old_piece.index()][old_color.index()][sq.index()];
-            // Update incremental eval for removed piece
-            let c_idx = old_color.index();
-            let p_idx = old_piece.index();
-            let pst_sq = pst_square(sq.index(), old_color == Color::White);
-            self.eval_mg[c_idx] -= MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
-            self.eval_eg[c_idx] -= MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
-            self.game_phase[c_idx] -= PHASE_WEIGHTS[p_idx];
+            self.remove_piece_from_eval(sq, old_color, old_piece);
         }
 
         // Now add the new piece
         self.set_piece(sq, color, piece);
         self.hash ^= ZOBRIST.piece_keys[piece.index()][color.index()][sq.index()];
-
-        // Update incremental eval
-        let c_idx = color.index();
-        let p_idx = piece.index();
-        let pst_sq = pst_square(sq.index(), color == Color::White);
-        self.eval_mg[c_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
-        self.eval_eg[c_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
-        self.game_phase[c_idx] += PHASE_WEIGHTS[p_idx];
+        self.add_piece_to_eval(sq, color, piece);
     }
 
     /// Remove a piece from the board by square (for edit mode)
@@ -169,22 +140,13 @@ impl Board {
         if let Some((color, piece)) = self.piece_at(sq) {
             self.remove_piece(sq, color, piece);
             self.hash ^= ZOBRIST.piece_keys[piece.index()][color.index()][sq.index()];
-
-            // Update incremental eval
-            let c_idx = color.index();
-            let p_idx = piece.index();
-            let pst_sq = pst_square(sq.index(), color == Color::White);
-            self.eval_mg[c_idx] -= MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
-            self.eval_eg[c_idx] -= MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
-            self.game_phase[c_idx] -= PHASE_WEIGHTS[p_idx];
+            self.remove_piece_from_eval(sq, color, piece);
         }
     }
 
     /// Recalculate incremental evaluation from scratch (used after FEN parsing or initialization)
     pub(crate) fn recalculate_incremental_eval(&mut self) {
-        self.eval_mg = [0, 0];
-        self.eval_eg = [0, 0];
-        self.game_phase = [0, 0];
+        self.clear_incremental_eval();
 
         for color in Color::BOTH {
             let c_idx = color.index();
@@ -193,7 +155,11 @@ impl Board {
                 for sq_idx in self.pieces_of(color, piece).iter() {
                     let sq = sq_idx.index();
                     // PST square: flip for white (tables are from black's perspective)
-                    let pst_sq = if color == Color::White { sq } else { sq ^ 0b11_1000 };
+                    let pst_sq = if color == Color::White {
+                        sq
+                    } else {
+                        sq ^ 0b11_1000
+                    };
 
                     self.eval_mg[c_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
                     self.eval_eg[c_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
@@ -236,14 +202,10 @@ impl Board {
 
         let mut hash = 0u64;
 
-        // Hash white pawns
-        for sq in self.pieces_of(Color::White, Piece::Pawn).iter() {
-            hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][0][sq.index()];
-        }
-
-        // Hash black pawns
-        for sq in self.pieces_of(Color::Black, Piece::Pawn).iter() {
-            hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][1][sq.index()];
+        for color in Color::BOTH {
+            for sq in self.pieces_of(color, Piece::Pawn).iter() {
+                hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][color.index()][sq.index()];
+            }
         }
 
         hash
@@ -282,110 +244,8 @@ impl Board {
         self.halfmove_clock
     }
 
-    #[must_use]
-    pub fn is_draw(&self) -> bool {
-        if self.halfmove_clock >= 100 {
-            return true;
-        }
-        self.repetition_counts.get(self.hash) >= 3
-    }
-
-    #[must_use]
-    pub fn is_theoretical_draw(&self) -> bool {
-        self.is_draw() || self.is_insufficient_material()
-    }
-
     /// Count pieces of a given type for a color
     pub(crate) fn piece_count(&self, color: Color, piece: Piece) -> u32 {
         self.pieces_of(color, piece).popcount()
     }
-
-    /// Count pieces of a given type for both colors combined
-    fn total_piece_count(&self, piece: Piece) -> u32 {
-        self.piece_count(Color::White, piece) + self.piece_count(Color::Black, piece)
-    }
-
-    fn is_insufficient_material(&self) -> bool {
-        // Any pawns, rooks, or queens means sufficient material
-        if self.total_piece_count(Piece::Pawn) > 0
-            || self.total_piece_count(Piece::Rook) > 0
-            || self.total_piece_count(Piece::Queen) > 0
-        {
-            return false;
-        }
-
-        let total_knights = self.total_piece_count(Piece::Knight);
-        let total_bishops = self.total_piece_count(Piece::Bishop);
-        let total_minors = total_knights + total_bishops;
-
-        // K vs K, or K+minor vs K
-        if total_minors <= 1 {
-            return true;
-        }
-
-        // K+B vs K+B with same-colored bishops
-        if total_knights == 0 && total_bishops == 2 {
-            let all_bishops = self.all_pieces_of_type(Piece::Bishop).0;
-            return bishops_all_same_color(all_bishops);
-        }
-
-        false
-    }
 }
-
-impl Default for Board {
-    fn default() -> Self {
-        Board::new()
-    }
-}
-
-fn bishops_all_same_color(bishops: u64) -> bool {
-    let light_squares: u64 = 0x55AA55AA55AA55AA;
-    let dark_squares: u64 = 0xAA55AA55AA55AA55;
-
-    (bishops & light_squares == 0) || (bishops & dark_squares == 0)
-}
-
-impl fmt::Display for Board {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "  +---+---+---+---+---+---+---+---+")?;
-        for rank in (0..8).rev() {
-            write!(f, "{} |", rank + 1)?;
-            for file in 0..8 {
-                let sq = Square::new(rank, file);
-                let piece_char = match self.piece_at(sq) {
-                    Some((color, piece)) => piece.to_fen_char(color),
-                    None => ' ',
-                };
-                write!(f, " {piece_char} |")?;
-            }
-            writeln!(f)?;
-            writeln!(f, "  +---+---+---+---+---+---+---+---+")?;
-        }
-        writeln!(f, "    a   b   c   d   e   f   g   h")?;
-        writeln!(f)?;
-        write!(
-            f,
-            "Side to move: {}",
-            if self.white_to_move { "White" } else { "Black" }
-        )?;
-        Ok(())
-    }
-}
-
-impl Hash for Board {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Use the precomputed Zobrist hash
-        self.hash.hash(state);
-    }
-}
-
-impl PartialEq for Board {
-    fn eq(&self, other: &Self) -> bool {
-        // Two positions are equal if they have the same Zobrist hash
-        // This is technically not 100% collision-free but practically sufficient
-        self.hash == other.hash
-    }
-}
-
-impl Eq for Board {}

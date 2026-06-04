@@ -7,7 +7,7 @@
 
 use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS};
 use crate::board::state::Board;
-use crate::board::types::{Color, Piece};
+use crate::board::types::{Bitboard, Color, Piece};
 
 use super::helpers::AttackContext;
 
@@ -35,10 +35,11 @@ impl Board {
         let mut mg = 0;
         let eg = 0; // Initiative is primarily a middlegame concept
 
-        let (w_mg, _) = self.eval_initiative_for_color(Color::White, ctx);
-        let (b_mg, _) = self.eval_initiative_for_color(Color::Black, ctx);
-
-        mg += w_mg - b_mg;
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let (color_mg, _) = self.eval_initiative_for_color(color, ctx);
+            mg += sign * color_mg;
+        }
 
         // Apply initiative bonus/penalty based on game phase
         // Initiative matters less in endgame
@@ -52,7 +53,7 @@ impl Board {
         mg += self.eval_tempo_threats(color, ctx);
 
         // Attack momentum
-        mg += self.eval_attack_momentum(color, ctx);
+        mg += self.eval_attack_momentum(color);
 
         // Development
         mg += self.eval_development(color);
@@ -73,13 +74,9 @@ impl Board {
             for sq in enemy_pieces.iter() {
                 let sq_idx = sq.index();
 
-                // Attacked by us
-                if our_attacks.has_bit(sq_idx) {
-                    // Not defended by enemy
-                    if !enemy_defenses.has_bit(sq_idx) {
-                        // Undefended piece attacked = tempo
-                        bonus += TEMPO_THREAT_MG;
-                    }
+                // Undefended piece attacked = tempo
+                if our_attacks.has_bit(sq_idx) && !enemy_defenses.has_bit(sq_idx) {
+                    bonus += TEMPO_THREAT_MG;
                 }
             }
         }
@@ -88,7 +85,7 @@ impl Board {
     }
 
     /// Evaluate attack momentum (multiple pieces converging on same area).
-    fn eval_attack_momentum(&self, color: Color, _ctx: &AttackContext) -> i32 {
+    fn eval_attack_momentum(&self, color: Color) -> i32 {
         // Focus on enemy king area
         let enemy_king_sq = self.king_square_index(color.opponent());
         let king_zone = Self::king_zone(enemy_king_sq);
@@ -96,22 +93,24 @@ impl Board {
         // Count how many of our pieces attack the king zone
         let mut attackers = 0;
 
-        let king_zone_bb = crate::board::Bitboard(king_zone);
+        let king_zone_bb = Bitboard(king_zone);
 
         for sq in self.pieces_of(color, Piece::Knight).iter() {
-            if crate::board::Bitboard(KNIGHT_ATTACKS[sq.index()]).intersects(king_zone_bb) {
+            if Self::attacks_king_zone(KNIGHT_ATTACKS[sq.index()], king_zone_bb) {
                 attackers += 1;
             }
         }
 
         for sq in self.pieces_of(color, Piece::Bishop).iter() {
-            if crate::board::Bitboard(slider_attacks(sq.index(), self.all_occupied.0, true)).intersects(king_zone_bb) {
+            let attacks = slider_attacks(sq.index(), self.all_occupied.0, true);
+            if Self::attacks_king_zone(attacks, king_zone_bb) {
                 attackers += 1;
             }
         }
 
         for sq in self.pieces_of(color, Piece::Rook).iter() {
-            if crate::board::Bitboard(slider_attacks(sq.index(), self.all_occupied.0, false)).intersects(king_zone_bb) {
+            let attacks = slider_attacks(sq.index(), self.all_occupied.0, false);
+            if Self::attacks_king_zone(attacks, king_zone_bb) {
                 attackers += 1;
             }
         }
@@ -119,7 +118,7 @@ impl Board {
         for sq in self.pieces_of(color, Piece::Queen).iter() {
             let attacks = slider_attacks(sq.index(), self.all_occupied.0, true)
                 | slider_attacks(sq.index(), self.all_occupied.0, false);
-            if crate::board::Bitboard(attacks).intersects(king_zone_bb) {
+            if Self::attacks_king_zone(attacks, king_zone_bb) {
                 attackers += 2; // Queen counts double
             }
         }
@@ -135,6 +134,10 @@ impl Board {
     /// Get king zone (king square + adjacent squares).
     fn king_zone(king_sq: usize) -> u64 {
         crate::board::attack_tables::KING_ATTACKS[king_sq] | (1u64 << king_sq)
+    }
+
+    fn attacks_king_zone(attacks: u64, king_zone: Bitboard) -> bool {
+        Bitboard(attacks).intersects(king_zone)
     }
 
     /// Castled king positions: [White (c1, g1), Black (c8, g8)]
@@ -168,7 +171,7 @@ impl Board {
                 ),
             };
 
-        let back_rank_bb = crate::board::Bitboard(back_rank);
+        let back_rank_bb = Bitboard(back_rank);
 
         // Check knights
         let knights = self.pieces_of(color, Piece::Knight);
@@ -199,7 +202,7 @@ impl Board {
 
         // Check if castled (king not on starting square and on castled square)
         let kings = self.pieces_of(color, Piece::King);
-        let castled = crate::board::Bitboard(Self::CASTLED_SQUARES[color.index()]);
+        let castled = Bitboard(Self::CASTLED_SQUARES[color.index()]);
 
         if kings.intersects(castled) {
             score += CASTLED_BONUS_MG;
@@ -213,99 +216,4 @@ impl Board {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_development() {
-        // Starting position
-        let board: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let w_dev = board.eval_development(Color::White);
-        let b_dev = board.eval_development(Color::Black);
-        // Both should have undeveloped penalties
-        assert!(
-            w_dev < 0,
-            "starting position should have development penalty"
-        );
-        assert!(
-            b_dev < 0,
-            "starting position should have development penalty"
-        );
-    }
-
-    #[test]
-    fn test_developed_pieces() {
-        // All minor pieces developed
-        let board: Board = "r1bqkb1r/pppppppp/2n2n2/8/8/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let w_dev = board.eval_development(Color::White);
-        // Knights are developed - should be better than starting position
-        let start_board: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let w_start = start_board.eval_development(Color::White);
-        assert!(w_dev > w_start, "developed pieces should have better score");
-    }
-
-    #[test]
-    fn test_tempo_threat() {
-        // Position where white attacks an undefended piece
-        let board: Board = "8/8/8/3n4/4B3/8/8/8 w - - 0 1".parse().unwrap();
-        let ctx = board.compute_attack_context();
-        let bonus = board.eval_tempo_threats(Color::White, &ctx);
-        // Bishop attacks undefended knight
-        assert!(bonus > 0, "attacking undefended piece should give bonus");
-    }
-
-    #[test]
-    fn test_no_tempo_defended() {
-        // Defended piece shouldn't give tempo
-        // Black knight on d5 defended by pawn on e6 (attacks d5), attacked by bishop on b3
-        let board: Board = "8/8/4p3/3n4/8/1B6/8/8 w - - 0 1".parse().unwrap();
-        let ctx = board.compute_attack_context();
-        let bonus = board.eval_tempo_threats(Color::White, &ctx);
-        // Knight is defended by pawn - should get no tempo bonus
-        assert_eq!(
-            bonus, 0,
-            "defended piece shouldn't give tempo bonus: {bonus}"
-        );
-    }
-
-    #[test]
-    fn test_castled_bonus() {
-        // White is castled kingside
-        let board: Board = "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQK2R w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let uncastled = board.eval_development(Color::White);
-
-        let castled: Board = "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQ1RK1 w kq - 0 1"
-            .parse()
-            .unwrap();
-        let castled_dev = castled.eval_development(Color::White);
-
-        assert!(
-            castled_dev > uncastled,
-            "castled position should have better development score"
-        );
-    }
-
-    #[test]
-    fn test_initiative_symmetry() {
-        // Symmetric position should have balanced initiative
-        let board = Board::new();
-        let ctx = board.compute_attack_context();
-        let (mg, eg) = board.eval_initiative(&ctx);
-        assert!(
-            mg.abs() < 20,
-            "symmetric initiative should be near zero: {mg}"
-        );
-        assert!(
-            eg.abs() < 20,
-            "symmetric initiative eg should be near zero: {eg}"
-        );
-    }
-}
+mod tests;

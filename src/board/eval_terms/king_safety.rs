@@ -2,8 +2,6 @@
 //!
 //! Evaluates king safety using attack units and pawn shield.
 
-#![allow(clippy::needless_range_loop)] // 0..2 for color index is clearer
-
 use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS};
 use crate::board::masks::{FILES, KING_ATTACK_TABLE, KING_ZONE_EXTENDED, PAWN_SHIELD_MASK};
 use crate::board::state::Board;
@@ -66,37 +64,25 @@ impl Board {
 
             // Knight attacks on king zone
             for sq_idx in self.opponent_pieces(color, Piece::Knight).iter() {
-                let attacks = crate::board::Bitboard(KNIGHT_ATTACKS[sq_idx.index()] & king_zone.0);
-                if !attacks.is_empty() {
-                    let defended = attacks.intersect_popcount(our_pawn_attacks) as i32;
-                    let undefended = attacks.popcount() as i32 - defended;
-                    attack_units += ATTACK_WEIGHTS[Piece::Knight.index()].0 * undefended
-                        + ATTACK_WEIGHTS[Piece::Knight.index()].1 * defended;
-                }
+                let attacks = Bitboard(KNIGHT_ATTACKS[sq_idx.index()] & king_zone.0);
+                attack_units +=
+                    Self::king_zone_attack_units(attacks, our_pawn_attacks, Piece::Knight);
             }
 
             // Bishop attacks on king zone
             for sq_idx in self.opponent_pieces(color, Piece::Bishop).iter() {
                 let moves = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
-                let attacks = crate::board::Bitboard(moves & king_zone.0);
-                if !attacks.is_empty() {
-                    let defended = attacks.intersect_popcount(our_pawn_attacks) as i32;
-                    let undefended = attacks.popcount() as i32 - defended;
-                    attack_units += ATTACK_WEIGHTS[Piece::Bishop.index()].0 * undefended
-                        + ATTACK_WEIGHTS[Piece::Bishop.index()].1 * defended;
-                }
+                let attacks = Bitboard(moves & king_zone.0);
+                attack_units +=
+                    Self::king_zone_attack_units(attacks, our_pawn_attacks, Piece::Bishop);
             }
 
             // Rook attacks on king zone
             for sq_idx in self.opponent_pieces(color, Piece::Rook).iter() {
                 let moves = slider_attacks(sq_idx.index(), self.all_occupied.0, false);
-                let attacks = crate::board::Bitboard(moves & king_zone.0);
-                if !attacks.is_empty() {
-                    let defended = attacks.intersect_popcount(our_pawn_attacks) as i32;
-                    let undefended = attacks.popcount() as i32 - defended;
-                    attack_units += ATTACK_WEIGHTS[Piece::Rook.index()].0 * undefended
-                        + ATTACK_WEIGHTS[Piece::Rook.index()].1 * defended;
-                }
+                let attacks = Bitboard(moves & king_zone.0);
+                attack_units +=
+                    Self::king_zone_attack_units(attacks, our_pawn_attacks, Piece::Rook);
             }
 
             // Queen attacks on king zone
@@ -104,12 +90,10 @@ impl Board {
                 let diag = slider_attacks(sq_idx.index(), self.all_occupied.0, true);
                 let straight = slider_attacks(sq_idx.index(), self.all_occupied.0, false);
                 let moves = diag | straight;
-                let attacks = crate::board::Bitboard(moves & king_zone.0);
+                let attacks = Bitboard(moves & king_zone.0);
                 if !attacks.is_empty() {
-                    let defended = attacks.intersect_popcount(our_pawn_attacks) as i32;
-                    let undefended = attacks.popcount() as i32 - defended;
-                    attack_units += ATTACK_WEIGHTS[Piece::Queen.index()].0 * undefended
-                        + ATTACK_WEIGHTS[Piece::Queen.index()].1 * defended;
+                    attack_units +=
+                        Self::king_zone_attack_units(attacks, our_pawn_attacks, Piece::Queen);
 
                     // Queen check threats (uses pre-computed king rays)
                     if (moves & king_queen_rays) != 0 {
@@ -125,6 +109,16 @@ impl Board {
 
         // King safety is primarily a middlegame concern
         (mg, 0)
+    }
+
+    fn king_zone_attack_units(attacks: Bitboard, pawn_defended: Bitboard, piece: Piece) -> i32 {
+        if attacks.is_empty() {
+            return 0;
+        }
+
+        let defended = attacks.intersect_popcount(pawn_defended) as i32;
+        let undefended = attacks.popcount() as i32 - defended;
+        ATTACK_WEIGHTS[piece.index()].0 * undefended + ATTACK_WEIGHTS[piece.index()].1 * defended
     }
 
     /// Evaluate king pawn shield.
@@ -185,48 +179,4 @@ impl Board {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_king_safety_starting_position() {
-        let board: Board = Board::new();
-        let (mg, eg) = board.eval_king_safety();
-        // Starting position should be roughly equal
-        assert!(mg.abs() < 50, "king safety mg should be near 0: {mg}");
-        assert_eq!(eg, 0, "king safety eg should be 0");
-    }
-
-    #[test]
-    fn test_king_shield_with_pawns() {
-        // King with pawn shield
-        let board: Board = "r3k2r/ppp2ppp/8/8/8/8/PPP2PPP/R3K2R w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let (mg, _) = board.eval_king_shield();
-        // Both sides have similar shields, should be close to 0
-        assert!(mg.abs() < 30, "shield should be balanced: {mg}");
-    }
-
-    #[test]
-    fn test_king_on_open_file_penalty() {
-        // White king on open e-file
-        let board: Board = "r3k2r/pppp1ppp/8/8/8/8/PPPP1PPP/R3K2R w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let (mg, _) = board.eval_king_shield();
-        // Both have open files, should be roughly equal
-        assert!(mg.abs() < 20, "both kings on open file: {mg}");
-    }
-
-    #[test]
-    fn test_castled_king_shield() {
-        // White castled kingside with intact pawn shield
-        let board: Board = "r4rk1/ppp2ppp/8/8/8/8/PPP2PPP/R4RK1 w - - 0 1"
-            .parse()
-            .unwrap();
-        let (mg, _) = board.eval_king_shield();
-        // Both castled with pawns, should be balanced
-        assert!(mg.abs() < 30, "both castled with shield: {mg}");
-    }
-}
+mod tests;

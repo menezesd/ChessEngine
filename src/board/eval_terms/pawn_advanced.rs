@@ -36,29 +36,16 @@ impl Board {
         let mut mg = 0;
         let mut eg = 0;
 
-        let white_pawns = self.pieces_of(Color::White, Piece::Pawn);
-        let black_pawns = self.pieces_of(Color::Black, Piece::Pawn);
-
-        // Get king positions
-        let white_king_sq = self.king_square_index(Color::White);
-        let black_king_sq = self.king_square_index(Color::Black);
-
-        // Evaluate for both colors
-        let (w_mg, w_eg) = self.eval_pawn_advanced_for_color(
-            white_pawns,
-            black_pawns,
-            black_king_sq,
-            Color::White,
-        );
-        let (b_mg, b_eg) = self.eval_pawn_advanced_for_color(
-            black_pawns,
-            white_pawns,
-            white_king_sq,
-            Color::Black,
-        );
-
-        mg += w_mg - b_mg;
-        eg += w_eg - b_eg;
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let own_pawns = self.pieces_of(color, Piece::Pawn);
+            let enemy_pawns = self.opponent_pieces(color, Piece::Pawn);
+            let enemy_king_sq = self.king_square_index(color.opponent());
+            let (color_mg, color_eg) =
+                self.eval_pawn_advanced_for_color(own_pawns, enemy_pawns, enemy_king_sq, color);
+            mg += sign * color_mg;
+            eg += sign * color_eg;
+        }
 
         (mg, eg)
     }
@@ -91,7 +78,7 @@ impl Board {
             // Candidate passer detection
             // A pawn is a candidate passer if it can become passed with one push
             // This means: no enemy pawn directly ahead, and we can push past blockers
-            if self.is_candidate_passer(pawn_sq.index(), own_pawns, enemy_pawns, color) {
+            if self.is_candidate_passer(pawn_sq.index(), enemy_pawns, color) {
                 mg += CANDIDATE_PASSER_MG;
                 eg += CANDIDATE_PASSER_EG;
             }
@@ -112,13 +99,7 @@ impl Board {
     }
 
     /// Check if a pawn is a candidate passer
-    fn is_candidate_passer(
-        &self,
-        pawn_sq: usize,
-        _own_pawns: Bitboard,
-        enemy_pawns: Bitboard,
-        color: Color,
-    ) -> bool {
+    fn is_candidate_passer(&self, pawn_sq: usize, enemy_pawns: Bitboard, color: Color) -> bool {
         let rank = pawn_sq / 8;
 
         // Already a passed pawn? Not a candidate
@@ -203,70 +184,4 @@ impl Board {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_pawn_storm() {
-        // Position with white pawns storming black's kingside castle
-        let board: Board = "r1bqk2r/pppp1ppp/2n2n2/2b1p3/4P3/3P1N2/PPPB1PPP/RN1QKB1R w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let (mg, eg) = board.eval_pawn_advanced();
-        // Just verify it runs without panic
-        let _ = (mg, eg); // Use both values to avoid warnings
-    }
-
-    #[test]
-    fn test_chain_links() {
-        // Classic pawn chain d4-e5
-        let board: Board = "8/8/8/4P3/3P4/8/8/8 w - - 0 1".parse().unwrap();
-        let white_pawns = board.pieces_of(Color::White, Piece::Pawn);
-        let links = Board::count_chain_links(white_pawns, Color::White);
-        assert!(links >= 1, "e5 should be defended by d4");
-    }
-
-    #[test]
-    fn test_no_chain() {
-        // Isolated pawns - no chain
-        let board: Board = "8/8/8/P3P3/8/8/8/8 w - - 0 1".parse().unwrap();
-        let white_pawns = board.pieces_of(Color::White, Piece::Pawn);
-        let links = Board::count_chain_links(white_pawns, Color::White);
-        assert_eq!(links, 0, "isolated pawns should have no chain links");
-    }
-
-    #[test]
-    fn test_pawn_advanced_symmetry() {
-        // Symmetric position
-        let board = Board::new();
-        let (mg, eg) = board.eval_pawn_advanced();
-        assert!(mg.abs() < 20, "starting position pawn advanced mg: {mg}");
-        assert!(eg.abs() < 20, "starting position pawn advanced eg: {eg}");
-    }
-
-    #[test]
-    fn test_candidate_passer() {
-        // e5 pawn with d6 blocker - could become passer with exd6
-        let board: Board = "8/8/3p4/4P3/8/8/8/8 w - - 0 1".parse().unwrap();
-        let (mg, eg) = board.eval_pawn_advanced();
-        // Just verify function runs
-        assert!(
-            (-100..=100).contains(&mg),
-            "candidate passer mg reasonable: {mg}"
-        );
-        assert!(
-            (-100..=100).contains(&eg),
-            "candidate passer eg reasonable: {eg}"
-        );
-    }
-
-    #[test]
-    fn test_pawn_lever() {
-        // White pawn that can capture to open a file
-        let board: Board = "4k3/8/3p4/2P5/8/8/8/4K3 w - - 0 1".parse().unwrap();
-        // The c5 pawn can capture on d6
-        let (mg, _) = board.eval_pawn_advanced();
-        // Just verify function runs
-        assert!(mg >= -100, "pawn lever evaluation should work: {mg}");
-    }
-}
+mod tests;

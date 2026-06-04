@@ -10,7 +10,7 @@ use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS};
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece};
 
-use super::helpers::{single_pawn_attacks, AttackContext};
+use super::helpers::single_pawn_attacks;
 
 /// Fork threat bonus
 pub const FORK_THREAT_MG: i32 = 20;
@@ -30,19 +30,20 @@ impl Board {
     ///
     /// Returns (middlegame, endgame) score from white's perspective.
     #[must_use]
-    pub fn eval_threats_advanced(&self, ctx: &AttackContext) -> (i32, i32) {
+    pub fn eval_threats_advanced(&self) -> (i32, i32) {
         let mut mg = 0;
         let eg = 0; // Tactical threats are primarily MG
 
-        let (w_mg, _) = self.eval_threats_for_color(Color::White, ctx);
-        let (b_mg, _) = self.eval_threats_for_color(Color::Black, ctx);
-
-        mg += w_mg - b_mg;
+        for color in Color::BOTH {
+            let sign = color.sign();
+            let (color_mg, _) = self.eval_threats_for_color(color);
+            mg += sign * color_mg;
+        }
 
         (mg, eg)
     }
 
-    fn eval_threats_for_color(&self, color: Color, _ctx: &AttackContext) -> (i32, i32) {
+    fn eval_threats_for_color(&self, color: Color) -> (i32, i32) {
         let mut mg = 0;
 
         // Fork threats
@@ -104,31 +105,39 @@ impl Board {
         let enemy_queen_bb = self.opponent_pieces(color, Piece::Queen);
         let enemy_king_sq = self.king_square_index(opp);
 
-        // Diagonal pins
-        for bishop_sq in self.pieces_of(color, Piece::Bishop).iter() {
-            bonus += self.check_pin(bishop_sq.index(), enemy_king_sq, true, opp, true);
-        }
-
-        // Check queen pins (both diagonal and orthogonal)
-        for queen_sq in self.pieces_of(color, Piece::Queen).iter() {
-            bonus += self.check_pin(queen_sq.index(), enemy_king_sq, true, opp, true);
-            bonus += self.check_pin(queen_sq.index(), enemy_king_sq, false, opp, true);
-        }
-
-        // Rook pins (orthogonal)
-        for rook_sq in self.pieces_of(color, Piece::Rook).iter() {
-            bonus += self.check_pin(rook_sq.index(), enemy_king_sq, false, opp, true);
-        }
+        bonus += self.eval_slider_pins_to_target(color, enemy_king_sq, opp, true);
 
         // Pins to queen (if queen exists)
         if enemy_queen_bb.0 != 0 {
             let enemy_queen_sq = enemy_queen_bb.0.trailing_zeros() as usize;
-            for bishop_sq in self.pieces_of(color, Piece::Bishop).iter() {
-                bonus += self.check_pin(bishop_sq.index(), enemy_queen_sq, true, opp, false);
+            bonus += self.eval_slider_pins_to_target(color, enemy_queen_sq, opp, false);
+        }
+
+        bonus
+    }
+
+    fn eval_slider_pins_to_target(
+        &self,
+        color: Color,
+        target_sq: usize,
+        opponent: Color,
+        to_king: bool,
+    ) -> i32 {
+        let mut bonus = 0;
+
+        for bishop_sq in self.pieces_of(color, Piece::Bishop).iter() {
+            bonus += self.check_pin(bishop_sq.index(), target_sq, true, opponent, to_king);
+        }
+
+        if to_king {
+            for queen_sq in self.pieces_of(color, Piece::Queen).iter() {
+                bonus += self.check_pin(queen_sq.index(), target_sq, true, opponent, to_king);
+                bonus += self.check_pin(queen_sq.index(), target_sq, false, opponent, to_king);
             }
-            for rook_sq in self.pieces_of(color, Piece::Rook).iter() {
-                bonus += self.check_pin(rook_sq.index(), enemy_queen_sq, false, opp, false);
-            }
+        }
+
+        for rook_sq in self.pieces_of(color, Piece::Rook).iter() {
+            bonus += self.check_pin(rook_sq.index(), target_sq, false, opponent, to_king);
         }
 
         bonus
@@ -173,29 +182,14 @@ impl Board {
 
     /// Get the squares between two squares on a line.
     fn between_mask(sq1: usize, sq2: usize) -> u64 {
+        let Some((file_diff, rank_diff)) = Self::line_step(sq1, sq2) else {
+            return 0;
+        };
+
         let file1 = sq1 % 8;
         let rank1 = sq1 / 8;
         let file2 = sq2 % 8;
         let rank2 = sq2 / 8;
-
-        let file_diff = (file2 as i32 - file1 as i32).signum();
-        let rank_diff = (rank2 as i32 - rank1 as i32).signum();
-
-        // Check if on same line
-        if file_diff == 0 && rank_diff == 0 {
-            return 0;
-        }
-
-        // Not on a line (diagonal or orthogonal)
-        if file_diff != 0
-            && rank_diff != 0
-            && (file2 as i32 - file1 as i32).abs() != (rank2 as i32 - rank1 as i32).abs()
-        {
-            return 0;
-        }
-        if file_diff == 0 && rank_diff == 0 {
-            return 0;
-        }
 
         let mut mask = 0u64;
         let mut f = file1 as i32 + file_diff;
@@ -213,6 +207,29 @@ impl Board {
         mask
     }
 
+    fn line_step(sq1: usize, sq2: usize) -> Option<(i32, i32)> {
+        let file1 = sq1 % 8;
+        let rank1 = sq1 / 8;
+        let file2 = sq2 % 8;
+        let rank2 = sq2 / 8;
+
+        let file_delta = file2 as i32 - file1 as i32;
+        let rank_delta = rank2 as i32 - rank1 as i32;
+
+        if file_delta == 0 && rank_delta == 0 {
+            return None;
+        }
+
+        let same_file = file_delta == 0;
+        let same_rank = rank_delta == 0;
+        let same_diagonal = file_delta.abs() == rank_delta.abs();
+        if !(same_file || same_rank || same_diagonal) {
+            return None;
+        }
+
+        Some((file_delta.signum(), rank_delta.signum()))
+    }
+
     /// Evaluate skewer threats.
     fn eval_skewers(&self, color: Color) -> i32 {
         let opp = color.opponent();
@@ -227,25 +244,33 @@ impl Board {
         if enemy_king.0 != 0 {
             let king_sq = self.king_square_index(opp);
             let back_targets = enemy_queen.0 | enemy_rooks.0;
+            bonus += self.eval_slider_skewers(color, king_sq, back_targets);
+        }
 
-            // Check if we can skewer the king to a rook or queen
-            for slider in self.pieces_of(color, Piece::Bishop).iter() {
-                if self.is_skewer(slider.index(), king_sq, back_targets, true) {
-                    bonus += SKEWER_THREAT_MG;
-                }
+        bonus
+    }
+
+    fn eval_slider_skewers(&self, color: Color, front_sq: usize, back_targets: u64) -> i32 {
+        let mut bonus = 0;
+
+        for slider in self.pieces_of(color, Piece::Bishop).iter() {
+            if self.is_skewer(slider.index(), front_sq, back_targets, true) {
+                bonus += SKEWER_THREAT_MG;
             }
-            for slider in self.pieces_of(color, Piece::Rook).iter() {
-                if self.is_skewer(slider.index(), king_sq, back_targets, false) {
-                    bonus += SKEWER_THREAT_MG;
-                }
+        }
+
+        for slider in self.pieces_of(color, Piece::Rook).iter() {
+            if self.is_skewer(slider.index(), front_sq, back_targets, false) {
+                bonus += SKEWER_THREAT_MG;
             }
-            for slider in self.pieces_of(color, Piece::Queen).iter() {
-                if self.is_skewer(slider.index(), king_sq, back_targets, true) {
-                    bonus += SKEWER_THREAT_MG;
-                }
-                if self.is_skewer(slider.index(), king_sq, back_targets, false) {
-                    bonus += SKEWER_THREAT_MG;
-                }
+        }
+
+        for slider in self.pieces_of(color, Piece::Queen).iter() {
+            if self.is_skewer(slider.index(), front_sq, back_targets, true) {
+                bonus += SKEWER_THREAT_MG;
+            }
+            if self.is_skewer(slider.index(), front_sq, back_targets, false) {
+                bonus += SKEWER_THREAT_MG;
             }
         }
 
@@ -318,76 +343,4 @@ impl Board {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fork_detection() {
-        // Knight forking king and rook
-        let board: Board = "4k3/8/8/3N4/8/8/8/R3K3 w - - 0 1".parse().unwrap();
-        let bonus = board.eval_fork_threats(Color::White);
-        // Knight on d5 attacks e7... but king is on e8, so no fork yet
-        // This is more of a smoke test
-        assert!(bonus >= 0);
-    }
-
-    #[test]
-    fn test_between_mask() {
-        // a1 to h8 diagonal
-        let mask = Board::between_mask(0, 63);
-        // Should include b2, c3, d4, e5, f6, g7
-        assert!((mask & (1u64 << 9)) != 0, "b2 should be between a1 and h8");
-        assert!((mask & (1u64 << 18)) != 0, "c3 should be between a1 and h8");
-    }
-
-    #[test]
-    fn test_between_mask_file() {
-        // a1 to a8 (file)
-        let mask = Board::between_mask(0, 56);
-        // Should include a2-a7
-        assert!((mask & (1u64 << 8)) != 0, "a2 should be between a1 and a8");
-        assert!((mask & (1u64 << 48)) != 0, "a7 should be between a1 and a8");
-    }
-
-    #[test]
-    fn test_between_mask_rank() {
-        // a1 to h1 (rank)
-        let mask = Board::between_mask(0, 7);
-        // Should include b1-g1
-        assert!((mask & (1u64 << 1)) != 0, "b1 should be between a1 and h1");
-        assert!((mask & (1u64 << 6)) != 0, "g1 should be between a1 and h1");
-    }
-
-    #[test]
-    fn test_pin_evaluation() {
-        // Bishop on b5 pinning knight on d7 to king on e8
-        let board: Board = "4k3/3n4/8/1B6/8/8/8/4K3 w - - 0 1".parse().unwrap();
-        let bonus = board.eval_pins(Color::White);
-        // Should have positive bonus for pin
-        assert!(bonus > 0, "pin should give bonus: {bonus}");
-    }
-
-    #[test]
-    fn test_threats_advanced_symmetry() {
-        // Symmetric position
-        let board: Board = "r1bqkb1r/pppppppp/2n2n2/8/8/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 1"
-            .parse()
-            .unwrap();
-        let ctx = board.compute_attack_context();
-        let (mg, eg) = board.eval_threats_advanced(&ctx);
-        assert!(mg.abs() < 30, "symmetric threats should be near zero: {mg}");
-        assert!(
-            eg.abs() < 30,
-            "symmetric threats eg should be near zero: {eg}"
-        );
-    }
-
-    #[test]
-    fn test_skewer_detection() {
-        // Rook can potentially skewer king and queen on same rank
-        let board: Board = "4k3/8/8/8/R3q3/8/8/4K3 w - - 0 1".parse().unwrap();
-        let bonus = board.eval_skewers(Color::White);
-        // May or may not detect skewer depending on implementation
-        assert!(bonus >= 0, "skewer evaluation should not be negative");
-    }
-}
+mod tests;
