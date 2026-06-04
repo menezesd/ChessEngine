@@ -1,4 +1,6 @@
 /target
+/data
+/runs
 
 # Legacy C++ implementation
 chess.cpp

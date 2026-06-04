@@ -107,15 +107,13 @@ pub fn search(
         let best_move = simple::simple_search_multipv(
             board,
             state,
+            max_depth,
+            config.time_limit_ms,
+            config.node_limit,
             stop,
-            simple::SimpleSearchRequest {
-                max_depth,
-                time_limit_ms: config.time_limit_ms,
-                node_limit: config.node_limit,
-                info_callback: info_callback.clone(),
-                excluded_moves: &excluded_moves,
-                multipv_index: pv_index,
-            },
+            info_callback.clone(),
+            &excluded_moves,
+            pv_index,
         );
 
         if let Some(mv) = best_move {

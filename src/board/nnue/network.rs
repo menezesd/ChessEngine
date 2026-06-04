@@ -1,6 +1,6 @@
 //! NNUE network structure and evaluation.
 //!
-//! Implements a king-conditioned 49152 -> 256 -> 1 architecture with:
+//! Implements a 768 -> 256 -> 1 architecture with:
 //! - Dual perspective accumulators (white/black view)
 //! - Incremental updates for efficiency
 //! - `SCReLU` activation
@@ -8,22 +8,22 @@
 use super::simd;
 use super::{QA, QB, SCALE};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{Error, ErrorKind, Read};
 use std::path::Path;
 
-const SQUARE_COUNT: usize = 64;
-const PIECE_TYPE_COUNT: usize = 6;
-const COLOR_COUNT: usize = 2;
-const PIECE_FEATURES_PER_COLOR: usize = PIECE_TYPE_COUNT * SQUARE_COUNT;
-const FEATURES_PER_KING_SQUARE: usize = COLOR_COUNT * PIECE_FEATURES_PER_COLOR;
 const VERTICAL_FLIP_MASK: usize = 0b11_1000;
 const BLACK_PERSPECTIVE: usize = 1;
+const NETWORK_MAGIC: &[u8; 8] = b"RNQNNUE\0";
+const NETWORK_VERSION: u32 = 1;
 
-/// Input feature size: 64 king squares × 12 piece/color types × 64 piece squares.
-pub const INPUT_SIZE: usize = SQUARE_COUNT * FEATURES_PER_KING_SQUARE;
+/// Input feature size: 64 squares x 6 piece types x 2 colors.
+pub const INPUT_SIZE: usize = 64 * 6 * 2;
 
 /// Hidden layer size (must match trained network)
 pub const HIDDEN_SIZE: usize = 256;
+const RAW_NETWORK_BYTES: usize =
+    INPUT_SIZE * HIDDEN_SIZE * 2 + HIDDEN_SIZE * 2 + HIDDEN_SIZE * 2 + HIDDEN_SIZE * 2 + 2;
+const HEADER_BYTES: usize = NETWORK_MAGIC.len() + 4 + 4 + 4;
 
 /// NNUE accumulator storing hidden layer activations for both perspectives
 #[derive(Clone)]
@@ -105,51 +105,89 @@ pub struct NnueNetwork {
 impl NnueNetwork {
     /// Load network from a .nnue file
     pub fn load<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        Self::from_reader(&mut reader)
+        let mut file = File::open(path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        Self::from_bytes(&data)
     }
 
-    /// Load network from any reader.
-    fn from_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+    fn parse_payload(data: &[u8]) -> std::io::Result<&[u8]> {
+        if data.starts_with(NETWORK_MAGIC) {
+            if data.len() != HEADER_BYTES + RAW_NETWORK_BYTES {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "headered NNUE file has incorrect size",
+                ));
+            }
+
+            let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+            let input_size = u32::from_le_bytes(data[12..16].try_into().unwrap());
+            let hidden_size = u32::from_le_bytes(data[16..20].try_into().unwrap());
+            if version != NETWORK_VERSION {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "unsupported NNUE file version",
+                ));
+            }
+            if input_size as usize != INPUT_SIZE || hidden_size as usize != HIDDEN_SIZE {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "NNUE architecture does not match engine",
+                ));
+            }
+
+            return Ok(&data[HEADER_BYTES..]);
+        }
+
+        if data.len() == RAW_NETWORK_BYTES {
+            Ok(data)
+        } else {
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                "raw NNUE file has incorrect size",
+            ))
+        }
+    }
+
+    /// Load network from raw or headered bytes.
+    pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
+        fn read_i16(data: &[u8], offset: &mut usize) -> i16 {
+            let value = i16::from_le_bytes(data[*offset..*offset + 2].try_into().unwrap());
+            *offset += 2;
+            value
+        }
+
+        let payload = Self::parse_payload(data)?;
+        let mut offset = 0;
+
         // Read feature weights
         let mut feature_weights = vec![[0i16; HIDDEN_SIZE]; INPUT_SIZE];
         for row in feature_weights.iter_mut().take(INPUT_SIZE) {
             for weight in row.iter_mut().take(HIDDEN_SIZE) {
-                let mut buf = [0u8; 2];
-                reader.read_exact(&mut buf)?;
-                *weight = i16::from_le_bytes(buf);
+                *weight = read_i16(payload, &mut offset);
             }
         }
 
         // Read feature biases
         let mut feature_bias = [0i16; HIDDEN_SIZE];
         for elem in &mut feature_bias {
-            let mut buf = [0u8; 2];
-            reader.read_exact(&mut buf)?;
-            *elem = i16::from_le_bytes(buf);
+            *elem = read_i16(payload, &mut offset);
         }
 
         // Read output weights (white perspective)
         let mut output_weights_white = [0i16; HIDDEN_SIZE];
         for elem in &mut output_weights_white {
-            let mut buf = [0u8; 2];
-            reader.read_exact(&mut buf)?;
-            *elem = i16::from_le_bytes(buf);
+            *elem = read_i16(payload, &mut offset);
         }
 
         // Read output weights (black perspective)
         let mut output_weights_black = [0i16; HIDDEN_SIZE];
         for elem in &mut output_weights_black {
-            let mut buf = [0u8; 2];
-            reader.read_exact(&mut buf)?;
-            *elem = i16::from_le_bytes(buf);
+            *elem = read_i16(payload, &mut offset);
         }
 
         // Read output bias
-        let mut buf = [0u8; 2];
-        reader.read_exact(&mut buf)?;
-        let output_bias = i16::from_le_bytes(buf);
+        let output_bias = read_i16(payload, &mut offset);
 
         Ok(Self {
             feature_weights,
@@ -201,23 +239,15 @@ pub fn feature_index(
     piece_color: usize,
     square: usize,
     perspective: usize,
-    king_square: usize,
 ) -> usize {
-    let (oriented_sq, oriented_king, oriented_color) = if perspective == BLACK_PERSPECTIVE {
+    let (oriented_sq, oriented_color) = if perspective == BLACK_PERSPECTIVE {
         // Black's perspective - flip board vertically
-        (
-            square ^ VERTICAL_FLIP_MASK,
-            king_square ^ VERTICAL_FLIP_MASK,
-            COLOR_COUNT - 1 - piece_color,
-        )
+        (square ^ VERTICAL_FLIP_MASK, 1 - piece_color)
     } else {
         // White's perspective
-        (square, king_square, piece_color)
+        (square, piece_color)
     };
-    oriented_king * FEATURES_PER_KING_SQUARE
-        + oriented_color * PIECE_FEATURES_PER_COLOR
-        + piece_type * SQUARE_COUNT
-        + oriented_sq
+    oriented_color * 384 + piece_type * 64 + oriented_sq
 }
 
 /// Embedded default network (compiled into the binary)
@@ -231,34 +261,49 @@ impl NnueNetwork {
     pub fn from_embedded() -> Self {
         Self::from_bytes(EMBEDDED_NETWORK).expect("Embedded NNUE is invalid")
     }
-
-    /// Load network from byte slice
-    pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
-        use std::io::Cursor;
-        let mut reader = Cursor::new(data);
-        Self::from_reader(&mut reader)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{feature_index, INPUT_SIZE};
+    use super::{feature_index, HIDDEN_SIZE, INPUT_SIZE, NETWORK_MAGIC, RAW_NETWORK_BYTES};
+    use super::{NnueNetwork, NETWORK_VERSION};
 
     #[test]
     fn input_size_matches_feature_layout() {
-        assert_eq!(INPUT_SIZE, 64 * 12 * 64);
+        assert_eq!(INPUT_SIZE, 64 * 6 * 2);
     }
 
     #[test]
     fn feature_index_uses_white_perspective_layout() {
-        assert_eq!(feature_index(2, 1, 10, 0, 4), 4 * 768 + 384 + 2 * 64 + 10);
+        assert_eq!(feature_index(2, 1, 10, 0), 384 + 2 * 64 + 10);
     }
 
     #[test]
     fn feature_index_flips_square_and_color_for_black_perspective() {
-        assert_eq!(
-            feature_index(2, 1, 10, 1, 4),
-            (0b00_0100 ^ 0b11_1000) * 768 + 2 * 64 + (0b00_1010 ^ 0b11_1000)
-        );
+        assert_eq!(feature_index(2, 1, 10, 1), 2 * 64 + (0b00_1010 ^ 0b11_1000));
+    }
+
+    #[test]
+    fn exact_raw_network_size_loads_for_legacy_files() {
+        let data = vec![0; RAW_NETWORK_BYTES];
+        assert!(NnueNetwork::from_bytes(&data).is_ok());
+    }
+
+    #[test]
+    fn oversized_raw_network_is_rejected() {
+        let data = vec![0; RAW_NETWORK_BYTES + 2];
+        assert!(NnueNetwork::from_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn headered_network_rejects_wrong_architecture() {
+        let mut data = Vec::new();
+        data.extend_from_slice(NETWORK_MAGIC);
+        data.extend_from_slice(&NETWORK_VERSION.to_le_bytes());
+        data.extend_from_slice(&((INPUT_SIZE + 1) as u32).to_le_bytes());
+        data.extend_from_slice(&(HIDDEN_SIZE as u32).to_le_bytes());
+        data.resize(data.len() + RAW_NETWORK_BYTES, 0);
+
+        assert!(NnueNetwork::from_bytes(&data).is_err());
     }
 }

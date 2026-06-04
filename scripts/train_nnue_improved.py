@@ -28,12 +28,14 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from train_nnue_256 import MATERIAL_EG, MATERIAL_MG, PST_EG, PST_MG
 
 # Constants matching Rust implementation
-INPUT_SIZE = 64 * 12 * 64  # king square × piece/color × piece square
+INPUT_SIZE = 64 * 6 * 2  # square x piece type x color
 HIDDEN_SIZE = 256
 MAX_ACTIVE_FEATURES = 32
 SCALE = 400
 QA = 255
 QB = 64
+NNUE_MAGIC = b"RNQNNUE\0"
+NNUE_VERSION = 1
 
 PIECE_MAP = {
     "P": 0,
@@ -64,10 +66,16 @@ def get_device():
         return torch.device("cpu")
 
 
-def get_dataloader_config(device: torch.device) -> dict:
-    if sys.platform == "darwin" and device.type == "mps":
+def get_dataloader_config(device: torch.device, workers: Optional[int] = None) -> dict:
+    if workers is not None:
+        return {
+            "num_workers": workers,
+            "pin_memory": workers > 0 and device.type != "cpu",
+        }
+
+    if sys.platform == "darwin":
         print(
-            "Using safe DataLoader settings for macOS/MPS (num_workers=0, pin_memory=False)"
+            "Using safe DataLoader settings for macOS (num_workers=0, pin_memory=False)"
         )
         return {
             "num_workers": 0,
@@ -80,19 +88,15 @@ def get_dataloader_config(device: torch.device) -> dict:
     }
 
 
-def feature_index(
-    piece_type: int, piece_color: int, square: int, perspective: int, king_square: int
-) -> int:
+def feature_index(piece_type: int, piece_color: int, square: int, perspective: int) -> int:
     """Compute feature index for NNUE."""
     if perspective == 1:  # Black's perspective - flip board
         oriented_sq = square ^ 56
-        oriented_king = king_square ^ 56
         oriented_color = 1 - piece_color
     else:  # White's perspective
         oriented_sq = square
-        oriented_king = king_square
         oriented_color = piece_color
-    return oriented_king * 768 + oriented_color * 384 + piece_type * 64 + oriented_sq
+    return oriented_color * 384 + piece_type * 64 + oriented_sq
 
 
 def mirror_square(sq: int) -> int:
@@ -118,7 +122,6 @@ def parse_fen_features(
     black_features = []
     square = 56
     pieces = []
-    king_squares = [None, None]
 
     for char in board:
         if char == "/":
@@ -131,17 +134,12 @@ def parse_fen_features(
 
             # Apply horizontal mirror if requested
             actual_sq = mirror_square(square) if do_mirror else square
-            if piece_type == 5:
-                king_squares[piece_color] = actual_sq
             pieces.append((piece_type, piece_color, actual_sq))
             square += 1
 
-    if king_squares[0] is None or king_squares[1] is None:
-        raise ValueError("FEN is missing a king")
-
     for piece_type, piece_color, actual_sq in pieces:
-        white_features.append(feature_index(piece_type, piece_color, actual_sq, 0, king_squares[0]))
-        black_features.append(feature_index(piece_type, piece_color, actual_sq, 1, king_squares[1]))
+        white_features.append(feature_index(piece_type, piece_color, actual_sq, 0))
+        black_features.append(feature_index(piece_type, piece_color, actual_sq, 1))
 
     return white_features, black_features, white_to_move
 
@@ -167,7 +165,7 @@ def is_quiet_position(fen: str) -> bool:
 
 
 class NNUE256(nn.Module):
-    """NNUE Network: HalfKP -> HIDDEN_SIZE x 2 perspectives -> 1"""
+    """NNUE Network: 768 -> HIDDEN_SIZE x 2 perspectives -> 1"""
 
     def __init__(self, dropout: float = 0.0):
         super().__init__()
@@ -194,35 +192,34 @@ class NNUE256(nn.Module):
         with torch.no_grad():
             self.feature_weights.data.zero_()
 
-            for king_square in range(64):
-                for piece_color in range(2):
-                    for piece_type in range(6):
-                        for square in range(64):
-                            feature_idx = king_square * 768 + piece_color * 384 + piece_type * 64 + square
+            for piece_color in range(2):
+                for piece_type in range(6):
+                    for square in range(64):
+                        feature_idx = piece_color * 384 + piece_type * 64 + square
 
-                            if piece_color == 0:
-                                pst_sq = square
-                                sign = 1
-                            else:
-                                pst_sq = square ^ 56
-                                sign = -1
+                        if piece_color == 0:
+                            pst_sq = square
+                            sign = 1
+                        else:
+                            pst_sq = square ^ 56
+                            sign = -1
 
-                            pst_mg = PST_MG[piece_type][pst_sq]
-                            pst_eg = PST_EG[piece_type][pst_sq]
-                            material_mg = MATERIAL_MG[piece_type]
-                            material_eg = MATERIAL_EG[piece_type]
+                        pst_mg = PST_MG[piece_type][pst_sq]
+                        pst_eg = PST_EG[piece_type][pst_sq]
+                        material_mg = MATERIAL_MG[piece_type]
+                        material_eg = MATERIAL_EG[piece_type]
 
-                            pst_value = 0.7 * pst_mg + 0.3 * pst_eg
-                            material_value = 0.7 * material_mg + 0.3 * material_eg
+                        pst_value = 0.7 * pst_mg + 0.3 * pst_eg
+                        material_value = 0.7 * material_mg + 0.3 * material_eg
 
-                            total_value = (pst_value + material_value) * sign
+                        total_value = (pst_value + material_value) * sign
 
-                            scaled_value = total_value / SCALE / (HIDDEN_SIZE**0.5)
+                        scaled_value = total_value / SCALE / (HIDDEN_SIZE**0.5)
 
-                            for h in range(HIDDEN_SIZE):
-                                self.feature_weights.data[feature_idx, h] = scaled_value * (
-                                    0.8 + 0.4 * ((h + piece_type) % 5) / 5
-                                )
+                        for h in range(HIDDEN_SIZE):
+                            self.feature_weights.data[feature_idx, h] = scaled_value * (
+                                0.8 + 0.4 * ((h + piece_type) % 5) / 5
+                            )
 
             self.output_weights_white.data.fill_(1.0 / (HIDDEN_SIZE**0.5))
             self.output_weights_black.data.fill_(1.0 / (HIDDEN_SIZE**0.5))
@@ -236,8 +233,8 @@ class NNUE256(nn.Module):
         white_to_move: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass."""
-        # Compute accumulators. HalfKP batches pass sparse feature indices
-        # padded with -1; older dense one-hot tensors are still supported.
+        # Compute accumulators. Sparse feature batches are padded with -1;
+        # older dense one-hot tensors are still supported.
         if white_features.dtype == torch.long:
             white_idx = white_features.clamp_min(0)
             black_idx = black_features.clamp_min(0)
@@ -290,6 +287,11 @@ class NNUE256(nn.Module):
     def export_quantized(self, path: str):
         """Export to quantized binary format for Rust."""
         with open(path, "wb") as f:
+            f.write(NNUE_MAGIC)
+            f.write(struct.pack("<I", NNUE_VERSION))
+            f.write(struct.pack("<I", INPUT_SIZE))
+            f.write(struct.pack("<I", HIDDEN_SIZE))
+
             # Feature weights
             weights = (
                 (self.feature_weights.detach().cpu().numpy() * QA)
@@ -345,6 +347,16 @@ class NNUE256(nn.Module):
             data = f.read()
 
         offset = 0
+        if data.startswith(NNUE_MAGIC):
+            version, input_size, hidden_size = struct.unpack_from("<III", data, len(NNUE_MAGIC))
+            if version != NNUE_VERSION:
+                raise ValueError(f"Unsupported NNUE version: {version}")
+            if input_size != INPUT_SIZE or hidden_size != HIDDEN_SIZE:
+                raise ValueError(
+                    f"NNUE architecture mismatch: file is {input_size}->{hidden_size}, "
+                    f"trainer expects {INPUT_SIZE}->{HIDDEN_SIZE}"
+                )
+            offset = len(NNUE_MAGIC) + 12
 
         def read_i16(count: int):
             nonlocal offset
@@ -362,12 +374,21 @@ class NNUE256(nn.Module):
             self.output_bias.copy_(read_i16(1) * SCALE / (QA * QB))
 
     def load_piece_square_quantized(self, path: str):
-        """Initialize HalfKP rows from a legacy 768-input piece-square NNUE."""
-        legacy_input_size = 768
+        """Load a legacy raw 768-input piece-square NNUE."""
         with open(path, "rb") as f:
             data = f.read()
 
         offset = 0
+        if data.startswith(NNUE_MAGIC):
+            version, input_size, hidden_size = struct.unpack_from("<III", data, len(NNUE_MAGIC))
+            if version != NNUE_VERSION:
+                raise ValueError(f"Unsupported NNUE version: {version}")
+            if input_size != INPUT_SIZE or hidden_size != HIDDEN_SIZE:
+                raise ValueError(
+                    f"NNUE architecture mismatch: file is {input_size}->{hidden_size}, "
+                    f"trainer expects {INPUT_SIZE}->{HIDDEN_SIZE}"
+                )
+            offset = len(NNUE_MAGIC) + 12
 
         def read_i16(count: int):
             nonlocal offset
@@ -377,23 +398,9 @@ class NNUE256(nn.Module):
             return values.to(torch.float32)
 
         with torch.no_grad():
-            legacy_weights = read_i16(legacy_input_size * HIDDEN_SIZE).reshape(
-                legacy_input_size, HIDDEN_SIZE
-            ) / QA
-            self.feature_weights.zero_()
-            for king_square in range(64):
-                for oriented_color in range(2):
-                    for piece_type in range(6):
-                        for square in range(64):
-                            halfkp_idx = (
-                                king_square * 768
-                                + oriented_color * 384
-                                + piece_type * 64
-                                + square
-                            )
-                            legacy_idx = oriented_color * 384 + piece_type * 64 + square
-                            self.feature_weights[halfkp_idx].copy_(legacy_weights[legacy_idx])
-
+            self.feature_weights.copy_(
+                read_i16(INPUT_SIZE * HIDDEN_SIZE).reshape(INPUT_SIZE, HIDDEN_SIZE) / QA
+            )
             self.feature_bias.copy_(read_i16(HIDDEN_SIZE) / QA)
             self.output_weights_white.copy_(read_i16(HIDDEN_SIZE) / QB)
             self.output_weights_black.copy_(read_i16(HIDDEN_SIZE) / QB)
@@ -675,7 +682,7 @@ def validate(
 
 def main():
     parser = argparse.ArgumentParser(description="Improved NNUE Training")
-    parser.add_argument("--data", type=str, nargs="+", required=True)
+    parser.add_argument("--data", type=str, nargs="+", default=[])
     parser.add_argument("--output", type=str, default="trained_improved.nnue")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=8192)
@@ -686,10 +693,19 @@ def main():
         default=0.0,
         help="WDL loss weight (0 = pure eval, higher adds game result signal)",
     )
-    parser.add_argument(
+    eval_objective = parser.add_mutually_exclusive_group()
+    eval_objective.add_argument(
         "--sigmoid-eval-loss",
+        dest="sigmoid_eval_loss",
         action="store_true",
-        help="Use legacy sigmoid-space eval loss instead of raw-output regression",
+        default=True,
+        help="Use sigmoid-space eval loss: mse(sigmoid(output), sigmoid(search eval)); default",
+    )
+    eval_objective.add_argument(
+        "--raw-eval-loss",
+        dest="sigmoid_eval_loss",
+        action="store_false",
+        help="Use raw-output eval regression selected by --eval-loss",
     )
     parser.add_argument(
         "--eval-loss",
@@ -714,7 +730,7 @@ def main():
         "--init-piece-square-nnue",
         type=str,
         default=None,
-        help="Initialize HalfKP rows from a legacy 768-input .nnue file",
+        help="Initialize from a legacy raw or headered 768-input .nnue file",
     )
     parser.add_argument(
         "--no-augment",
@@ -756,7 +772,24 @@ def main():
         help="Export a quantized NNUE after every epoch with this prefix",
     )
     parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=None,
+        help="Directory for .pt checkpoints; defaults to the output file directory",
+    )
+    parser.add_argument(
         "--val-split", type=float, default=0.05, help="Validation split ratio"
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="DataLoader worker processes; defaults to a safe platform-specific value",
+    )
+    parser.add_argument(
+        "--export-only",
+        action="store_true",
+        help="Load checkpoint/init weights, export --output as quantized NNUE, and exit",
     )
     args = parser.parse_args()
 
@@ -776,8 +809,15 @@ def main():
         model.load_quantized(args.init_nnue)
 
     if args.init_piece_square_nnue and os.path.exists(args.init_piece_square_nnue):
-        print(f"Loading legacy piece-square NNUE into HalfKP rows: {args.init_piece_square_nnue}")
+        print(f"Loading 768-input NNUE: {args.init_piece_square_nnue}")
         model.load_piece_square_quantized(args.init_piece_square_nnue)
+
+    if args.export_only:
+        model.export_quantized(args.output)
+        return
+
+    if not args.data:
+        parser.error("--data is required unless --export-only is used")
 
     if args.freeze_feature:
         model.feature_weights.requires_grad_(False)
@@ -821,7 +861,7 @@ def main():
 
     print(f"Train: {len(train_dataset):,}, Val: {len(val_dataset):,}")
 
-    loader_config = get_dataloader_config(device)
+    loader_config = get_dataloader_config(device, args.workers)
 
     train_loader = DataLoader(
         train_dataset,
@@ -870,6 +910,8 @@ def main():
     best_val_loss = float("inf")
     patience = 5
     patience_counter = 0
+    checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else Path(args.output).parent
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(args.epochs):
         t0 = time.time()
@@ -912,7 +954,7 @@ def main():
                 "train_loss": train_loss,
                 "val_loss": val_loss,
             },
-            f"checkpoint_improved_epoch_{epoch + 1}.pt",
+            checkpoint_dir / f"checkpoint_improved_epoch_{epoch + 1}.pt",
         )
         if args.checkpoint_prefix:
             model.export_quantized(f"{args.checkpoint_prefix}_epoch_{epoch + 1}.nnue")

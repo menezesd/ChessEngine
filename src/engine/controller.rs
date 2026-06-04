@@ -40,7 +40,7 @@ pub struct EngineController {
     num_threads: usize,
 }
 
-/// Default NNUE file paths to try loading (used when embedded_nnue is disabled)
+/// Default NNUE file paths to try loading (used when `embedded_nnue` is disabled)
 #[cfg(not(feature = "embedded_nnue"))]
 const DEFAULT_NNUE_PATHS: &[&str] = &["trained_new_combined.nnue", "trained.nnue", "default.nnue"];
 
@@ -84,11 +84,9 @@ impl EngineController {
         // Fall back to loading from file
         #[cfg(not(feature = "embedded_nnue"))]
         for path in DEFAULT_NNUE_PATHS {
-            if std::path::Path::new(path).exists() {
-                if self.load_nnue(path).is_ok() {
-                    eprintln!("info string Loaded NNUE: {}", path);
-                    return;
-                }
+            if std::path::Path::new(path).exists() && self.load_nnue(path).is_ok() {
+                eprintln!("info string Loaded NNUE: {path}");
+                return;
             }
         }
     }

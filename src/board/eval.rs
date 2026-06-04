@@ -159,9 +159,6 @@ impl Board {
 
         let mut white_features = Vec::with_capacity(32);
         let mut black_features = Vec::with_capacity(32);
-        let white_king = self.king_square_index(Color::White);
-        let black_king = self.king_square_index(Color::Black);
-
         for color in Color::BOTH {
             let color_idx = color.index();
             for piece in Piece::ALL {
@@ -169,9 +166,9 @@ impl Board {
                 for sq in self.pieces_of(color, piece).iter() {
                     let sq_idx = sq.as_index();
                     // White's perspective
-                    white_features.push(feature_index(piece_idx, color_idx, sq_idx, 0, white_king));
+                    white_features.push(feature_index(piece_idx, color_idx, sq_idx, 0));
                     // Black's perspective
-                    black_features.push(feature_index(piece_idx, color_idx, sq_idx, 1, black_king));
+                    black_features.push(feature_index(piece_idx, color_idx, sq_idx, 1));
                 }
             }
         }

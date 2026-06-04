@@ -150,7 +150,11 @@ def main():
                 print(f"MISS {epd_id}: best={best}/{san} expected={','.join(bms)}")
 
     engine.quit()
-    mode = "NNUE" if args.nnue else "HCE"
+    use_nnue = args.nnue is not None or any(
+        option.lower().replace(" ", "") == "usennuevaluetrue"
+        for option in args.setoption
+    )
+    mode = "NNUE" if use_nnue else "HCE"
     print(f"WAC ({mode}): {correct}/{total}")
 
 

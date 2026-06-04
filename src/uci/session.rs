@@ -102,7 +102,6 @@ impl UciSession {
                 self.handle_go(&params);
             }
             UciCommand::Eval => {
-                let hce = self.engine.board().evaluate_simple();
                 self.engine.with_search_state_ref(|state| {
                     let nnue = state.tables.nnue.as_ref().map(|network| {
                         scaled_eval(
@@ -110,11 +109,21 @@ impl UciSession {
                             state.nnue_eval_scale,
                         )
                     });
-                    let blend = state.nnue_static_blend;
-                    let blended = nnue.map_or(hce, |nnue_eval| blended_eval(nnue_eval, hce, blend));
+                    let blend = state.nnue_hce_blend;
+                    let needs_hce = nnue.is_none() || blend < 100 || !state.nnue_pure_static_eval;
+                    let hce = needs_hce.then(|| self.engine.board().evaluate_simple());
+                    let blended = match (nnue, hce) {
+                        (Some(nnue_eval), Some(hce_eval)) => {
+                            blended_eval(nnue_eval, hce_eval, blend)
+                        }
+                        (Some(nnue_eval), None) => nnue_eval,
+                        (None, Some(hce_eval)) => hce_eval,
+                        (None, None) => 0,
+                    };
                     println!(
-                        "info string eval hce {hce} nnue {} blend {blend} blended {blended}",
-                        nnue.map_or_else(|| "none".to_string(), |v| v.to_string())
+                        "info string eval hce {hce} nnue {nnue} blend {blend} blended {blended}",
+                        hce = hce.map_or_else(|| "none".to_string(), |v| v.to_string()),
+                        nnue = nnue.map_or_else(|| "none".to_string(), |v| v.to_string())
                     );
                 });
             }

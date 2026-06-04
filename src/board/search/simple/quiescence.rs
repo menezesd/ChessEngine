@@ -1,7 +1,8 @@
 use super::super::constants::{MAX_QSEARCH_DEPTH, SCORE_INFINITE};
 use super::super::move_order::piece_value;
-use super::{mate_score_for_ply, SimpleSearchContext};
-use crate::board::{Piece, ScoredMoveList, EMPTY_MOVE};
+use super::super::MATE_SCORE;
+use super::SimpleSearchContext;
+use crate::board::{ScoredMoveList, EMPTY_MOVE};
 
 /// Delta pruning safety margin (centipawns)
 const DELTA_MARGIN: i32 = 200;
@@ -21,32 +22,6 @@ const SEE_THRESHOLD_DEEP: i32 = -200;
 /// Depth thresholds for SEE pruning
 const SEE_SHALLOW_DEPTH: i32 = 2;
 const SEE_MEDIUM_DEPTH: i32 = 5;
-const TT_MOVE_ORDERING_SCORE: i32 = 1_000_000;
-const MIN_MOVES_TO_SORT: usize = 4;
-
-fn delta_margin(qdepth: i32) -> i32 {
-    if qdepth <= SEE_SHALLOW_DEPTH {
-        DELTA_MARGIN
-    } else {
-        DELTA_MARGIN.saturating_add(DELTA_MARGIN_DEEP)
-    }
-}
-
-fn delta_pruning_upper_bound(stand_pat: i32, captured_value: i32, margin: i32) -> i32 {
-    stand_pat
-        .saturating_add(captured_value)
-        .saturating_add(margin)
-}
-
-fn see_threshold(qdepth: i32) -> i32 {
-    if qdepth <= SEE_SHALLOW_DEPTH {
-        SEE_THRESHOLD_SHALLOW
-    } else if qdepth <= SEE_MEDIUM_DEPTH {
-        SEE_THRESHOLD_MEDIUM
-    } else {
-        SEE_THRESHOLD_DEEP
-    }
-}
 
 impl SimpleSearchContext<'_> {
     /// Quiescence search for tactical stability with SEE and delta pruning.
@@ -66,7 +41,7 @@ impl SimpleSearchContext<'_> {
         let moves = if in_check {
             let moves = self.board.generate_moves();
             if moves.is_empty() {
-                return mate_score_for_ply(-1, ply); // Checkmate (ply-adjusted)
+                return -MATE_SCORE + ply as i32; // Checkmate (ply-adjusted)
             }
             moves
         } else {
@@ -93,13 +68,13 @@ impl SimpleSearchContext<'_> {
         let mut sorted_moves = ScoredMoveList::new();
         for m in &moves {
             let score = if *m == tt_move {
-                TT_MOVE_ORDERING_SCORE
+                1_000_000 // TT move first
             } else {
                 self.state.tables.mvv_lva_score(self.board, m)
             };
             sorted_moves.push(*m, score);
         }
-        if sorted_moves.len() >= MIN_MOVES_TO_SORT {
+        if sorted_moves.len() > 3 {
             sorted_moves.sort_by_score_desc();
         }
 
@@ -121,9 +96,13 @@ impl SimpleSearchContext<'_> {
                 } else {
                     0
                 };
-                if delta_pruning_upper_bound(stand_pat, captured_value, delta_margin(qdepth))
-                    < alpha
-                {
+                let margin = if qdepth <= SEE_SHALLOW_DEPTH {
+                    DELTA_MARGIN
+                } else {
+                    DELTA_MARGIN + DELTA_MARGIN_DEEP
+                };
+                let delta = captured_value + margin;
+                if stand_pat + delta < alpha {
                     continue;
                 }
             }
@@ -133,23 +112,26 @@ impl SimpleSearchContext<'_> {
             // At deeper qsearch, allow slightly bad captures to find tactics
             if !in_check {
                 let see_score = self.board.see(m.from(), m.to());
-                if see_score < see_threshold(qdepth) {
+                let see_threshold = if qdepth <= SEE_SHALLOW_DEPTH {
+                    SEE_THRESHOLD_SHALLOW
+                } else if qdepth <= SEE_MEDIUM_DEPTH {
+                    SEE_THRESHOLD_MEDIUM
+                } else {
+                    SEE_THRESHOLD_DEEP
+                };
+                if see_score < see_threshold {
                     continue;
                 }
             }
 
-            super::increment_node_count(&mut self.nodes);
+            self.nodes += 1;
 
             // Update NNUE accumulator before make_move
-            let moving_piece = self.board.piece_at(m.from()).map(|(_, piece)| piece);
-            if let Some(piece) = moving_piece {
+            if let Some((_, piece)) = self.board.piece_at(m.from()) {
                 self.update_accumulator_for_move(ply, m, piece, self.board.side_to_move());
             }
 
             let info = self.board.make_move(m);
-            if moving_piece == Some(Piece::King) {
-                self.init_accumulator(ply + 1);
-            }
             // Prefetch TT for child position
             self.state.tables.tt.prefetch(self.board.hash);
             let score = -self.quiesce(-beta, -alpha, ply + 1, qdepth + 1);
@@ -167,35 +149,5 @@ impl SimpleSearchContext<'_> {
         }
 
         best_score
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{delta_margin, delta_pruning_upper_bound, see_threshold};
-
-    #[test]
-    fn delta_margin_increases_after_shallow_qdepth() {
-        assert_eq!(delta_margin(2), 200);
-        assert_eq!(delta_margin(3), 300);
-    }
-
-    #[test]
-    fn see_threshold_relaxes_with_qdepth() {
-        assert_eq!(see_threshold(2), 0);
-        assert_eq!(see_threshold(5), -100);
-        assert_eq!(see_threshold(6), -200);
-    }
-
-    #[test]
-    fn delta_pruning_upper_bound_saturates_extreme_inputs() {
-        assert_eq!(
-            delta_pruning_upper_bound(i32::MAX, i32::MAX, i32::MAX),
-            i32::MAX
-        );
-        assert_eq!(
-            delta_pruning_upper_bound(i32::MIN, i32::MIN, i32::MIN),
-            i32::MIN
-        );
     }
 }

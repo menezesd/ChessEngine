@@ -34,3 +34,9 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      - name: Run clippy without default features
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
+      - name: Run tests without default features
+        run: cargo test --no-default-features

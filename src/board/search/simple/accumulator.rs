@@ -1,11 +1,10 @@
 use crate::board::nnue::network::feature_index;
 use crate::board::nnue::{NnueAccumulator, NnueNetwork};
 use crate::board::{Board, Color, Move, Piece, Square};
-use crate::eval_math::{blended_eval, scaled_eval};
+use crate::eval_math::scaled_eval;
 
 use super::SimpleSearchContext;
 
-const EVAL_SCALE_DENOMINATOR: i32 = 100;
 const STATIC_TRACE_MAX_PLY: usize = 8;
 const STATIC_TRACE_NODE_INTERVAL_LOG2: u32 = 6;
 
@@ -23,17 +22,12 @@ fn update_accumulator_stack_for_move(
     }
 
     stack[ply + 1] = stack[ply].clone();
-    if moving_piece == Piece::King {
-        return;
-    }
     let acc = &mut stack[ply + 1];
 
     let feat = |piece: Piece, color: Color, sq: usize| -> (usize, usize) {
-        let white_king = board.king_square_index(Color::White);
-        let black_king = board.king_square_index(Color::Black);
         (
-            feature_index(piece.index(), color.index(), sq, 0, white_king),
-            feature_index(piece.index(), color.index(), sq, 1, black_king),
+            feature_index(piece.index(), color.index(), sq, 0),
+            feature_index(piece.index(), color.index(), sq, 1),
         )
     };
 
@@ -59,6 +53,16 @@ fn update_accumulator_stack_for_move(
     let placed_piece = m.promotion().unwrap_or(moving_piece);
     let (wf, bf) = feat(placed_piece, moving_color, m.to().index());
     acc.add_feature(wf, bf, network);
+
+    if m.is_castling() {
+        let (rook_from_file, rook_to_file) = if m.to().file() == 6 { (7, 5) } else { (0, 3) };
+        let rook_from = Square::new(m.to().rank(), rook_from_file).index();
+        let rook_to = Square::new(m.to().rank(), rook_to_file).index();
+        let (wf, bf) = feat(Piece::Rook, moving_color, rook_from);
+        acc.sub_feature(wf, bf, network);
+        let (wf, bf) = feat(Piece::Rook, moving_color, rook_to);
+        acc.add_feature(wf, bf, network);
+    }
 }
 
 impl SimpleSearchContext<'_> {
@@ -93,20 +97,6 @@ impl SimpleSearchContext<'_> {
                     static_nnue.evaluate(&self.static_acc_stack[ply], self.board.white_to_move),
                     self.state.nnue_static_eval_scale,
                 );
-            }
-        }
-        if ply < self.acc_stack.len() {
-            if let Some(ref nnue) = self.state.tables.nnue {
-                let nnue_eval = scaled_eval(
-                    nnue.evaluate(&self.acc_stack[ply], self.board.white_to_move),
-                    self.state.nnue_eval_scale,
-                );
-                let blend = self.state.nnue_static_blend;
-                if blend >= EVAL_SCALE_DENOMINATOR {
-                    return nnue_eval;
-                }
-                let hce_eval = self.board.evaluate_simple();
-                return blended_eval(nnue_eval, hce_eval, blend);
             }
         }
         self.board.evaluate_simple()
@@ -176,18 +166,11 @@ impl SimpleSearchContext<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blended_eval, scaled_eval};
+    use super::scaled_eval;
 
     #[test]
     fn scaled_eval_applies_percent_scale() {
         assert_eq!(scaled_eval(240, 50), 120);
         assert_eq!(scaled_eval(-240, 125), -300);
-    }
-
-    #[test]
-    fn blended_eval_weights_nnue_and_hce() {
-        assert_eq!(blended_eval(100, 300, 100), 100);
-        assert_eq!(blended_eval(100, 300, 0), 300);
-        assert_eq!(blended_eval(100, 300, 25), 250);
     }
 }

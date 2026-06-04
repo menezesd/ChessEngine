@@ -183,20 +183,61 @@ def main():
     parser.add_argument(
         "--batch-size", type=int, default=500, help="Positions per SF worker batch"
     )
+    parser.add_argument(
+        "--skip-first",
+        type=int,
+        default=8,
+        help="Opening moves to skip before sampling positions",
+    )
+    parser.add_argument(
+        "--sample-rate",
+        type=float,
+        default=0.3,
+        help="Probability of keeping each eligible position",
+    )
+    parser.add_argument(
+        "--allocation",
+        choices=["equal", "size"],
+        default="equal",
+        help="How to split the requested position cap across PGN files",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random sampling seed")
+    parser.add_argument(
+        "--extract-only",
+        action="store_true",
+        help="Only extract and count sampled positions; do not label or write output",
+    )
     args = parser.parse_args()
+    random.seed(args.seed)
 
     # Extract positions from PGNs
     print("Extracting positions from PGNs...")
     all_positions = []
-    per_file = args.positions // len(args.pgn) + 1
-    for pgn in args.pgn:
+    if args.allocation == "size":
+        sizes = [max(os.path.getsize(pgn), 1) for pgn in args.pgn]
+        total_size = sum(sizes)
+        per_file_caps = [
+            max(1, int(args.positions * size / total_size) + 1) for size in sizes
+        ]
+    else:
+        per_file = args.positions // len(args.pgn) + 1
+        per_file_caps = [per_file for _ in args.pgn]
+
+    for pgn, cap in zip(args.pgn, per_file_caps):
         print(f"  {pgn}")
-        positions = extract_positions_from_pgn(pgn, per_file)
+        positions = extract_positions_from_pgn(
+            pgn,
+            cap,
+            skip_first_n=args.skip_first,
+            sample_rate=args.sample_rate,
+        )
         all_positions.extend(positions)
 
     random.shuffle(all_positions)
     all_positions = all_positions[: args.positions]
     print(f"Total: {len(all_positions)} positions to label")
+    if args.extract_only:
+        return
 
     # Label with Stockfish in parallel
     print(f"Labeling with SF depth {args.depth} using {args.workers} workers...")
@@ -204,26 +245,23 @@ def main():
     for i in range(0, len(all_positions), args.batch_size):
         batches.append(all_positions[i : i + args.batch_size])
 
-    labeled = []
     done = 0
-    with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = {
-            executor.submit(sf_worker, batch, args.sf_path, args.depth): batch
-            for batch in batches
-        }
-        for future in as_completed(futures):
-            results = future.result()
-            labeled.extend(results)
-            done += len(results)
-            if done % 10000 < args.batch_size:
-                print(f"  Labeled {done}/{len(all_positions)} positions", flush=True)
+    with open(args.output, "w") as out:
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(sf_worker, batch, args.sf_path, args.depth): batch
+                for batch in batches
+            }
+            for future in as_completed(futures):
+                results = future.result()
+                for line in results:
+                    out.write(line + "\n")
+                done += len(results)
+                if done % 10000 < args.batch_size:
+                    out.flush()
+                    print(f"  Labeled {done}/{len(all_positions)} positions", flush=True)
 
-    # Write output
-    with open(args.output, "w") as f:
-        for line in labeled:
-            f.write(line + "\n")
-
-    print(f"Done! Wrote {len(labeled)} labeled positions to {args.output}")
+    print(f"Done! Wrote {done} labeled positions to {args.output}")
 
 
 if __name__ == "__main__":

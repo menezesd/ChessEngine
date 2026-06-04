@@ -1,32 +1,5 @@
 use super::super::constants::SCORE_NEAR_MATE;
 use super::{NodeContext, SimpleSearchContext};
-use crate::board::Piece;
-
-const NULL_MOVE_MIN_DEPTH: u32 = 3;
-const NULL_MOVE_EVAL_MARGIN: i32 = 20;
-const NULL_MOVE_DEPTH_DIVISOR: u32 = 3;
-const PROBCUT_MIN_DEPTH: u32 = 8;
-const PROBCUT_MARGIN: i32 = 350;
-const PROBCUT_DEPTH_REDUCTION: u32 = 5;
-const REVERSE_FUTILITY_MAX_DEPTH: u32 = 7;
-
-fn null_move_reduction(depth: u32) -> u32 {
-    super::super::constants::NULL_MOVE_BASE_REDUCTION + (depth + 1) / NULL_MOVE_DEPTH_DIVISOR
-}
-
-fn null_window_beta(beta: i32) -> i32 {
-    beta.saturating_sub(1)
-}
-
-fn probcut_beta(beta: i32) -> i32 {
-    beta.saturating_add(PROBCUT_MARGIN)
-}
-
-fn reverse_futility_score(eval: i32, margin: i32, depth: u32) -> i32 {
-    let margin = i64::from(margin) * i64::from(depth);
-    let score = i64::from(eval) - margin;
-    score.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-}
 
 impl SimpleSearchContext<'_> {
     /// Try null move pruning with verification
@@ -43,15 +16,15 @@ impl SimpleSearchContext<'_> {
         // Allow null move when eval is slightly below beta (more aggressive)
         if node.in_check
             || dominated_phase == 0
-            || depth < NULL_MOVE_MIN_DEPTH
+            || depth <= 2
             || depth >= self.initial_depth
             || node.ply == 0
-            || eval < beta - NULL_MOVE_EVAL_MARGIN
+            || eval < beta - 20
         {
             return None;
         }
 
-        let r = null_move_reduction(depth);
+        let r = super::super::constants::NULL_MOVE_BASE_REDUCTION + (depth + 1) / 3;
         let reduced_depth = depth.saturating_sub(r);
 
         self.copy_accumulator_for_null_move(node.ply);
@@ -59,7 +32,7 @@ impl SimpleSearchContext<'_> {
         let score = -self.alphabeta(
             reduced_depth,
             -beta,
-            null_window_beta(-beta),
+            -beta + 1,
             false,
             node.ply + 1,
             crate::board::EMPTY_MOVE,
@@ -83,12 +56,12 @@ impl SimpleSearchContext<'_> {
     pub(super) fn try_probcut(&mut self, depth: u32, beta: i32, node: &NodeContext) -> Option<i32> {
         // Very conservative: only at high depths, not in check
         // High margin to avoid pruning tactical positions
-        if depth < PROBCUT_MIN_DEPTH || node.in_check || beta.abs() > SCORE_NEAR_MATE {
+        if depth < 8 || node.in_check || beta.abs() > SCORE_NEAR_MATE {
             return None;
         }
 
-        let probcut_beta = probcut_beta(beta);
-        let probcut_depth = depth.saturating_sub(PROBCUT_DEPTH_REDUCTION);
+        let probcut_beta = beta + 350;
+        let probcut_depth = depth.saturating_sub(5);
 
         // Generate captures and promotions
         let captures = self.board.generate_tactical_moves();
@@ -100,21 +73,17 @@ impl SimpleSearchContext<'_> {
             }
 
             // Update NNUE accumulator before make_move
-            let moving_piece = self.board.piece_at(m.from()).map(|(_, piece)| piece);
-            if let Some(piece) = moving_piece {
+            if let Some((_, piece)) = self.board.piece_at(m.from()) {
                 self.update_accumulator_for_move(node.ply, *m, piece, self.board.side_to_move());
             }
 
             let info = self.board.make_move(*m);
-            if moving_piece == Some(Piece::King) {
-                self.init_accumulator(node.ply + 1);
-            }
 
             // Do a reduced search at probcut_beta
             let score = -self.alphabeta(
                 probcut_depth,
                 -probcut_beta,
-                null_window_beta(-probcut_beta),
+                -probcut_beta + 1,
                 false,
                 node.ply + 1,
                 crate::board::EMPTY_MOVE,
@@ -143,11 +112,12 @@ impl SimpleSearchContext<'_> {
         beta: i32,
         eval: i32,
     ) -> Option<i32> {
-        if depth > REVERSE_FUTILITY_MAX_DEPTH {
+        if depth >= 8 {
             return None;
         }
 
-        if reverse_futility_score(eval, self.state.params.rfp_margin, depth) >= beta {
+        let margin = self.state.params.rfp_margin * depth as i32;
+        if eval - margin >= beta {
             return Some(beta);
         }
 
@@ -186,41 +156,5 @@ impl SimpleSearchContext<'_> {
         }
 
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{null_move_reduction, null_window_beta, probcut_beta, reverse_futility_score};
-    use crate::board::search::constants::NULL_MOVE_BASE_REDUCTION;
-
-    #[test]
-    fn null_move_reduction_scales_by_depth() {
-        assert_eq!(null_move_reduction(3), NULL_MOVE_BASE_REDUCTION + 1);
-        assert_eq!(null_move_reduction(8), NULL_MOVE_BASE_REDUCTION + 3);
-    }
-
-    #[test]
-    fn null_window_beta_saturates_at_i32_min() {
-        assert_eq!(null_window_beta(i32::MIN), i32::MIN);
-        assert_eq!(null_window_beta(10), 9);
-    }
-
-    #[test]
-    fn probcut_beta_saturates_at_i32_max() {
-        assert_eq!(probcut_beta(i32::MAX), i32::MAX);
-        assert_eq!(probcut_beta(10), 360);
-    }
-
-    #[test]
-    fn reverse_futility_score_saturates_extreme_inputs() {
-        assert_eq!(
-            reverse_futility_score(i32::MIN, i32::MAX, u32::MAX),
-            i32::MIN
-        );
-        assert_eq!(
-            reverse_futility_score(i32::MAX, i32::MIN, u32::MAX),
-            i32::MAX
-        );
     }
 }
