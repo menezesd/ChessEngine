@@ -1,4 +1,4 @@
-use super::handler::{normalized_memory_mb, normalized_search_depth};
+use super::handler::{normalized_memory_mb, normalized_search_depth, seconds_to_centiseconds};
 use super::*;
 use crate::board::search::DEFAULT_MAX_DEPTH;
 use crate::board::{Color, DEFAULT_TT_MB};
@@ -33,6 +33,12 @@ fn test_level_command_initializes_clock_from_base_time() {
         handler.time_control(),
         TimeControl::from_xboard_time(30_000, 2, Some(40))
     );
+}
+
+#[test]
+fn test_seconds_to_centiseconds_converts_large_values() {
+    assert_eq!(seconds_to_centiseconds(300), 30_000);
+    assert_eq!(seconds_to_centiseconds(u32::MAX), u64::from(u32::MAX) * 100);
 }
 
 #[test]

@@ -19,6 +19,10 @@ pub(super) fn normalized_search_depth(depth: u32) -> u32 {
     depth.min(DEFAULT_MAX_DEPTH)
 }
 
+pub(super) fn seconds_to_centiseconds(seconds: u32) -> u64 {
+    u64::from(seconds).saturating_mul(CENTISECONDS_PER_SECOND)
+}
+
 impl XBoardHandler {
     fn unmake_recent_moves(&mut self, count: usize) {
         for _ in 0..count {
@@ -110,7 +114,7 @@ impl XBoardHandler {
                 self.moves_per_session = *moves_per_session;
                 self.base_time_sec = *base_seconds;
                 self.increment_sec = *increment_seconds;
-                self.engine_time_cs = u64::from(*base_seconds) * CENTISECONDS_PER_SECOND;
+                self.engine_time_cs = seconds_to_centiseconds(*base_seconds);
                 self.opponent_time_cs = self.engine_time_cs;
                 self.time_per_move_sec = None;
                 None

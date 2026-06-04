@@ -8,6 +8,10 @@ use super::SimpleSearchContext;
 
 const COUNTERMOVE_HISTORY_DIVISOR: i32 = 2;
 
+fn combined_quiet_history_score(hist: i32, cont_hist: i32, cm_hist: i32) -> i32 {
+    hist.saturating_add(cont_hist).saturating_add(cm_hist)
+}
+
 impl SimpleSearchContext<'_> {
     fn counter_move_after(&self, prev_move: Move) -> Move {
         if prev_move == EMPTY_MOVE {
@@ -51,7 +55,7 @@ impl SimpleSearchContext<'_> {
                     / COUNTERMOVE_HISTORY_DIVISOR
             })
         });
-        hist + cont_hist + cm_hist
+        combined_quiet_history_score(hist, cont_hist, cm_hist)
     }
 
     fn update_quiet_beta_cutoff_history(&mut self, m: Move, ply: usize, depth: u32) {
@@ -160,5 +164,22 @@ impl SimpleSearchContext<'_> {
                 self.state.generation,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combined_quiet_history_score;
+
+    #[test]
+    fn combined_quiet_history_score_saturates_extreme_inputs() {
+        assert_eq!(
+            combined_quiet_history_score(i32::MAX, i32::MAX, i32::MAX),
+            i32::MAX
+        );
+        assert_eq!(
+            combined_quiet_history_score(i32::MIN, i32::MIN, i32::MIN),
+            i32::MIN
+        );
     }
 }

@@ -28,8 +28,14 @@ fn delta_margin(qdepth: i32) -> i32 {
     if qdepth <= SEE_SHALLOW_DEPTH {
         DELTA_MARGIN
     } else {
-        DELTA_MARGIN + DELTA_MARGIN_DEEP
+        DELTA_MARGIN.saturating_add(DELTA_MARGIN_DEEP)
     }
+}
+
+fn delta_pruning_upper_bound(stand_pat: i32, captured_value: i32, margin: i32) -> i32 {
+    stand_pat
+        .saturating_add(captured_value)
+        .saturating_add(margin)
 }
 
 fn see_threshold(qdepth: i32) -> i32 {
@@ -115,8 +121,9 @@ impl SimpleSearchContext<'_> {
                 } else {
                     0
                 };
-                let delta = captured_value + delta_margin(qdepth);
-                if stand_pat + delta < alpha {
+                if delta_pruning_upper_bound(stand_pat, captured_value, delta_margin(qdepth))
+                    < alpha
+                {
                     continue;
                 }
             }
@@ -165,7 +172,7 @@ impl SimpleSearchContext<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{delta_margin, see_threshold};
+    use super::{delta_margin, delta_pruning_upper_bound, see_threshold};
 
     #[test]
     fn delta_margin_increases_after_shallow_qdepth() {
@@ -178,5 +185,17 @@ mod tests {
         assert_eq!(see_threshold(2), 0);
         assert_eq!(see_threshold(5), -100);
         assert_eq!(see_threshold(6), -200);
+    }
+
+    #[test]
+    fn delta_pruning_upper_bound_saturates_extreme_inputs() {
+        assert_eq!(
+            delta_pruning_upper_bound(i32::MAX, i32::MAX, i32::MAX),
+            i32::MAX
+        );
+        assert_eq!(
+            delta_pruning_upper_bound(i32::MIN, i32::MIN, i32::MIN),
+            i32::MIN
+        );
     }
 }
