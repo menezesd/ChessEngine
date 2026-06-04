@@ -39,7 +39,7 @@ pub fn add_weights(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
         if is_x86_feature_detected!("avx2") {
             unsafe { add_weights_avx2(acc, weights) }
         } else {
-            scalar::add_weights(acc, weights)
+            scalar::add_weights(acc, weights);
         }
     }
 
@@ -67,13 +67,13 @@ pub fn sub_weights(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
         if is_x86_feature_detected!("avx2") {
             unsafe { sub_weights_avx2(acc, weights) }
         } else {
-            scalar::sub_weights(acc, weights)
+            scalar::sub_weights(acc, weights);
         }
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        scalar::sub_weights(acc, weights)
+        scalar::sub_weights(acc, weights);
     }
 }
 
@@ -215,8 +215,9 @@ unsafe fn screlu_dot_neon(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn add_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{__m256i, _mm256_adds_epi16, _mm256_loadu_si256, _mm256_storeu_si256};
     const _: () = assert!(
         HIDDEN_SIZE.is_multiple_of(16),
         "HIDDEN_SIZE must be divisible by 16 for AVX2"
@@ -227,17 +228,18 @@ unsafe fn add_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
 
     // Process 16 i16 values at a time (256 bits)
     for i in (0..HIDDEN_SIZE).step_by(16) {
-        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const __m256i);
-        let w = _mm256_loadu_si256(weights_ptr.add(i) as *const __m256i);
+        let a = _mm256_loadu_si256(acc_ptr.add(i).cast::<__m256i>());
+        let w = _mm256_loadu_si256(weights_ptr.add(i).cast::<__m256i>());
         let sum = _mm256_adds_epi16(a, w); // Saturating add
-        _mm256_storeu_si256(acc_ptr.add(i) as *mut __m256i, sum);
+        _mm256_storeu_si256(acc_ptr.add(i).cast::<__m256i>(), sum);
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn sub_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{__m256i, _mm256_loadu_si256, _mm256_storeu_si256, _mm256_subs_epi16};
     const _: () = assert!(
         HIDDEN_SIZE.is_multiple_of(16),
         "HIDDEN_SIZE must be divisible by 16 for AVX2"
@@ -247,17 +249,23 @@ unsafe fn sub_weights_avx2(acc: &mut [i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_
     let weights_ptr = weights.as_ptr();
 
     for i in (0..HIDDEN_SIZE).step_by(16) {
-        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const __m256i);
-        let w = _mm256_loadu_si256(weights_ptr.add(i) as *const __m256i);
+        let a = _mm256_loadu_si256(acc_ptr.add(i).cast::<__m256i>());
+        let w = _mm256_loadu_si256(weights_ptr.add(i).cast::<__m256i>());
         let diff = _mm256_subs_epi16(a, w); // Saturating sub
-        _mm256_storeu_si256(acc_ptr.add(i) as *mut __m256i, diff);
+        _mm256_storeu_si256(acc_ptr.add(i).cast::<__m256i>(), diff);
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn screlu_dot_avx2(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]) -> i64 {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{
+        __m256i, _mm256_add_epi64, _mm256_cmpgt_epi16, _mm256_cvtepi32_epi64,
+        _mm256_extracti128_si256, _mm256_loadu_si256, _mm256_max_epi16, _mm256_min_epi16,
+        _mm256_mullo_epi32, _mm256_set1_epi16, _mm256_setzero_si256, _mm256_unpackhi_epi16,
+        _mm256_unpacklo_epi16,
+    };
     const _: () = assert!(
         HIDDEN_SIZE.is_multiple_of(16),
         "HIDDEN_SIZE must be divisible by 16 for AVX2"
@@ -267,14 +275,14 @@ unsafe fn screlu_dot_avx2(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
     let weights_ptr = weights.as_ptr();
 
     let zero = _mm256_setzero_si256();
-    let qa = _mm256_set1_epi16(QA as i16);
+    let qa = _mm256_set1_epi16(QA);
 
     let mut sum_lo = _mm256_setzero_si256();
     let mut sum_hi = _mm256_setzero_si256();
 
     for i in (0..HIDDEN_SIZE).step_by(16) {
-        let a = _mm256_loadu_si256(acc_ptr.add(i) as *const __m256i);
-        let w = _mm256_loadu_si256(weights_ptr.add(i) as *const __m256i);
+        let a = _mm256_loadu_si256(acc_ptr.add(i).cast::<__m256i>());
+        let w = _mm256_loadu_si256(weights_ptr.add(i).cast::<__m256i>());
 
         // Clamp to [0, QA]
         let clamped = _mm256_min_epi16(_mm256_max_epi16(a, zero), qa);
@@ -311,11 +319,12 @@ unsafe fn screlu_dot_avx2(acc: &[i16; HIDDEN_SIZE], weights: &[i16; HIDDEN_SIZE]
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(clippy::cast_ptr_alignment)]
 unsafe fn horizontal_sum_i64x4_avx2(v: std::arch::x86_64::__m256i) -> i64 {
     use std::arch::x86_64::{__m256i, _mm256_storeu_si256};
 
     let mut result: [i64; 4] = [0; 4];
-    _mm256_storeu_si256(result.as_mut_ptr() as *mut __m256i, v);
+    _mm256_storeu_si256(result.as_mut_ptr().cast::<__m256i>(), v);
     result.iter().sum()
 }
 
