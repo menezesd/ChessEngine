@@ -1,4 +1,4 @@
-use crate::board::SearchParams;
+use crate::board::{SearchParams, SearchState};
 
 mod apply;
 mod output;
@@ -68,19 +68,19 @@ impl UciOptions {
             hard_time_percent: 90,
             multi_pv: 1,
             ponder: false,
-            use_nnue: true,
+            use_nnue: false,
             eval_file: String::new(),
             static_eval_file: String::new(),
         }
     }
 
-    pub fn print(&self, params: &SearchParams) {
+    pub fn print(&self, state: &SearchState) {
         println!("id name chess_engine");
         println!("id author Dean Menezes");
 
         self.print_engine_options();
-        self.print_nnue_options();
-        Self::print_search_options(params);
+        self.print_nnue_options(state);
+        Self::print_search_options(state.params());
 
         println!("uciok");
     }
@@ -111,15 +111,41 @@ impl UciOptions {
         print_check("Ponder", self.ponder);
     }
 
-    fn print_nnue_options(&self) {
+    fn print_nnue_options(&self, state: &SearchState) {
         print_check("UseNNUE", self.use_nnue);
         print_string("EvalFile", &self.eval_file);
         print_string("StaticEvalFile", &self.static_eval_file);
-        print_spin("NnueEvalScale", 100, NNUE_SCALE_MIN, NNUE_SCALE_MAX);
-        print_spin("NnueHceBlend", 100, NNUE_BLEND_MIN, NNUE_BLEND_MAX);
-        print_check("NnuePureStaticEval", false);
-        print_spin("NnueStaticEvalScale", 100, NNUE_SCALE_MIN, NNUE_SCALE_MAX);
-        print_spin("NnueStaticBlend", 100, NNUE_BLEND_MIN, NNUE_BLEND_MAX);
+        print_spin(
+            "NnueEvalScale",
+            state.nnue_eval_scale,
+            NNUE_SCALE_MIN,
+            NNUE_SCALE_MAX,
+        );
+        print_spin(
+            "NnueHceBlend",
+            state.nnue_hce_blend,
+            NNUE_BLEND_MIN,
+            NNUE_BLEND_MAX,
+        );
+        print_check("NnuePureStaticEval", state.static_eval_options.nnue_pure);
+        print_check("UseFullHCE", state.hce_options.use_full);
+        print_check("UseTunedHCE", state.hce_options.use_tuned);
+        print_check(
+            "UseFullHCEStaticEval",
+            state.static_eval_options.use_full_hce,
+        );
+        print_spin(
+            "NnueStaticEvalScale",
+            state.nnue_static_eval_scale,
+            NNUE_SCALE_MIN,
+            NNUE_SCALE_MAX,
+        );
+        print_spin(
+            "NnueStaticBlend",
+            state.nnue_static_blend,
+            NNUE_BLEND_MIN,
+            NNUE_BLEND_MAX,
+        );
     }
 
     fn print_search_options(params: &SearchParams) {
@@ -159,8 +185,8 @@ impl UciOptions {
 #[cfg(test)]
 mod tests {
     use super::{
-        UciOptionAction, UciOptions, HASH_MAX_MB, HASH_MIN_MB, MOVE_OVERHEAD_MAX_MS,
-        MOVE_OVERHEAD_MIN_MS,
+        UciOptionAction, UciOptions, HASH_MAX_MB, HASH_MIN_MB, IIR_MIN_DEPTH_MIN,
+        LMR_MIN_DEPTH_MAX, MOVE_OVERHEAD_MAX_MS, MOVE_OVERHEAD_MIN_MS, NULL_REDUCTION_MAX,
     };
     use crate::board::SearchState;
 
@@ -268,15 +294,83 @@ mod tests {
         let mut state = SearchState::new(16);
 
         options.apply_setoption("NnuePureStaticEval", Some("true"), &mut state);
-        assert!(state.nnue_pure_static_eval);
+        assert!(state.static_eval_options.nnue_pure);
 
         options.apply_setoption("NnuePureStaticEval", Some("maybe"), &mut state);
-        assert!(state.nnue_pure_static_eval);
+        assert!(state.static_eval_options.nnue_pure);
 
         options.apply_setoption("NnuePureStaticEval", None, &mut state);
-        assert!(state.nnue_pure_static_eval);
+        assert!(state.static_eval_options.nnue_pure);
 
         options.apply_setoption("NnuePureStaticEval", Some("false"), &mut state);
-        assert!(!state.nnue_pure_static_eval);
+        assert!(!state.static_eval_options.nnue_pure);
+    }
+
+    #[test]
+    fn setoption_use_full_hce_ignores_missing_or_invalid_value() {
+        let mut options = UciOptions::new(16);
+        let mut state = SearchState::new(16);
+
+        options.apply_setoption("UseFullHCE", Some("true"), &mut state);
+        assert!(state.hce_options.use_full);
+
+        options.apply_setoption("UseFullHCE", Some("maybe"), &mut state);
+        assert!(state.hce_options.use_full);
+
+        options.apply_setoption("UseFullHCE", None, &mut state);
+        assert!(state.hce_options.use_full);
+
+        options.apply_setoption("UseFullHCE", Some("false"), &mut state);
+        assert!(!state.hce_options.use_full);
+    }
+
+    #[test]
+    fn setoption_use_tuned_hce_ignores_missing_or_invalid_value() {
+        let mut options = UciOptions::new(16);
+        let mut state = SearchState::new(16);
+
+        options.apply_setoption("UseTunedHCE", Some("false"), &mut state);
+        assert!(!state.hce_options.use_tuned);
+
+        options.apply_setoption("UseTunedHCE", Some("maybe"), &mut state);
+        assert!(!state.hce_options.use_tuned);
+
+        options.apply_setoption("UseTunedHCE", None, &mut state);
+        assert!(!state.hce_options.use_tuned);
+
+        options.apply_setoption("UseTunedHCE", Some("true"), &mut state);
+        assert!(state.hce_options.use_tuned);
+    }
+
+    #[test]
+    fn setoption_use_full_hce_static_eval_ignores_missing_or_invalid_value() {
+        let mut options = UciOptions::new(16);
+        let mut state = SearchState::new(16);
+
+        options.apply_setoption("UseFullHCEStaticEval", Some("true"), &mut state);
+        assert!(state.static_eval_options.use_full_hce);
+
+        options.apply_setoption("UseFullHCEStaticEval", Some("maybe"), &mut state);
+        assert!(state.static_eval_options.use_full_hce);
+
+        options.apply_setoption("UseFullHCEStaticEval", None, &mut state);
+        assert!(state.static_eval_options.use_full_hce);
+
+        options.apply_setoption("UseFullHCEStaticEval", Some("false"), &mut state);
+        assert!(!state.static_eval_options.use_full_hce);
+    }
+
+    #[test]
+    fn setoption_search_thresholds_update_the_active_parameters() {
+        let mut options = UciOptions::new(16);
+        let mut state = SearchState::new(16);
+
+        options.apply_setoption("NullMoveReduction", Some("99"), &mut state);
+        options.apply_setoption("IIRMinDepth", Some("0"), &mut state);
+        options.apply_setoption("LMRMinDepth", Some("99"), &mut state);
+
+        assert_eq!(state.params.null_reduction, NULL_REDUCTION_MAX);
+        assert_eq!(state.params.iir_min_depth, IIR_MIN_DEPTH_MIN);
+        assert_eq!(state.params.lmr_min_depth, LMR_MIN_DEPTH_MAX);
     }
 }

@@ -3,8 +3,12 @@ use super::{parse_go_params, UciCommand};
 const DEFAULT_PERFT_DEPTH: usize = 1;
 
 fn parse_perft_depth(parts: &[&str]) -> usize {
-    parts
-        .get(1)
+    let depth = match parts.get(1) {
+        Some(&"depth") => parts.get(2),
+        value => value,
+    };
+
+    depth
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_PERFT_DEPTH)
 }
@@ -28,6 +32,7 @@ pub fn parse_uci_command(line: &str) -> Option<UciCommand> {
         "position" => UciCommand::Position(trimmed.to_string()),
         "go" => UciCommand::Go(parse_go_params(&parts)),
         "eval" => UciCommand::Eval,
+        "evalfeatures" => UciCommand::EvalFeatures,
         "perft" => UciCommand::Perft(parse_perft_depth(&parts)),
         "setoption" => {
             let parsed = crate::uci::options::parse_setoption(&parts);

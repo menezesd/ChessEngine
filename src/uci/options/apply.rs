@@ -181,7 +181,22 @@ impl UciOptions {
             ),
             "nnuepurestaticeval" => {
                 if let Some(value) = Self::parsed_bool(value) {
-                    state.nnue_pure_static_eval = value;
+                    state.static_eval_options.nnue_pure = value;
+                }
+            }
+            "usefullhce" => {
+                if let Some(value) = Self::parsed_bool(value) {
+                    state.hce_options.use_full = value;
+                }
+            }
+            "usetunedhce" => {
+                if let Some(value) = Self::parsed_bool(value) {
+                    state.hce_options.use_tuned = value;
+                }
+            }
+            "usefullhcestaticeval" => {
+                if let Some(value) = Self::parsed_bool(value) {
+                    state.static_eval_options.use_full_hce = value;
                 }
             }
             "nnuestaticevalscale" => Self::assign_parsed_clamped(

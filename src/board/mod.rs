@@ -50,14 +50,16 @@ pub use types::{Bitboard, CastlingRights, Color, Move, MoveList, MoveListIntoIte
 // Public API - search functions and configuration
 pub use search::{
     find_best_move, find_best_move_with_ponder, find_best_move_with_time,
-    find_best_move_with_time_and_ponder, search, SearchClock, SearchConfig, SearchInfoCallback,
-    SearchIterationInfo, SearchLimits, SearchResult, SearchState, DEFAULT_TT_MB,
+    find_best_move_with_time_and_ponder, search, HceOptions, SearchClock, SearchConfig,
+    SearchInfoCallback, SearchIterationInfo, SearchLimits, SearchResult, SearchState,
+    StaticEvalOptions, DEFAULT_TT_MB,
 };
 
 // Internal types exposed for advanced usage (but not in prelude)
 pub use state::{NullMoveInfo, UnmakeInfo};
 
 // Re-export search internals for users who need fine-grained control
+pub use eval::HCE_FEATURE_NAMES;
 pub use search::{SearchParams, SearchStats, SearchTables};
 
 pub(crate) use types::{

@@ -24,6 +24,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "position",
     "go",
     "eval",
+    "evalfeatures",
     "perft",
     "setoption",
     "debug",
@@ -73,12 +74,85 @@ impl UciSession {
         }
     }
 
+    fn handle_position(&mut self, line: &str) {
+        self.engine.stop_search();
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        parse_position_command(self.engine.board_mut(), &parts);
+    }
+
+    fn handle_perft(&mut self, depth: usize) {
+        self.engine.stop_search();
+        let start = Instant::now();
+        let nodes = self.engine.board_mut().perft(depth);
+        print_perft_info(depth, nodes, start.elapsed());
+    }
+
+    fn handle_eval(&self) {
+        self.engine.with_search_state_ref(|state| {
+            let nnue = state.tables.nnue.as_ref().map(|network| {
+                scaled_eval(
+                    self.engine.board().evaluate_nnue(network),
+                    state.nnue_eval_scale,
+                )
+            });
+            let blend = state.nnue_hce_blend;
+            let needs_hce = nnue.is_none() || blend < 100 || !state.static_eval_options.nnue_pure;
+            let hce = needs_hce.then(|| {
+                if state.hce_options.use_full {
+                    if state.hce_options.use_tuned {
+                        self.engine.board().evaluate_tuned_hce()
+                    } else {
+                        self.engine.board().evaluate()
+                    }
+                } else {
+                    self.engine.board().evaluate_simple()
+                }
+            });
+            let blended = match (nnue, hce) {
+                (Some(nnue_eval), Some(hce_eval)) => blended_eval(nnue_eval, hce_eval, blend),
+                (Some(nnue_eval), None) => nnue_eval,
+                (None, Some(hce_eval)) => hce_eval,
+                (None, None) => 0,
+            };
+            println!(
+                "info string eval hce {hce} nnue {nnue} blend {blend} blended {blended}",
+                hce = hce.map_or_else(|| "none".to_string(), |v| v.to_string()),
+                nnue = nnue.map_or_else(|| "none".to_string(), |v| v.to_string())
+            );
+        });
+    }
+
+    fn handle_eval_features(&self) {
+        let features = self.engine.board().hce_feature_breakdown();
+        let names = crate::board::HCE_FEATURE_NAMES.join(",");
+        let values = features
+            .values
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "info string evalfeatures names {names} values {values} tempo {tempo} phase {phase} full_white {full_white} tuned_full_white {tuned_full_white}",
+            tempo = features.tempo,
+            phase = features.phase_score,
+            full_white = features.full_white,
+            tuned_full_white = features.tuned_full_white
+        );
+    }
+
+    fn handle_unknown(&self, line: &str) {
+        if self.state.debug {
+            eprintln!("Unknown command: {line}");
+            eprintln!("Known commands: {}", KNOWN_COMMANDS.join(", "));
+        }
+    }
+
     /// Process a single UCI command. Returns false if the engine should quit.
     fn handle_command(&mut self, cmd: UciCommand) -> bool {
         match cmd {
             UciCommand::Uci => {
                 self.engine
-                    .with_search_state_ref(|state| self.options.print(state.params()));
+                    .with_search_state_ref(|state| self.options.print(state));
             }
             UciCommand::IsReady => {
                 print_ready();
@@ -87,45 +161,19 @@ impl UciSession {
                 self.engine.new_game();
             }
             UciCommand::Position(line) => {
-                self.engine.stop_search();
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                parse_position_command(self.engine.board_mut(), &parts);
+                self.handle_position(&line);
             }
             UciCommand::Perft(depth) => {
-                self.engine.stop_search();
-                let start = Instant::now();
-                let nodes = self.engine.board_mut().perft(depth);
-                let elapsed = start.elapsed();
-                print_perft_info(depth, nodes, elapsed);
+                self.handle_perft(depth);
             }
             UciCommand::Go(params) => {
                 self.handle_go(&params);
             }
             UciCommand::Eval => {
-                self.engine.with_search_state_ref(|state| {
-                    let nnue = state.tables.nnue.as_ref().map(|network| {
-                        scaled_eval(
-                            self.engine.board().evaluate_nnue(network),
-                            state.nnue_eval_scale,
-                        )
-                    });
-                    let blend = state.nnue_hce_blend;
-                    let needs_hce = nnue.is_none() || blend < 100 || !state.nnue_pure_static_eval;
-                    let hce = needs_hce.then(|| self.engine.board().evaluate_simple());
-                    let blended = match (nnue, hce) {
-                        (Some(nnue_eval), Some(hce_eval)) => {
-                            blended_eval(nnue_eval, hce_eval, blend)
-                        }
-                        (Some(nnue_eval), None) => nnue_eval,
-                        (None, Some(hce_eval)) => hce_eval,
-                        (None, None) => 0,
-                    };
-                    println!(
-                        "info string eval hce {hce} nnue {nnue} blend {blend} blended {blended}",
-                        hce = hce.map_or_else(|| "none".to_string(), |v| v.to_string()),
-                        nnue = nnue.map_or_else(|| "none".to_string(), |v| v.to_string())
-                    );
-                });
+                self.handle_eval();
+            }
+            UciCommand::EvalFeatures => {
+                self.handle_eval_features();
             }
             UciCommand::Stop => {
                 self.engine.signal_stop();
@@ -145,10 +193,7 @@ impl UciSession {
                 return false;
             }
             UciCommand::Unknown(line) => {
-                if self.state.debug {
-                    eprintln!("Unknown command: {line}");
-                    eprintln!("Known commands: {}", KNOWN_COMMANDS.join(", "));
-                }
+                self.handle_unknown(&line);
             }
         }
         true

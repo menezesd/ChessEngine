@@ -12,6 +12,7 @@ pub enum UciCommand {
     Position(String),
     Go(GoParams),
     Eval,
+    EvalFeatures,
     Perft(usize),
     SetOption { name: String, value: Option<String> },
     Debug(Option<String>),

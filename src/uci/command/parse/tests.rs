@@ -99,6 +99,15 @@ fn parse_uci_command_perft() {
 }
 
 #[test]
+fn parse_uci_command_perft_with_depth_keyword() {
+    let cmd = parse_uci_command("perft depth 5");
+    match cmd {
+        Some(UciCommand::Perft(depth)) => assert_eq!(depth, 5),
+        _ => panic!("Expected Perft command"),
+    }
+}
+
+#[test]
 fn parse_uci_command_perft_default() {
     let cmd = parse_uci_command("perft");
     match cmd {

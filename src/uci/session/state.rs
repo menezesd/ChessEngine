@@ -36,7 +36,10 @@ fn go_time_control(params: &GoParams, is_white: bool) -> TimeControl {
         return TimeControl::move_time(Duration::from_millis(mt));
     }
 
-    if is_fixed_search(params) {
+    // UCI permits depth/node/mate bounds together with a clock.  Preserve the
+    // clock in that case so the search has both constraints; only a fixed
+    // search with no active-side clock is truly untimed.
+    if is_fixed_search(params) && side_time(params, is_white).is_none() {
         return TimeControl::Depth;
     }
 
@@ -158,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn update_time_control_uses_depth_for_fixed_depth_search() {
+    fn update_time_control_keeps_clock_for_fixed_depth_search() {
         let mut state = UciState::default();
         let params = GoParams {
             depth: Some(4),
@@ -166,11 +169,14 @@ mod tests {
             ..GoParams::default()
         };
 
-        assert_eq!(state.update_time_control(&params, true), TimeControl::Depth);
+        assert_eq!(
+            state.update_time_control(&params, true),
+            TimeControl::incremental(Duration::from_secs(12), Duration::ZERO, None)
+        );
     }
 
     #[test]
-    fn update_time_control_uses_depth_for_node_limited_search() {
+    fn update_time_control_keeps_clock_for_node_limited_search() {
         let mut state = UciState::default();
         let params = GoParams {
             nodes: Some(10_000),
@@ -178,15 +184,32 @@ mod tests {
             ..GoParams::default()
         };
 
-        assert_eq!(state.update_time_control(&params, true), TimeControl::Depth);
+        assert_eq!(
+            state.update_time_control(&params, true),
+            TimeControl::incremental(Duration::from_secs(12), Duration::ZERO, None)
+        );
     }
 
     #[test]
-    fn update_time_control_uses_depth_for_mate_limited_search() {
+    fn update_time_control_keeps_clock_for_mate_limited_search() {
         let mut state = UciState::default();
         let params = GoParams {
             mate: Some(2),
             wtime: Some(12_000),
+            ..GoParams::default()
+        };
+
+        assert_eq!(
+            state.update_time_control(&params, true),
+            TimeControl::incremental(Duration::from_secs(12), Duration::ZERO, None)
+        );
+    }
+
+    #[test]
+    fn update_time_control_uses_depth_for_fixed_search_without_clock() {
+        let mut state = UciState::default();
+        let params = GoParams {
+            depth: Some(4),
             ..GoParams::default()
         };
 

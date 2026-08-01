@@ -27,6 +27,8 @@ pub enum UciError {
     },
     /// Missing required parts in the command
     MissingParts,
+    /// Unexpected token after the position source
+    UnexpectedToken { token: String },
 }
 
 impl fmt::Display for UciError {
@@ -37,6 +39,9 @@ impl fmt::Display for UciError {
                 write!(f, "Invalid move '{move_str}': {error}")
             }
             UciError::MissingParts => write!(f, "Missing required parts in position command"),
+            UciError::UnexpectedToken { token } => {
+                write!(f, "Unexpected token in position command: {token}")
+            }
         }
     }
 }
@@ -102,6 +107,10 @@ pub fn try_parse_position_command(board: &mut Board, parts: &[&str]) -> Result<(
     if i < parts.len() && parts[i] == "moves" {
         i += 1;
         apply_position_moves(&mut parsed_board, &parts[i..])?;
+    } else if let Some(token) = parts.get(i) {
+        return Err(UciError::UnexpectedToken {
+            token: (*token).to_string(),
+        });
     }
 
     *board = parsed_board;
@@ -169,6 +178,17 @@ mod tests {
         let result =
             try_parse_position_command(&mut board, &["position", "startpos", "moves", "e2e5"]);
         assert!(matches!(result, Err(UciError::InvalidMove { .. })));
+    }
+
+    #[test]
+    fn try_parse_position_rejects_unexpected_trailing_token() {
+        let mut board = Board::new();
+        let original_hash = board.hash;
+
+        let result = try_parse_position_command(&mut board, &["position", "startpos", "junk"]);
+
+        assert!(matches!(result, Err(UciError::UnexpectedToken { .. })));
+        assert_eq!(board.hash, original_hash);
     }
 
     #[test]

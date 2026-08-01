@@ -121,12 +121,119 @@ fn uci_reports_options_and_handles_setoption() {
 }
 
 #[test]
+fn uci_reports_live_hce_and_nnue_option_values() {
+    let mut uci = UciHarness::spawn();
+    uci.write(
+        "setoption name NnueEvalScale value 125\n\
+         setoption name NnueHceBlend value 55\n\
+         setoption name NnuePureStaticEval value true\n\
+         setoption name UseFullHCE value false\n\
+         setoption name UseTunedHCE value false\n\
+         setoption name UseFullHCEStaticEval value true\n\
+         setoption name NnueStaticEvalScale value 150\n\
+         setoption name NnueStaticBlend value 25\n\
+         uci\n",
+    );
+    let (stdout, uciok) = uci.read_until(|line| line.starts_with("uciok"));
+    uci.send_quit_and_wait();
+
+    assert!(uciok.is_some());
+    for expected in [
+        "option name NnueEvalScale type spin default 125",
+        "option name NnueHceBlend type spin default 55",
+        "option name NnuePureStaticEval type check default true",
+        "option name UseFullHCE type check default false",
+        "option name UseTunedHCE type check default false",
+        "option name UseFullHCEStaticEval type check default true",
+        "option name NnueStaticEvalScale type spin default 150",
+        "option name NnueStaticBlend type spin default 25",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in {stdout}"
+        );
+    }
+}
+
+#[test]
 fn uci_go_depth_returns_legal_move() {
     let mut uci = UciHarness::spawn();
     uci.write("uci\nisready\nposition startpos\ngo depth 2\n");
     let (_, bestmove) = uci.read_until_bestmove();
     uci.send_quit_and_wait();
 
+    assert_bestmove_legal(&bestmove, &["position", "startpos"]);
+}
+
+#[test]
+fn uci_two_knights_vs_bare_king_keeps_mate_in_one() {
+    let mut uci = UciHarness::spawn();
+    let position = [
+        "position",
+        "fen",
+        "8/8/8/8/8/2N5/8/k1K1N3",
+        "w",
+        "-",
+        "-",
+        "0",
+        "1",
+    ];
+    uci.write("position fen 8/8/8/8/8/2N5/8/k1K1N3 w - - 0 1\ngo depth 12\n");
+    let (_, bestmove) = uci.read_until_bestmove();
+    uci.send_quit_and_wait();
+
+    assert_eq!(bestmove_uci(&bestmove), "e1c2");
+    assert_bestmove_legal(&bestmove, &position);
+}
+
+#[test]
+fn uci_two_knights_vs_bare_king_avoids_immediate_mate_blunder() {
+    let mut uci = UciHarness::spawn();
+    let position = [
+        "position",
+        "fen",
+        "8/8/8/NK6/8/8/1k6/2N5",
+        "b",
+        "-",
+        "-",
+        "0",
+        "1",
+    ];
+    uci.write("position fen 8/8/8/NK6/8/8/1k6/2N5 b - - 0 1\ngo depth 12\n");
+    let (_, bestmove) = uci.read_until_bestmove();
+    uci.send_quit_and_wait();
+
+    assert_ne!(bestmove_uci(&bestmove), "b2a3", "...Ka3? permits Nc2#");
+    assert_bestmove_legal(&bestmove, &position);
+}
+
+#[test]
+fn uci_tiny_movetime_returns_a_legal_fallback_move() {
+    let mut uci = UciHarness::spawn();
+    uci.write("uci\nisready\nposition startpos\ngo movetime 1\n");
+    let (_, bestmove) = uci.read_until_bestmove();
+    uci.send_quit_and_wait();
+
+    assert_bestmove_legal(&bestmove, &["position", "startpos"]);
+}
+
+#[test]
+fn uci_go_depth_keeps_clock_limits() {
+    let mut uci = UciHarness::spawn();
+    uci.write("uci\nisready\nposition startpos\ngo depth 2 wtime 10000 btime 10000\n");
+    let (output, bestmove) = uci.read_until_bestmove();
+    uci.send_quit_and_wait();
+
+    let time_line = output
+        .lines()
+        .find(|line| line.starts_with("info string time"))
+        .expect("missing time info");
+    assert!(time_line.contains("depth 2"), "{time_line}");
+    assert!(!time_line.contains("soft 0"), "{time_line}");
+    assert!(
+        !time_line.contains(&format!("soft {}", u64::MAX)),
+        "{time_line}"
+    );
     assert_bestmove_legal(&bestmove, &["position", "startpos"]);
 }
 
@@ -139,6 +246,18 @@ fn uci_perft_command_outputs_nodes() {
     uci.send_quit_and_wait();
 
     assert!(perft_line.is_some(), "perft output missing");
+}
+
+#[test]
+fn uci_evalfeatures_reports_tuned_hce_score() {
+    let mut uci = UciHarness::spawn();
+    uci.write("position startpos\nevalfeatures\n");
+    let (_, line) = uci.read_until(|line| line.starts_with("info string evalfeatures"));
+    uci.send_quit_and_wait();
+
+    let line = line.expect("missing evalfeatures output");
+    assert!(line.contains("full_white "), "{line}");
+    assert!(line.contains("tuned_full_white "), "{line}");
 }
 
 #[test]

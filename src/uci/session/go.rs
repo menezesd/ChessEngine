@@ -22,9 +22,9 @@ impl UciSession {
     pub(super) fn build_go_plan(&mut self, params: &GoParams, is_white: bool) -> GoSearchPlan {
         let time_control = self.state.update_time_control(params, is_white);
         let depth = requested_depth(params);
-        let nodes = params.nodes;
         let go_ponder = params.ponder;
         let go_infinite = params.infinite;
+        let nodes = (!go_infinite).then_some(params.nodes).flatten();
 
         let time_config = TimeConfig {
             move_overhead_ms: self.options.move_overhead_ms,
@@ -93,6 +93,10 @@ impl UciSession {
 }
 
 fn requested_depth(params: &GoParams) -> Option<u32> {
+    if params.infinite {
+        return None;
+    }
+
     params
         .depth
         .map(clamp_requested_depth)
@@ -111,7 +115,7 @@ fn clamp_requested_depth(depth: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::requested_depth;
+    use super::{requested_depth, UciSession};
     use crate::board::search::DEFAULT_MAX_DEPTH;
     use crate::uci::command::GoParams;
 
@@ -176,5 +180,24 @@ mod tests {
         };
 
         assert_eq!(requested_depth(&params), None);
+    }
+
+    #[test]
+    fn requested_depth_ignores_limits_for_infinite_search() {
+        let params = GoParams {
+            infinite: true,
+            depth: Some(7),
+            nodes: Some(1_000),
+            mate: Some(3),
+            ..GoParams::default()
+        };
+
+        assert_eq!(requested_depth(&params), None);
+
+        let mut session = UciSession::new(1);
+        let plan = session.build_go_plan(&params, true);
+        assert!(plan.search_params.infinite);
+        assert_eq!(plan.search_params.depth, None);
+        assert_eq!(plan.max_nodes, 0);
     }
 }

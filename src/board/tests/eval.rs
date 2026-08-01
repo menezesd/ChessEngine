@@ -9,8 +9,27 @@
 
 use crate::board::state::Board;
 
+// Deliberately permits sparse boards for isolated term arithmetic.  Do not use
+// this helper for legal-move, draw, search, or whole-position evaluation tests.
 fn make_board(fen: &str) -> Board {
     fen.parse().expect("valid fen")
+}
+
+/// Builds a fixture for an operation whose result depends on a chess position
+/// rather than a local piece pattern. Keeps both kings explicit in these FENs.
+fn board_with_kings(fen: &str) -> Board {
+    let placement = fen.split_whitespace().next().expect("FEN placement");
+    assert_eq!(
+        placement.matches('K').count(),
+        1,
+        "fixture needs one white king"
+    );
+    assert_eq!(
+        placement.matches('k').count(),
+        1,
+        "fixture needs one black king"
+    );
+    make_board(fen)
 }
 
 // ============================================================================
@@ -298,7 +317,7 @@ fn test_rook_seventh_rank_bonus() {
 #[test]
 fn test_eval_material_advantage() {
     // White up a queen
-    let board = make_board("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let board = board_with_kings("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     let score = board.evaluate();
     assert!(score > 800, "queen advantage score={score}");
 }
@@ -306,16 +325,92 @@ fn test_eval_material_advantage() {
 #[test]
 fn test_eval_symmetry() {
     // Symmetric position should evaluate close to 0
-    let board = make_board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let board = board_with_kings("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     let score = board.evaluate();
     assert!(score.abs() < 50, "startpos eval={score}");
 }
 
 #[test]
+fn test_eval_gives_tempo_to_side_to_move() {
+    let white_to_move =
+        board_with_kings("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    let black_to_move =
+        board_with_kings("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1");
+
+    // This position is otherwise symmetric, so either side to move must get
+    // the same positive tempo score from its own perspective.
+    assert_eq!(white_to_move.evaluate(), black_to_move.evaluate());
+}
+
+#[test]
+fn test_two_knights_vs_bare_king_is_neutral_in_both_hce_modes() {
+    let board = board_with_kings("7k/8/8/8/8/8/4N1N1/K7 w - - 0 1");
+
+    assert_eq!(board.evaluate(), 0);
+    assert_eq!(board.evaluate_tuned_hce(), 0);
+}
+
+#[test]
+fn test_same_color_bishops_dead_position_is_neutral_in_both_hce_modes() {
+    let board = board_with_kings("7k/8/8/8/8/4B3/8/2B1K3 w - - 0 1");
+
+    assert_eq!(board.evaluate(), 0);
+    assert_eq!(board.evaluate_tuned_hce(), 0);
+}
+
+#[test]
+fn test_cached_hce_matches_uncached_evaluation() {
+    let board =
+        board_with_kings("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+    let pawn_hash = crate::pawn_hash::PawnHashTable::new(64);
+
+    assert_eq!(board.evaluate_cached(&pawn_hash), board.evaluate());
+    assert_eq!(
+        board.evaluate_tuned_hce_cached(&pawn_hash),
+        board.evaluate_tuned_hce()
+    );
+}
+
+#[test]
+fn test_tuned_feature_breakdown_matches_tuned_hce() {
+    for fen in [
+        "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3",
+        "8/8/8/2k5/8/4K3/3P4/8 b - - 0 1",
+    ] {
+        let board = board_with_kings(fen);
+        let breakdown = board.hce_feature_breakdown();
+        let expected = if board.white_to_move() {
+            breakdown.tuned_full_white
+        } else {
+            -breakdown.tuned_full_white
+        };
+        assert_eq!(board.evaluate_tuned_hce(), expected, "{fen}");
+    }
+}
+
+#[test]
+fn test_feature_breakdown_matches_full_hce() {
+    for fen in [
+        "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3",
+        "8/8/8/2k5/8/4K3/3P4/8 b - - 0 1",
+        "7k/8/8/8/8/8/4N1N1/K7 w - - 0 1",
+    ] {
+        let board = board_with_kings(fen);
+        let breakdown = board.hce_feature_breakdown();
+        let expected = if board.white_to_move() {
+            breakdown.full_white
+        } else {
+            -breakdown.full_white
+        };
+        assert_eq!(board.evaluate(), expected, "{fen}");
+    }
+}
+
+#[test]
 fn test_eval_perspective() {
     // Evaluation should be from side-to-move perspective
-    let white_to_move = make_board("8/8/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-    let black_to_move = make_board("8/8/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1");
+    let white_to_move = board_with_kings("7k/8/8/8/8/8/PPPPPPPP/RNBQKBNR w KQ - 0 1");
+    let black_to_move = board_with_kings("7k/8/8/8/8/8/PPPPPPPP/RNBQKBNR b KQ - 0 1");
 
     let white_eval = white_to_move.evaluate();
     let black_eval = black_to_move.evaluate();
