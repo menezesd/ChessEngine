@@ -83,3 +83,20 @@ if let Some(best) = find_best_move(&mut board, &mut state, 6, &stop) {
   HTML reports)
 - Linting: `cargo clippy --all-targets --all-features`
 
+## HCE distillation
+
+The repository already includes Stockfish-labelled HCE feature data, including
+`data/hce_tune_sf_d10_5m_features.csv`; re-labelling is not needed for an
+initial tuning pass. Fit candidate multipliers with a held-out report:
+
+```bash
+python3 scripts/fit_hce_weights.py \
+  --input data/hce_tune_sf_d10_5m_features.csv \
+  --target sf_cp --solver ridge \
+  --output runs/hce_tune/candidate_weights.csv
+```
+
+The fitter only emits the engine's 21 representable HCE term weights, keeps
+tempo fixed, excludes draw-scaled positions by default, and bounds each default
+weight change. Treat its held-out metric as a screening signal: adopt a
+candidate only after same-time-control WAC/STS and broader regression testing.

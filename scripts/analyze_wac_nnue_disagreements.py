@@ -43,16 +43,20 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=201)
     parser.add_argument("--movetime-ms", type=int, default=500)
     parser.add_argument("--depth", type=int, default=0)
+    parser.add_argument("--nnue", default=None)
+    parser.add_argument("--hce-setoption", action="append", default=[])
+    parser.add_argument("--nnue-setoption", action="append", default=[])
     parser.add_argument("--max-print", type=int, default=50)
     args = parser.parse_args()
 
     hce = EvalEngine(
         args.engine,
-        options=["UseNNUE value false"],
+        options=["UseNNUE value false", *args.hce_setoption],
     )
     nnue = EvalEngine(
         args.engine,
-        options=["UseNNUE value true", "NnueHceBlend value 100"],
+        nnue_file=args.nnue,
+        options=["UseNNUE value true", "NnueHceBlend value 100", *args.nnue_setoption],
     )
 
     total = hce_correct = nnue_correct = printed = 0

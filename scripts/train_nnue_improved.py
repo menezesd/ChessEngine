@@ -24,13 +24,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
+import chess
 
 from train_nnue_256 import MATERIAL_EG, MATERIAL_MG, PST_EG, PST_MG
 
 # Constants matching Rust implementation
-INPUT_SIZE = 64 * 6 * 2  # square x piece type x color
+BASE_INPUT_SIZE = 64 * 6 * 2  # square x piece type x color
+NON_KING_FEATURES = 2 * 5 * 64
+HANGING_OFFSET = BASE_INPUT_SIZE
+PAWN_ATTACKED_OFFSET = HANGING_OFFSET + NON_KING_FEATURES
+IN_CHECK_OFFSET = PAWN_ATTACKED_OFFSET + NON_KING_FEATURES
+KING_PRESSURE_OFFSET = IN_CHECK_OFFSET + 2
+PINNED_OFFSET = KING_PRESSURE_OFFSET + 2 * 4 * 8
+MOBILITY_OFFSET = PINNED_OFFSET + NON_KING_FEATURES
+INPUT_SIZE = MOBILITY_OFFSET + 2 * 4 * 8
 HIDDEN_SIZE = 256
-MAX_ACTIVE_FEATURES = 32
+MAX_ACTIVE_FEATURES = 128
 SCALE = 400
 QA = 255
 QB = 64
@@ -99,6 +108,39 @@ def feature_index(piece_type: int, piece_color: int, square: int, perspective: i
     return oriented_color * 384 + piece_type * 64 + oriented_sq
 
 
+def tactical_piece_square_feature_index(
+    offset: int, piece_type: int, piece_color: int, square: int, perspective: int
+) -> int:
+    if perspective == 1:
+        oriented_sq = square ^ 56
+        oriented_color = 1 - piece_color
+    else:
+        oriented_sq = square
+        oriented_color = piece_color
+    return offset + oriented_color * 5 * 64 + piece_type * 64 + oriented_sq
+
+
+def in_check_feature_index(checked_color: int, perspective: int) -> int:
+    oriented_color = 1 - checked_color if perspective == 1 else checked_color
+    return IN_CHECK_OFFSET + oriented_color
+
+
+def king_pressure_feature_index(
+    attacked_color: int, attacker_piece_idx: int, bucket: int, perspective: int
+) -> int:
+    oriented_color = 1 - attacked_color if perspective == 1 else attacked_color
+    piece_slot = attacker_piece_idx - 1
+    return KING_PRESSURE_OFFSET + oriented_color * 4 * 8 + piece_slot * 8 + min(bucket, 7)
+
+
+def mobility_feature_index(
+    piece_color: int, piece_idx: int, bucket: int, perspective: int
+) -> int:
+    oriented_color = 1 - piece_color if perspective == 1 else piece_color
+    piece_slot = piece_idx - 1
+    return MOBILITY_OFFSET + oriented_color * 4 * 8 + piece_slot * 8 + min(bucket, 7)
+
+
 def mirror_square(sq: int) -> int:
     """Mirror square horizontally (a1 <-> h1, etc.)."""
     rank = sq // 8
@@ -113,35 +155,125 @@ def parse_fen_features(
 
     If do_mirror=True, horizontally mirror the position (for data augmentation).
     """
-    parts = fen.split()
-    board = parts[0]
-    side_to_move = parts[1] if len(parts) > 1 else "w"
-    white_to_move = side_to_move == "w"
+    board_obj = chess.Board(fen)
+    if do_mirror:
+        mirrored = chess.Board(None)
+        for sq, piece in board_obj.piece_map().items():
+            mirrored.set_piece_at(mirror_square(sq), piece)
+        mirrored.turn = board_obj.turn
+        board_obj = mirrored
+    white_to_move = board_obj.turn == chess.WHITE
 
     white_features = []
     black_features = []
-    square = 56
     pieces = []
 
-    for char in board:
-        if char == "/":
-            square -= 16
-        elif char.isdigit():
-            square += int(char)
-        else:
-            piece_type = PIECE_MAP[char]
-            piece_color = 0 if char.isupper() else 1
+    for square, piece in board_obj.piece_map().items():
+        piece_type = piece.piece_type - 1
+        piece_color = 0 if piece.color == chess.WHITE else 1
+        pieces.append((piece_type, piece_color, square))
+        white_features.append(feature_index(piece_type, piece_color, square, 0))
+        black_features.append(feature_index(piece_type, piece_color, square, 1))
 
-            # Apply horizontal mirror if requested
-            actual_sq = mirror_square(square) if do_mirror else square
-            pieces.append((piece_type, piece_color, actual_sq))
-            square += 1
-
-    for piece_type, piece_color, actual_sq in pieces:
-        white_features.append(feature_index(piece_type, piece_color, actual_sq, 0))
-        black_features.append(feature_index(piece_type, piece_color, actual_sq, 1))
+    add_tactical_features(board_obj, pieces, white_features, black_features)
 
     return white_features, black_features, white_to_move
+
+
+def add_tactical_features(
+    board: chess.Board,
+    pieces: List[Tuple[int, int, int]],
+    white_features: List[int],
+    black_features: List[int],
+) -> None:
+    def push_piece_square(offset: int, piece_type: int, piece_color: int, square: int) -> None:
+        white_features.append(
+            tactical_piece_square_feature_index(offset, piece_type, piece_color, square, 0)
+        )
+        black_features.append(
+            tactical_piece_square_feature_index(offset, piece_type, piece_color, square, 1)
+        )
+
+    for piece_type, piece_color, square in pieces:
+        if piece_type == 5:
+            continue
+        color = chess.WHITE if piece_color == 0 else chess.BLACK
+        opponent = not color
+        attacked = board.is_attacked_by(opponent, square)
+        defended = board.is_attacked_by(color, square)
+        if attacked and not defended:
+            push_piece_square(HANGING_OFFSET, piece_type, piece_color, square)
+        pawn_attackers = board.attackers(opponent, square) & board.pieces(chess.PAWN, opponent)
+        if pawn_attackers:
+            push_piece_square(PAWN_ATTACKED_OFFSET, piece_type, piece_color, square)
+        if board.is_pinned(color, square):
+            push_piece_square(PINNED_OFFSET, piece_type, piece_color, square)
+
+    for color, color_idx in [(chess.WHITE, 0), (chess.BLACK, 1)]:
+        king_sq = board.king(color)
+        if king_sq is not None and board.is_attacked_by(not color, king_sq):
+            white_features.append(in_check_feature_index(color_idx, 0))
+            black_features.append(in_check_feature_index(color_idx, 1))
+
+    for attacked_color, attacked_idx in [(chess.WHITE, 0), (chess.BLACK, 1)]:
+        king_sq = board.king(attacked_color)
+        if king_sq is None:
+            continue
+        zone = king_zone_extended(attacked_color, king_sq)
+        attacker = not attacked_color
+        for piece_type in [chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+            pressure = 0
+            for sq in board.pieces(piece_type, attacker):
+                pressure += len(board.attacks(sq) & zone)
+            if pressure > 0:
+                bucket = min(pressure, 7)
+                piece_idx = piece_type - 1
+                white_features.append(
+                    king_pressure_feature_index(attacked_idx, piece_idx, bucket, 0)
+                )
+                black_features.append(
+                    king_pressure_feature_index(attacked_idx, piece_idx, bucket, 1)
+                )
+
+    for color, color_idx in [(chess.WHITE, 0), (chess.BLACK, 1)]:
+        opponent = not color
+        own = board.occupied_co[color]
+        enemy_pawn_attacks = chess.SquareSet()
+        for pawn_sq in board.pieces(chess.PAWN, opponent):
+            enemy_pawn_attacks |= board.attacks(pawn_sq)
+        for piece_type in [chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN]:
+            mobility = 0
+            for sq in board.pieces(piece_type, color):
+                safe = board.attacks(sq) & ~chess.SquareSet(own) & ~enemy_pawn_attacks
+                mobility += len(safe)
+            if mobility > 0:
+                piece_idx = piece_type - 1
+                bucket = min(mobility, 7)
+                white_features.append(
+                    mobility_feature_index(color_idx, piece_idx, bucket, 0)
+                )
+                black_features.append(
+                    mobility_feature_index(color_idx, piece_idx, bucket, 1)
+                )
+
+
+def king_zone_extended(color: chess.Color, sq: int) -> chess.SquareSet:
+    rank = chess.square_rank(sq)
+    file = chess.square_file(sq)
+    squares = set()
+    for dr in [-1, 0, 1]:
+        for df in [-1, 0, 1]:
+            nr = rank + dr
+            nf = file + df
+            if 0 <= nr < 8 and 0 <= nf < 8:
+                squares.add(chess.square(nf, nr))
+    front_rank = rank + 2 if color == chess.WHITE else rank - 2
+    if 0 <= front_rank < 8:
+        for df in [-1, 0, 1]:
+            nf = file + df
+            if 0 <= nf < 8:
+                squares.add(chess.square(nf, front_rank))
+    return chess.SquareSet(squares)
 
 
 def is_quiet_position(fen: str) -> bool:
@@ -374,19 +506,20 @@ class NNUE256(nn.Module):
             self.output_bias.copy_(read_i16(1) * SCALE / (QA * QB))
 
     def load_piece_square_quantized(self, path: str):
-        """Load a legacy raw 768-input piece-square NNUE."""
+        """Load a legacy 768-input piece-square NNUE into base rows."""
         with open(path, "rb") as f:
             data = f.read()
 
         offset = 0
+        input_size = BASE_INPUT_SIZE
         if data.startswith(NNUE_MAGIC):
             version, input_size, hidden_size = struct.unpack_from("<III", data, len(NNUE_MAGIC))
             if version != NNUE_VERSION:
                 raise ValueError(f"Unsupported NNUE version: {version}")
-            if input_size != INPUT_SIZE or hidden_size != HIDDEN_SIZE:
+            if input_size < BASE_INPUT_SIZE or input_size > INPUT_SIZE or hidden_size != HIDDEN_SIZE:
                 raise ValueError(
                     f"NNUE architecture mismatch: file is {input_size}->{hidden_size}, "
-                    f"trainer expects {INPUT_SIZE}->{HIDDEN_SIZE}"
+                    f"trainer expects {BASE_INPUT_SIZE}..{INPUT_SIZE}->{HIDDEN_SIZE}"
                 )
             offset = len(NNUE_MAGIC) + 12
 
@@ -398,9 +531,10 @@ class NNUE256(nn.Module):
             return values.to(torch.float32)
 
         with torch.no_grad():
-            self.feature_weights.copy_(
-                read_i16(INPUT_SIZE * HIDDEN_SIZE).reshape(INPUT_SIZE, HIDDEN_SIZE) / QA
-            )
+            loaded_weights = read_i16(input_size * HIDDEN_SIZE).reshape(input_size, HIDDEN_SIZE) / QA
+            self.feature_weights.zero_()
+            rows_to_copy = min(input_size, INPUT_SIZE)
+            self.feature_weights[:rows_to_copy].copy_(loaded_weights[:rows_to_copy])
             self.feature_bias.copy_(read_i16(HIDDEN_SIZE) / QA)
             self.output_weights_white.copy_(read_i16(HIDDEN_SIZE) / QB)
             self.output_weights_black.copy_(read_i16(HIDDEN_SIZE) / QB)
@@ -424,7 +558,7 @@ class ImprovedChessDataset(Dataset):
         skipped = 0
 
         for data_file in data_files:
-            print(f"Loading {data_file}...")
+            print(f"Loading {data_file}...", flush=True)
             with open(data_file, "r") as f:
                 for line in f:
                     if max_positions and count >= max_positions:
@@ -487,6 +621,12 @@ class ImprovedChessDataset(Dataset):
                             }
                         )
                         count += 1
+                        if count % 100_000 == 0:
+                            print(
+                                f"  loaded {count:,} positions "
+                                f"(skipped {skipped:,})",
+                                flush=True,
+                            )
                     except Exception:
                         skipped += 1
                         continue
@@ -499,9 +639,12 @@ class ImprovedChessDataset(Dataset):
 
         random.shuffle(self.positions)
 
-        print(f"Loaded {len(self.positions):,} positions (skipped {skipped:,})")
+        print(f"Loaded {len(self.positions):,} positions (skipped {skipped:,})", flush=True)
         if augment:
-            print(f"With augmentation: {len(self.positions) * 2:,} effective positions")
+            print(
+                f"With augmentation: {len(self.positions) * 2:,} effective positions",
+                flush=True,
+            )
 
     def __len__(self):
         # 2x positions if augmentation is enabled
@@ -627,10 +770,11 @@ def train_epoch(
         total_wdl_loss += wdl_loss.item()
         n_batches += 1
 
-        if n_batches % 500 == 0:
+        if n_batches % 100 == 0:
             print(
                 f"  Batch {n_batches}: loss={total_loss / n_batches:.6f} "
-                f"(eval={total_eval_loss / n_batches:.6f}, wdl={total_wdl_loss / n_batches:.6f})"
+                f"(eval={total_eval_loss / n_batches:.6f}, wdl={total_wdl_loss / n_batches:.6f})",
+                flush=True,
             )
 
     return total_loss / max(n_batches, 1)
