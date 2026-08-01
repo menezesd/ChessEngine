@@ -35,7 +35,7 @@ impl EngineController {
     }
 
     fn should_spawn_hard_stop_timer(params: &SearchParams) -> bool {
-        Self::is_timed_search(params) && params.depth.is_none() && params.hard_time_ms > 0
+        Self::is_timed_search(params) && params.hard_time_ms > 0
     }
 
     fn build_deadlines(
@@ -189,6 +189,10 @@ impl EngineController {
                         smp_search(&search_board, &mut guard, smp_config, stop_clone.clone());
 
                     EngineController::wait_for_ponder_completion(&pondering_clone, &stop_clone);
+                    // The hard-stop watchdog shares this flag.  Once the search
+                    // and any ponder wait are over, wake it instead of leaving
+                    // a completed job's timer alive until its deadline.
+                    stop_clone.store(true, Ordering::Relaxed);
 
                     on_complete(result);
                 })
@@ -207,6 +211,10 @@ impl EngineController {
                         search(&mut search_board, &mut guard, config, &stop_clone);
 
                     EngineController::wait_for_ponder_completion(&pondering_clone, &stop_clone);
+                    // See the SMP path above.  This must remain after the
+                    // ponder wait so an early-completing ponder search still
+                    // waits for `ponderhit` before publishing its result.
+                    stop_clone.store(true, Ordering::Relaxed);
 
                     on_complete(result);
                 })
@@ -220,6 +228,7 @@ impl EngineController {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use crate::timer::deadline_after_ms;
@@ -276,5 +285,43 @@ mod tests {
             EngineController::build_deadlines(&params, start),
             (None, None)
         );
+    }
+
+    #[test]
+    fn fixed_depth_timed_search_uses_hard_stop_watchdog() {
+        let params = SearchParams {
+            depth: Some(8),
+            soft_time_ms: 50,
+            hard_time_ms: 100,
+            ..SearchParams::default()
+        };
+
+        assert!(EngineController::should_spawn_hard_stop_timer(&params));
+    }
+
+    #[test]
+    fn completed_search_stops_its_hard_stop_watchdog() {
+        let (sender, receiver) = mpsc::channel();
+        let mut controller = EngineController::new(1);
+        controller.start_search(
+            SearchParams {
+                depth: Some(1),
+                hard_time_ms: 10_000,
+                ..SearchParams::default()
+            },
+            move |_| sender.send(()).expect("test receiver should remain alive"),
+        );
+
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("depth-one search should complete promptly");
+
+        assert!(controller
+            .current_job
+            .as_ref()
+            .expect("completed job should still be tracked")
+            .stop
+            .load(std::sync::atomic::Ordering::Relaxed));
+        controller.stop_search();
     }
 }

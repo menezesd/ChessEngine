@@ -40,54 +40,16 @@ pub struct EngineController {
     num_threads: usize,
 }
 
-/// Default NNUE file paths to try loading (used when `embedded_nnue` is disabled)
-#[cfg(not(feature = "embedded_nnue"))]
-const DEFAULT_NNUE_PATHS: &[&str] = &["trained_new_combined.nnue", "trained.nnue", "default.nnue"];
-
 impl EngineController {
     /// Create a new engine controller
     #[must_use]
     pub fn new(tt_mb: usize) -> Self {
-        let mut controller = EngineController {
+        EngineController {
             board: Board::new(),
             search_state: Arc::new(Mutex::new(SearchState::new(tt_mb))),
             current_job: None,
             info_callback: None,
             num_threads: 1,
-        };
-
-        // Try to auto-load a default NNUE file
-        controller.try_load_default_nnue();
-
-        controller
-    }
-
-    /// Try to load a default NNUE file from common paths or embedded
-    fn try_load_default_nnue(&mut self) {
-        // First try embedded NNUE (if compiled in)
-        #[cfg(feature = "embedded_nnue")]
-        {
-            use crate::board::nnue::network::EMBEDDED_NETWORK;
-            use crate::board::nnue::NnueNetwork;
-            match NnueNetwork::from_bytes(EMBEDDED_NETWORK) {
-                Ok(network) => {
-                    let mut state = self.search_state.lock();
-                    state.tables.nnue = Some(std::sync::Arc::new(network));
-                    eprintln!("info string Using embedded NNUE");
-                }
-                Err(err) => {
-                    eprintln!("info string Embedded NNUE ignored: {err}");
-                }
-            }
-        }
-
-        // Fall back to loading from file
-        #[cfg(not(feature = "embedded_nnue"))]
-        for path in DEFAULT_NNUE_PATHS {
-            if std::path::Path::new(path).exists() && self.load_nnue(path).is_ok() {
-                eprintln!("info string Loaded NNUE: {path}");
-                return;
-            }
         }
     }
 
@@ -163,7 +125,9 @@ impl EngineController {
     /// Check if there's an active search
     #[must_use]
     pub fn is_searching(&self) -> bool {
-        self.current_job.is_some()
+        self.current_job
+            .as_ref()
+            .is_some_and(|job| !job.is_finished())
     }
 
     /// Execute a closure with mutable access to the search state.

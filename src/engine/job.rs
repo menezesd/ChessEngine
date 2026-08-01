@@ -8,6 +8,12 @@ use crate::timer::deadline_after_ms;
 
 const PONDERHIT_TIMER_POLL_MS: u64 = 5;
 
+fn deadline_for_limit(start: Instant, limit_ms: u64) -> Option<Instant> {
+    (limit_ms > 0)
+        .then(|| deadline_after_ms(start, limit_ms))
+        .flatten()
+}
+
 /// Active search job state.
 pub struct SearchJob {
     /// Stop flag for the search
@@ -64,6 +70,12 @@ impl SearchJob {
         self.pondering.store(false, Ordering::Relaxed);
     }
 
+    /// Return whether the search thread has completed.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+
     /// Handle ponderhit - transition from pondering to real search.
     pub fn ponderhit(&mut self) {
         if !self.pondering.load(Ordering::Relaxed) {
@@ -71,23 +83,26 @@ impl SearchJob {
         }
 
         let start = Instant::now();
-        let soft_deadline = deadline_after_ms(start, self.planned_soft_time_ms);
-        let hard_deadline = deadline_after_ms(start, self.planned_hard_time_ms);
+        let soft_deadline = deadline_for_limit(start, self.planned_soft_time_ms);
+        let hard_deadline = deadline_for_limit(start, self.planned_hard_time_ms);
         self.clock.reset(start, soft_deadline, hard_deadline);
 
-        if let Some(hard_deadline) = hard_deadline {
+        // A ponder search starts without a local time limit.  Once it becomes
+        // a normal search, enforce the same soft deadline used by a regular
+        // search; fall back to the hard deadline if no soft deadline exists.
+        if let Some(stop_deadline) = soft_deadline.or(hard_deadline) {
             let stop_timer = Arc::clone(&self.stop);
             let handle = thread::spawn(move || loop {
                 if stop_timer.load(Ordering::Relaxed) {
                     break;
                 }
                 let now = Instant::now();
-                if now >= hard_deadline {
+                if now >= stop_deadline {
                     stop_timer.store(true, Ordering::Relaxed);
                     break;
                 }
                 let sleep_for =
-                    (hard_deadline - now).min(Duration::from_millis(PONDERHIT_TIMER_POLL_MS));
+                    (stop_deadline - now).min(Duration::from_millis(PONDERHIT_TIMER_POLL_MS));
                 thread::sleep(sleep_for);
             });
             self.ponderhit_timer_handle = Some(handle);
@@ -140,6 +155,20 @@ mod tests {
     }
 
     #[test]
+    fn ponderhit_with_zero_planned_limits_does_not_set_deadlines() {
+        let mut job = finished_job(0, 0);
+
+        job.ponderhit();
+
+        let (_, soft, hard) = job.clock.snapshot();
+        assert!(soft.is_none());
+        assert!(hard.is_none());
+        assert!(!job.pondering.load(Ordering::Relaxed));
+
+        job.stop_and_wait();
+    }
+
+    #[test]
     fn stop_and_wait_interrupts_ponderhit_timer() {
         let mut job = finished_job(1_000, 10_000);
         job.ponderhit();
@@ -148,5 +177,27 @@ mod tests {
         job.stop_and_wait();
 
         assert!(start.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn ponderhit_enforces_the_soft_deadline() {
+        let mut job = finished_job(20, 1_000);
+        job.ponderhit();
+
+        thread::sleep(Duration::from_millis(75));
+
+        assert!(job.stop.load(Ordering::Relaxed));
+        job.stop_and_wait();
+    }
+
+    #[test]
+    fn finished_job_reports_finished() {
+        let job = finished_job(0, 0);
+        while !job.is_finished() {
+            thread::yield_now();
+        }
+
+        assert!(job.is_finished());
+        job.stop_and_wait();
     }
 }
