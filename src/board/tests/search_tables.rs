@@ -375,6 +375,33 @@ fn test_mvv_lva_en_passant() {
     assert!(score > 0);
 }
 
+#[test]
+fn test_mvv_lva_prioritizes_non_capture_promotion() {
+    let mut board = make_board("7k/6P1/8/8/8/8/8/K7 w - - 0 1");
+    let mv = board
+        .generate_moves()
+        .into_iter()
+        .find(|mv| mv.is_promotion() && !mv.is_capture() && mv.promotion() == Some(Piece::Queen))
+        .expect("queen promotion");
+    let state = SearchState::new(1);
+
+    assert!(state.tables.mvv_lva_score(&board, &mv) > 100_000);
+}
+
+#[test]
+fn test_mvv_lva_includes_capture_promotion_gain() {
+    let mut board = make_board("7r/6Pk/8/8/8/8/8/K7 w - - 0 1");
+    let mv = board
+        .generate_moves()
+        .into_iter()
+        .find(|mv| mv.is_capture() && mv.promotion() == Some(Piece::Queen))
+        .expect("queen capture promotion");
+    let state = SearchState::new(1);
+
+    // The score includes the rook victim and the pawn-to-queen material gain.
+    assert!(state.tables.mvv_lva_score(&board, &mv) > 110_000);
+}
+
 // ============================================================================
 // Integration: Move Ordering Score Priority
 // ============================================================================

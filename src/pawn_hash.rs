@@ -5,7 +5,7 @@
 //! since pawn structure evaluation is called frequently but pawns
 //! rarely move.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::table_size::rounded_bucket_count;
 
@@ -41,6 +41,8 @@ struct PawnSlot {
     key_xor: AtomicU64,
     /// Stores: `packed_data`
     data: AtomicU64,
+    /// Distinguishes an empty slot from a valid `(hash, mg, eg) == (0, 0, 0)` entry.
+    occupied: AtomicBool,
 }
 
 impl PawnSlot {
@@ -48,20 +50,26 @@ impl PawnSlot {
         PawnSlot {
             key_xor: AtomicU64::new(0),
             data: AtomicU64::new(0),
+            occupied: AtomicBool::new(false),
         }
     }
 
     fn store(&self, hash: u64, packed: u64) {
         self.data.store(packed, Ordering::Relaxed);
         self.key_xor.store(hash ^ packed, Ordering::Relaxed);
+        self.occupied.store(true, Ordering::Release);
     }
 
     fn probe(&self, hash: u64) -> Option<PawnHashEntry> {
+        if !self.occupied.load(Ordering::Acquire) {
+            return None;
+        }
+
         let key_xor = self.key_xor.load(Ordering::Relaxed);
         let data = self.data.load(Ordering::Relaxed);
 
         // XOR verification detects torn reads
-        if key_xor ^ data == hash && data != 0 {
+        if key_xor ^ data == hash {
             Some(unpack_entry(data))
         } else {
             None
@@ -69,10 +77,11 @@ impl PawnSlot {
     }
 
     fn is_empty(&self) -> bool {
-        self.data.load(Ordering::Relaxed) == 0
+        !self.occupied.load(Ordering::Acquire)
     }
 
     fn clear(&self) {
+        self.occupied.store(false, Ordering::Release);
         self.key_xor.store(0, Ordering::Relaxed);
         self.data.store(0, Ordering::Relaxed);
     }

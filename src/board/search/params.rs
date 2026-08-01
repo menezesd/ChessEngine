@@ -1,5 +1,7 @@
 use std::env;
 
+use super::constants::{LMR_IDX_BASE, NULL_MOVE_BASE_REDUCTION};
+
 #[derive(Clone, Debug)]
 pub struct SearchParams {
     pub null_min_depth: u32,
@@ -23,7 +25,7 @@ impl SearchParams {
     fn baseline() -> Self {
         SearchParams {
             null_min_depth: 3,
-            null_reduction: 2,
+            null_reduction: NULL_MOVE_BASE_REDUCTION,
             null_verification_depth: 8,
             iir_min_depth: 4,
             singular_margin: 50,
@@ -33,7 +35,7 @@ impl SearchParams {
             lmp_move_limit: 8,
             futility_margin: 100,
             lmr_min_depth: 3,
-            lmr_min_move: 3,
+            lmr_min_move: LMR_IDX_BASE,
             lmr_reduction: 1,
             delta_margin: 50,
         }

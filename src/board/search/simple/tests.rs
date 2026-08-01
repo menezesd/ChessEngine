@@ -55,6 +55,7 @@ fn assert_incremental_eval_matches(fen: &str, uci: &str) {
         time_limit_ms: 0,
         node_limit: 0,
         nodes: 0,
+        futility_margin: state.params.futility_margin,
         initial_depth: 1,
         static_eval: [0; MAX_PLY],
         previous_move: [EMPTY_MOVE; MAX_PLY],

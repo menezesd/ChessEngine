@@ -14,6 +14,70 @@ fn seed_strategy() -> impl Strategy<Value = u64> {
     any::<u64>()
 }
 
+/// Return the FEN for the same position with colors and ranks swapped.
+///
+/// This preserves the side-to-move perspective, so a color-symmetric
+/// evaluation must return the same score for the original and flipped boards.
+fn color_flip_fen(fen: &str) -> String {
+    let mut parts = fen.split_whitespace();
+    let placement = parts.next().expect("FEN placement");
+    let active = parts.next().expect("FEN active color");
+    let castling = parts.next().expect("FEN castling rights");
+    let en_passant = parts.next().expect("FEN en passant target");
+    let halfmove = parts.next().expect("FEN halfmove clock");
+    let fullmove = parts.next().expect("FEN fullmove number");
+
+    let flipped_placement = placement
+        .split('/')
+        .rev()
+        .map(|rank| {
+            rank.chars()
+                .map(|piece| {
+                    if piece.is_ascii_uppercase() {
+                        piece.to_ascii_lowercase()
+                    } else if piece.is_ascii_lowercase() {
+                        piece.to_ascii_uppercase()
+                    } else {
+                        piece
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    let flipped_active = if active == "w" { "b" } else { "w" };
+    let flipped_castling = if castling == "-" {
+        "-".to_string()
+    } else {
+        let has = |right| castling.contains(right);
+        [
+            (has('k'), 'K'),
+            (has('q'), 'Q'),
+            (has('K'), 'k'),
+            (has('Q'), 'q'),
+        ]
+        .into_iter()
+        .filter_map(|(present, right)| present.then_some(right))
+        .collect()
+    };
+    let flipped_en_passant = if en_passant == "-" {
+        "-".to_string()
+    } else {
+        let mut target = en_passant.chars();
+        let file = target.next().expect("FEN en passant file");
+        let rank = target
+            .next()
+            .expect("FEN en passant rank")
+            .to_digit(10)
+            .expect("FEN en passant numeric rank");
+        format!("{file}{}", 9 - rank)
+    };
+
+    format!(
+        "{flipped_placement} {flipped_active} {flipped_castling} {flipped_en_passant} {halfmove} {fullmove}"
+    )
+}
+
 proptest! {
     /// Property: make_move followed by unmake_move restores board state exactly
     #[test]
@@ -104,6 +168,91 @@ proptest! {
         prop_assert_eq!(board.en_passant_target, restored.en_passant_target);
     }
 
+    /// Property: full HCE is invariant under swapping both colors and ranks.
+    #[test]
+    fn prop_hce_color_flip_symmetry(seed in seed_strategy(), num_moves in move_count_strategy()) {
+        use rand::prelude::*;
+
+        let mut board = Board::new();
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        for _ in 0..num_moves {
+            let moves = board.generate_moves();
+            if moves.is_empty() {
+                break;
+            }
+            board.make_move(moves.as_slice()[rng.gen_range(0..moves.len())]);
+        }
+
+        let flipped = Board::from_fen(&color_flip_fen(&board.to_fen()));
+        prop_assert_eq!(board.evaluate(), flipped.evaluate());
+        prop_assert_eq!(board.evaluate_tuned_hce(), flipped.evaluate_tuned_hce());
+    }
+
+    /// `evalfeatures` must report the exact full HCE score used by the engine,
+    /// including aggregate tapering and endgame draw scaling.
+    #[test]
+    fn prop_hce_feature_breakdown_matches_evaluation(
+        seed in seed_strategy(),
+        num_moves in move_count_strategy(),
+    ) {
+        use rand::prelude::*;
+
+        let mut board = Board::new();
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        for _ in 0..num_moves {
+            let moves = board.generate_moves();
+            if moves.is_empty() {
+                break;
+            }
+            board.make_move(moves.as_slice()[rng.gen_range(0..moves.len())]);
+        }
+
+        let breakdown = board.hce_feature_breakdown();
+        let expected = if board.white_to_move() {
+            breakdown.full_white
+        } else {
+            -breakdown.full_white
+        };
+        prop_assert_eq!(board.evaluate(), expected, "{}", board.to_fen());
+    }
+
+    /// Property: the pawn hash only memoizes a pawn-only term and therefore
+    /// cannot change either full HCE result.
+    #[test]
+    fn prop_cached_hce_matches_uncached(
+        seed in seed_strategy(),
+        num_moves in move_count_strategy(),
+    ) {
+        use rand::prelude::*;
+
+        let mut board = Board::new();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let pawn_hash = crate::pawn_hash::PawnHashTable::new(64);
+
+        for _ in 0..num_moves {
+            let moves = board.generate_moves();
+            if moves.is_empty() {
+                break;
+            }
+            board.make_move(moves.as_slice()[rng.gen_range(0..moves.len())]);
+        }
+
+        prop_assert_eq!(
+            board.evaluate_cached(&pawn_hash),
+            board.evaluate(),
+            "{}",
+            board.to_fen()
+        );
+        prop_assert_eq!(
+            board.evaluate_tuned_hce_cached(&pawn_hash),
+            board.evaluate_tuned_hce(),
+            "{}",
+            board.to_fen()
+        );
+    }
+
     /// Property: legal moves are always legal (no self-check)
     #[test]
     fn prop_legal_moves_are_legal(seed in seed_strategy()) {
@@ -131,6 +280,30 @@ proptest! {
             // Make a random move to continue
             let idx = rng.gen_range(0..moves.len());
             let mv = moves.as_slice()[idx];
+            board.make_move(mv);
+        }
+    }
+
+    /// Property: the terminal-node legal-move probe agrees with full move generation.
+    #[test]
+    fn prop_has_legal_move_matches_move_generation(
+        seed in seed_strategy(),
+        num_moves in move_count_strategy(),
+    ) {
+        use rand::prelude::*;
+
+        let mut board = Board::new();
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        for _ in 0..num_moves {
+            let moves = board.generate_moves();
+            let mut probe_board = board.clone();
+            prop_assert_eq!(probe_board.has_legal_move(), !moves.is_empty());
+
+            if moves.is_empty() {
+                break;
+            }
+            let mv = moves.as_slice()[rng.gen_range(0..moves.len())];
             board.make_move(mv);
         }
     }

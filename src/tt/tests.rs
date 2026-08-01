@@ -200,6 +200,23 @@ fn test_zero_hash() {
 }
 
 #[test]
+fn test_zero_payload_entry_is_not_treated_as_empty() {
+    let tt = TranspositionTable::new(1);
+    let hash = 0x0123_4567_89AB_CDEF;
+
+    // This used to pack to zero, which is the slot-empty sentinel.  A TT
+    // entry is valid even when every semantic payload field is zero.
+    tt.store(hash, 0, 0, BoundType::Exact, None, 0);
+
+    let entry = tt.probe(hash).expect("zero payload should still be stored");
+    assert_eq!(entry.depth, 0);
+    assert_eq!(entry.score, 0);
+    assert_eq!(entry.bound_type, BoundType::Exact);
+    assert_eq!(entry.best_move, None);
+    assert_eq!(entry.generation, 0);
+}
+
+#[test]
 fn test_all_ones_hash() {
     let tt = TranspositionTable::new(1);
     let hash = u64::MAX;

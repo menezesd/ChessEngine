@@ -55,10 +55,10 @@ pub const LMR_SCORE_THRESHOLD: i32 = 2500;
 // REDUCTIONS
 // ========================================================================
 
-/// Base null-move reduction increment
-pub const NULL_MOVE_BASE_REDUCTION: u32 = 1;
+/// Default null-move reduction increment.
+pub const NULL_MOVE_BASE_REDUCTION: u32 = 2;
 
-/// LMR starts after this many moves (moves with idx > `LMR_IDX_BASE` + `move_count/4`)
+/// Default LMR move threshold before the move-count adjustment.
 pub const LMR_IDX_BASE: usize = 3;
 
 /// LMR reduction table dimensions (depth x move index buckets)

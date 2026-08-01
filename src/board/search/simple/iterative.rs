@@ -1,7 +1,10 @@
 use std::time::Instant;
 
-use super::{SimpleSearchContext, MATE_SCORE, MATE_THRESHOLD, SCORE_INFINITE};
-use crate::board::search::SearchInfoCallback;
+use super::{
+    effective_futility_margin, exact_two_knights_root_move, SimpleSearchContext, MATE_SCORE,
+    MATE_THRESHOLD, SCORE_INFINITE,
+};
+use crate::board::search::{SearchInfoCallback, DEFAULT_MAX_DEPTH};
 use crate::board::{Move, SearchIterationInfo, SearchState, EMPTY_MOVE, MAX_PLY};
 use std::sync::atomic::AtomicBool;
 
@@ -9,6 +12,11 @@ use std::sync::atomic::AtomicBool;
 const ASPIRATION_DELTA_SHALLOW: i32 = 35; // Initial delta for depth <= 5
 const ASPIRATION_DELTA_DEEP: i32 = 20; // Initial delta for depth > 5
 const ASPIRATION_MAX_DELTA: i32 = 800; // Fall back to full window above this
+
+#[inline]
+fn clamp_search_depth(max_depth: u32) -> u32 {
+    max_depth.min(DEFAULT_MAX_DEPTH)
+}
 
 impl SimpleSearchContext<'_> {
     /// Check if we should stop the current iteration based on time management.
@@ -65,7 +73,9 @@ impl SimpleSearchContext<'_> {
         max_depth: u32,
         multipv_index: u32,
     ) -> Option<Move> {
-        let mut best_move: Option<Move> = None;
+        // A search can be interrupted before its first iteration finishes.
+        // Preserve a legal root move so protocol callers can still respond.
+        let mut best_move = self.root_moves.first().copied();
         // Initialize NNUE accumulator for root position
         self.init_accumulator(0);
         let mut score = self.evaluate(0);
@@ -76,8 +86,10 @@ impl SimpleSearchContext<'_> {
         let mut stability_count = 0u32;
         let mut prev_iter_nodes = 0u64;
 
-        // Soft time limit is ~40% of hard limit (can be exceeded for good reasons)
-        let soft_time_ms = self.time_limit_ms * 40 / 100;
+        // `time_limit_ms` is the controller's soft deadline. Stability-based
+        // adjustments below decide whether to stop earlier; halving it here
+        // would otherwise discard half of the allotted thinking time.
+        let soft_time_ms = self.time_limit_ms;
 
         // Reset history at start of search
         self.state.tables.reset_history();
@@ -215,6 +227,17 @@ impl SimpleSearchContext<'_> {
     }
 }
 
+/// Record a root result that required no tree expansion.
+///
+/// `total_nodes` is intentionally cumulative across `MultiPV` searches; the
+/// per-search counters must still describe this zero-node result rather than
+/// leaking values from a previous direct call that reused `SearchState`.
+fn record_zero_node_root_result(state: &mut SearchState) {
+    state.stats.nodes = 0;
+    state.stats.seldepth = 0;
+    state.stats.tt_hits = 0;
+}
+
 /// Run the main search algorithm
 pub fn simple_search(
     board: &mut crate::board::Board,
@@ -251,6 +274,11 @@ pub fn simple_search_multipv(
     excluded_moves: &[Move],
     multipv_index: u32,
 ) -> Option<Move> {
+    // `SearchConfig` and `SmpConfig` already cap their public depth settings.
+    // Keep the direct `simple_search` API equally bounded so an unchecked
+    // caller cannot request billions of iterative-deepening iterations.
+    let max_depth = clamp_search_depth(max_depth);
+
     // Increment generation for TT aging (only on first PV line)
     if multipv_index == 1 {
         state.generation = state.generation.wrapping_add(1);
@@ -267,11 +295,28 @@ pub fn simple_search_multipv(
         .collect();
 
     if available_moves.is_empty() {
+        record_zero_node_root_result(state);
         return None;
     }
     if available_moves.len() == 1 {
+        record_zero_node_root_result(state);
         return Some(available_moves[0]);
     }
+
+    // These material and rule-based draws have no tactical exception at the
+    // root. K+NN versus K is deliberately handled below instead: it is not a
+    // dead position because a mate in one can still exist after a blunder.
+    if board.is_theoretical_draw() {
+        record_zero_node_root_result(state);
+        return Some(available_moves[0]);
+    }
+
+    if let Some(best_move) = exact_two_knights_root_move(board, &available_moves) {
+        record_zero_node_root_result(state);
+        return Some(best_move);
+    }
+
+    let futility_margin = effective_futility_margin(time_limit_ms, state.params.futility_margin);
 
     let mut ctx = SimpleSearchContext {
         board,
@@ -281,6 +326,7 @@ pub fn simple_search_multipv(
         time_limit_ms,
         node_limit,
         nodes: 0,
+        futility_margin,
         initial_depth: 1,
         static_eval: [0; MAX_PLY],
         previous_move: [EMPTY_MOVE; MAX_PLY],
@@ -288,6 +334,8 @@ pub fn simple_search_multipv(
         info_callback,
         root_moves: available_moves,
         acc_stack: vec![crate::board::nnue::NnueAccumulator::default(); MAX_PLY + 16]
+            .into_boxed_slice(),
+        static_acc_stack: vec![crate::board::nnue::NnueAccumulator::default(); MAX_PLY + 16]
             .into_boxed_slice(),
     };
 
@@ -297,4 +345,15 @@ pub fn simple_search_multipv(
     ctx.state.stats.total_nodes = ctx.state.stats.total_nodes.saturating_add(ctx.nodes);
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_search_depth, DEFAULT_MAX_DEPTH};
+
+    #[test]
+    fn direct_search_depth_is_clamped_to_engine_maximum() {
+        assert_eq!(clamp_search_depth(u32::MAX), DEFAULT_MAX_DEPTH);
+        assert_eq!(clamp_search_depth(12), 12);
+    }
 }

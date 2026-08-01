@@ -18,13 +18,14 @@ mod state;
 mod tables;
 
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 pub use config::{
     SearchClock, SearchConfig, SearchInfoCallback, SearchIterationInfo, SearchLimits, SearchResult,
 };
 pub(crate) use constants::DEFAULT_MAX_DEPTH;
 pub use params::SearchParams;
-pub use state::{SearchState, SearchStats};
+pub use state::{HceOptions, SearchState, SearchStats, StaticEvalOptions};
 pub use tables::{CaptureHistory, CounterMoveTable, HistoryTable, KillerTable, SearchTables};
 
 use super::{Board, Move, MAX_PLY};
@@ -98,18 +99,41 @@ pub fn search(
 
     let mut excluded_moves: Vec<Move> = Vec::new();
     let mut first_best_move: Option<Move> = None;
+    let starting_total_nodes = state.stats.total_nodes;
+    let search_start = Instant::now();
 
     for pv_index in 1..=multi_pv {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
 
+        let node_limit = if config.node_limit == 0 {
+            0
+        } else {
+            let consumed = state.stats.total_nodes.saturating_sub(starting_total_nodes);
+            let remaining = config.node_limit.saturating_sub(consumed);
+            if remaining == 0 {
+                break;
+            }
+            remaining
+        };
+        let time_limit_ms = if config.time_limit_ms == 0 {
+            0
+        } else {
+            let elapsed_ms = u64::try_from(search_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let remaining = config.time_limit_ms.saturating_sub(elapsed_ms);
+            if remaining == 0 {
+                break;
+            }
+            remaining
+        };
+
         let best_move = simple::simple_search_multipv(
             board,
             state,
             max_depth,
-            config.time_limit_ms,
-            config.node_limit,
+            time_limit_ms,
+            node_limit,
             stop,
             info_callback.clone(),
             &excluded_moves,

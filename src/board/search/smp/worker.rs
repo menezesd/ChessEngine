@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::board::nnue::NnueNetwork;
 use crate::board::{Board, Move};
@@ -7,7 +8,7 @@ use crate::tt::TranspositionTable;
 
 use super::super::constants::SCORE_INFINITE;
 use super::super::simple::simple_search;
-use super::super::{SearchInfoCallback, SearchParams, SearchState};
+use super::super::{HceOptions, SearchInfoCallback, SearchParams, SearchState, StaticEvalOptions};
 
 /// Shared state across all worker threads.
 pub struct SharedSearchState {
@@ -27,30 +28,44 @@ pub struct SharedSearchState {
     pub max_seldepth: Arc<AtomicU64>,
     /// TT generation for aging
     pub generation: u16,
+    /// Explicit hard deadline inherited from the parent search state.
+    pub hard_stop_at: Option<Instant>,
     /// Search parameters
     pub params: SearchParams,
+    /// Main NNUE scale and HCE blend configuration.
+    pub nnue_eval_scale: i32,
+    pub nnue_hce_blend: i32,
+    /// HCE configuration for full and static evaluation.
+    pub hce_options: HceOptions,
+    pub static_eval_options: StaticEvalOptions,
+    /// Static-evaluation NNUE configuration.
+    pub nnue_static_eval_scale: i32,
+    pub nnue_static_blend: i32,
+    /// Whether static-evaluation tracing is enabled.
+    pub trace: bool,
 }
 
 impl SharedSearchState {
     /// Create with a specific TT, pawn hash table, and optional NNUE network.
-    pub fn new(
-        tt: Arc<TranspositionTable>,
-        pawn_hash: Arc<crate::pawn_hash::PawnHashTable>,
-        nnue: Option<Arc<NnueNetwork>>,
-        static_nnue: Option<Arc<NnueNetwork>>,
-        stop: Arc<AtomicBool>,
-        generation: u16,
-    ) -> Self {
+    pub fn new(state: &SearchState, stop: Arc<AtomicBool>, generation: u16) -> Self {
         SharedSearchState {
-            tt,
-            pawn_hash,
-            nnue,
-            static_nnue,
+            tt: state.shared_tt(),
+            pawn_hash: state.shared_pawn_hash(),
+            nnue: state.shared_nnue(),
+            static_nnue: state.shared_static_nnue(),
             stop,
             total_nodes: Arc::new(AtomicU64::new(0)),
             max_seldepth: Arc::new(AtomicU64::new(0)),
             generation,
-            params: SearchParams::default(),
+            hard_stop_at: state.hard_stop_at,
+            params: state.params.clone(),
+            nnue_eval_scale: state.nnue_eval_scale,
+            nnue_hce_blend: state.nnue_hce_blend,
+            hce_options: state.hce_options,
+            static_eval_options: state.static_eval_options,
+            nnue_static_eval_scale: state.nnue_static_eval_scale,
+            nnue_static_blend: state.nnue_static_blend,
+            trace: state.trace,
         }
     }
 
@@ -123,14 +138,7 @@ fn worker_search_depth(max_depth: u32, worker_id: usize) -> u32 {
         .saturating_add(worker_depth_offset(worker_id))
 }
 
-/// Run a single worker thread.
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn run_worker(
-    worker_id: usize,
-    mut board: Board,
-    shared: Arc<SharedSearchState>,
-    config: WorkerSearchConfig,
-) -> WorkerResult {
+fn new_worker_state(shared: &SharedSearchState) -> SearchState {
     let mut local_state = SearchState::with_shared_tables(
         Arc::clone(&shared.tt),
         Arc::clone(&shared.pawn_hash),
@@ -139,6 +147,26 @@ pub(super) fn run_worker(
         shared.generation,
     );
     local_state.params = shared.params.clone();
+    local_state.hard_stop_at = shared.hard_stop_at;
+    local_state.nnue_eval_scale = shared.nnue_eval_scale;
+    local_state.nnue_hce_blend = shared.nnue_hce_blend;
+    local_state.hce_options = shared.hce_options;
+    local_state.static_eval_options = shared.static_eval_options;
+    local_state.nnue_static_eval_scale = shared.nnue_static_eval_scale;
+    local_state.nnue_static_blend = shared.nnue_static_blend;
+    local_state.trace = shared.trace;
+    local_state
+}
+
+/// Run a single worker thread.
+#[allow(clippy::needless_pass_by_value)]
+pub(super) fn run_worker(
+    worker_id: usize,
+    mut board: Board,
+    shared: Arc<SharedSearchState>,
+    config: WorkerSearchConfig,
+) -> WorkerResult {
+    let mut local_state = new_worker_state(&shared);
 
     local_state.tables.history.decay();
     local_state.tables.killer_moves.reset();
@@ -179,11 +207,11 @@ pub(super) fn run_worker(
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
-    use crate::pawn_hash::PawnHashTable;
-    use crate::tt::TranspositionTable;
+    use crate::board::SearchState;
 
-    use super::{worker_search_depth, SharedSearchState};
+    use super::{new_worker_state, worker_search_depth, SharedSearchState};
 
     #[test]
     fn worker_search_depth_alternates_helper_depth() {
@@ -202,18 +230,45 @@ mod tests {
 
     #[test]
     fn add_nodes_saturates_global_counter() {
-        let shared = SharedSearchState::new(
-            Arc::new(TranspositionTable::new(1)),
-            Arc::new(PawnHashTable::default()),
-            None,
-            None,
-            Arc::new(AtomicBool::new(false)),
-            0,
-        );
+        let state = SearchState::new(1);
+        let shared = SharedSearchState::new(&state, Arc::new(AtomicBool::new(false)), 0);
         shared.total_nodes.store(u64::MAX - 1, Ordering::Relaxed);
 
         shared.add_nodes(10);
 
         assert_eq!(shared.total_nodes.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn worker_state_inherits_search_and_evaluation_options() {
+        let mut state = SearchState::new(1);
+        let hard_stop_at = Instant::now() + Duration::from_secs(1);
+        state.set_hard_stop_at(Some(hard_stop_at));
+        state.params.futility_margin = 321;
+        state.nnue_eval_scale = 123;
+        state.nnue_hce_blend = 45;
+        state.hce_options.use_full = false;
+        state.hce_options.use_tuned = false;
+        state.static_eval_options.nnue_pure = true;
+        state.static_eval_options.use_full_hce = true;
+        state.nnue_static_eval_scale = 87;
+        state.nnue_static_blend = 65;
+        state.trace = true;
+
+        let shared = SharedSearchState::new(&state, Arc::new(AtomicBool::new(false)), 7);
+        let worker_state = new_worker_state(&shared);
+
+        assert_eq!(worker_state.generation, 7);
+        assert_eq!(worker_state.hard_stop_at, Some(hard_stop_at));
+        assert_eq!(worker_state.params.futility_margin, 321);
+        assert_eq!(worker_state.nnue_eval_scale, 123);
+        assert_eq!(worker_state.nnue_hce_blend, 45);
+        assert!(!worker_state.hce_options.use_full);
+        assert!(!worker_state.hce_options.use_tuned);
+        assert!(worker_state.static_eval_options.nnue_pure);
+        assert!(worker_state.static_eval_options.use_full_hce);
+        assert_eq!(worker_state.nnue_static_eval_scale, 87);
+        assert_eq!(worker_state.nnue_static_blend, 65);
+        assert!(worker_state.trace);
     }
 }

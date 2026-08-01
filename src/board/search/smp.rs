@@ -18,7 +18,9 @@ use std::thread::{self, JoinHandle};
 use crate::board::Board;
 
 use super::{
-    constants::DEFAULT_MAX_DEPTH, SearchConfig, SearchInfoCallback, SearchResult, SearchState,
+    constants::DEFAULT_MAX_DEPTH,
+    simple::{immediate_root_result, RootSearchResolution},
+    SearchConfig, SearchInfoCallback, SearchResult, SearchState,
 };
 use worker::{run_worker, WorkerSearchConfig};
 pub use worker::{SharedSearchState, WorkerResult};
@@ -99,6 +101,32 @@ impl SmpConfig {
     }
 }
 
+/// Return the number of workers that can receive a non-zero node budget.
+fn active_worker_count(requested_threads: usize, node_limit: u64) -> usize {
+    let requested_threads = requested_threads.max(1);
+    if node_limit == 0 {
+        return requested_threads;
+    }
+
+    usize::try_from(node_limit).map_or(requested_threads, |nodes| {
+        requested_threads.min(nodes.max(1))
+    })
+}
+
+/// Split a global node budget between workers without exceeding it in total.
+fn worker_node_limit(node_limit: u64, worker_id: usize, worker_count: usize) -> u64 {
+    if node_limit == 0 {
+        return 0;
+    }
+
+    let worker_count = u64::try_from(worker_count).unwrap_or(u64::MAX).max(1);
+    let base = node_limit / worker_count;
+    let remainder = node_limit % worker_count;
+    let receives_remainder = u64::try_from(worker_id).is_ok_and(|id| id < remainder);
+
+    base + u64::from(receives_remainder)
+}
+
 /// Search thread stack size (32 MB to handle deep recursion)
 const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
 
@@ -147,7 +175,7 @@ pub fn smp_search(
     config: SmpConfig,
     stop: Arc<AtomicBool>,
 ) -> SearchResult {
-    let num_threads = config.num_threads.max(1);
+    let num_threads = active_worker_count(config.num_threads, config.node_limit);
 
     // For single-threaded, use the existing path
     if num_threads == 1 {
@@ -163,16 +191,26 @@ pub fn smp_search(
         return super::search(&mut board_clone, state, search_config, &stop);
     }
 
+    // Avoid spawning worker threads for terminal, proven-draw, and exact
+    // K+NN-versus-K roots. The single-thread path performs this same check
+    // internally; SMP needs it here to avoid thread setup entirely.
+    let mut root_board = board.clone();
+    if let RootSearchResolution::Resolved(best_move) = immediate_root_result(&mut root_board) {
+        state.generation = state.generation.wrapping_add(1);
+        state.stats.reset_search();
+        return SearchResult {
+            best_move,
+            ponder_move: None,
+        };
+    }
+
     // Increment generation for new search
     state.generation = state.generation.wrapping_add(1);
     state.stats.reset_search();
 
     // Create shared state with the TT, pawn hash, and NNUE from SearchState
     let shared = Arc::new(SharedSearchState::new(
-        state.shared_tt(),
-        state.shared_pawn_hash(),
-        state.shared_nnue(),
-        state.shared_static_nnue(),
+        state,
         Arc::clone(&stop),
         state.generation,
     ));
@@ -186,6 +224,7 @@ pub fn smp_search(
         let board_clone = board.clone();
         let shared_clone = Arc::clone(&shared);
         let mut worker_cfg = worker_config.clone();
+        worker_cfg.node_limit = worker_node_limit(config.node_limit, worker_id, num_threads);
         // Only main worker reports info
         if worker_id != 0 {
             worker_cfg.info_callback = None;
@@ -210,6 +249,7 @@ pub fn smp_search(
 
     // Update stats from shared counters
     state.stats.nodes = shared.total_nodes.load(Ordering::Relaxed);
+    state.stats.total_nodes = state.stats.nodes;
     state.stats.seldepth = shared.max_seldepth.load(Ordering::Relaxed) as u32;
 
     let best_move = best_worker_move(&results);
@@ -223,7 +263,13 @@ pub fn smp_search(
 
 #[cfg(test)]
 mod tests {
-    use super::{SmpConfig, DEFAULT_MAX_DEPTH};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use crate::board::{Board, SearchState};
+
+    use super::{active_worker_count, smp_search, worker_node_limit, SmpConfig, DEFAULT_MAX_DEPTH};
 
     #[test]
     fn depth_clamps_to_default_max_depth() {
@@ -231,5 +277,101 @@ mod tests {
             SmpConfig::with_threads(2).depth(u32::MAX).max_depth,
             DEFAULT_MAX_DEPTH
         );
+    }
+
+    #[test]
+    fn node_limited_search_uses_no_more_workers_than_nodes() {
+        assert_eq!(active_worker_count(4, 0), 4);
+        assert_eq!(active_worker_count(4, 1), 1);
+        assert_eq!(active_worker_count(4, 3), 3);
+        assert_eq!(active_worker_count(4, 10), 4);
+    }
+
+    #[test]
+    fn worker_node_limits_partition_the_global_budget() {
+        let limits: Vec<_> = (0..3)
+            .map(|worker| worker_node_limit(10, worker, 3))
+            .collect();
+
+        assert_eq!(limits, vec![4, 3, 3]);
+        assert_eq!(limits.iter().sum::<u64>(), 10);
+        assert_eq!(worker_node_limit(0, 0, 3), 0);
+    }
+
+    #[test]
+    fn smp_search_respects_the_global_node_limit() {
+        let board = Board::default();
+        let mut state = SearchState::new(1);
+        let config = SmpConfig::with_threads(2).depth(6).nodes(100);
+
+        let _ = smp_search(&board, &mut state, config, Arc::new(AtomicBool::new(false)));
+
+        assert!(
+            state.stats.nodes <= 100,
+            "searched {} nodes with a 100-node budget",
+            state.stats.nodes
+        );
+        assert_eq!(state.stats.total_nodes, state.stats.nodes);
+    }
+
+    #[test]
+    fn smp_search_with_single_node_limit_never_overshoots() {
+        let mut board = Board::default();
+        let mut state = SearchState::new(1);
+        let config = SmpConfig::with_threads(4).depth(20).nodes(1);
+
+        let result = smp_search(&board, &mut state, config, Arc::new(AtomicBool::new(false)));
+
+        assert!(
+            result.best_move.is_some_and(|mv| board.is_legal_move(mv)),
+            "an immediately limited SMP search should retain a legal root fallback"
+        );
+        assert!(
+            state.stats.nodes <= 1,
+            "SMP search exceeded its one-node budget: {}",
+            state.stats.nodes
+        );
+        assert_eq!(state.stats.total_nodes, state.stats.nodes);
+    }
+
+    #[test]
+    fn smp_search_respects_state_hard_deadline() {
+        let board = Board::default();
+        let mut state = SearchState::new(1);
+        state.set_hard_stop_at(Some(Instant::now()));
+        let config = SmpConfig::with_threads(2).depth(6);
+
+        let result = smp_search(&board, &mut state, config, Arc::new(AtomicBool::new(false)));
+
+        assert!(result.best_move.is_some());
+        assert_eq!(state.stats.nodes, 0);
+    }
+
+    #[test]
+    fn smp_search_resolves_two_knights_vs_bare_king_at_the_root() {
+        let mut board = Board::from_fen("7k/8/8/8/8/8/4N1N1/K7 w - - 0 1");
+        let mut state = SearchState::new(1);
+        let config = SmpConfig::with_threads(2).depth(12);
+
+        let result = smp_search(&board, &mut state, config, Arc::new(AtomicBool::new(false)));
+
+        assert!(result.best_move.is_some());
+        assert!(board.is_legal_move(result.best_move.unwrap()));
+        assert_eq!(state.stats.nodes, 0);
+    }
+
+    #[test]
+    fn smp_search_keeps_two_knights_mate_in_one_at_the_root() {
+        let board = Board::from_fen("8/8/8/8/8/2N5/8/k1K1N3 w - - 0 1");
+        let mut state = SearchState::new(1);
+        let config = SmpConfig::with_threads(2).depth(12);
+
+        let result = smp_search(&board, &mut state, config, Arc::new(AtomicBool::new(false)));
+
+        assert_eq!(
+            result.best_move.map(|mv| mv.to_string()),
+            Some("e1c2".to_string())
+        );
+        assert_eq!(state.stats.nodes, 0);
     }
 }

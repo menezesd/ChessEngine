@@ -177,8 +177,7 @@ pub struct SearchIterationInfo {
     pub pv: String,
     pub seldepth: u32,
     pub tt_hits: u64,
-    /// Which PV line this is (1 = best, 2 = second best, etc.)
-    /// Currently always 1 - full `MultiPV` is not yet implemented.
+    /// Which PV line this is (1 = best, 2 = second best, etc.).
     pub multipv: u32,
 }
 

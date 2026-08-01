@@ -34,6 +34,10 @@ const SCORE_SHIFT: usize = 16;
 pub(super) const DEPTH_SHIFT: usize = 32;
 pub(super) const BOUND_GEN_SHIFT: usize = 40;
 pub(super) const BYTE_MASK: u64 = 0xFF;
+// Keep the all-zero word reserved for an empty TT slot.  The packed payload
+// itself can otherwise legitimately be zero (depth-zero exact draw with no
+// best move and generation zero), so it needs an explicit validity marker.
+const VALID_BIT: u64 = 1 << 63;
 
 /// Unpacked TT entry for reading.
 #[derive(Clone, Debug)]
@@ -72,8 +76,9 @@ impl TTEntry {
 /// - bits 16-31: score (i16 as u16)
 /// - bits 32-39: depth (u8)
 /// - bits 40-47: bound (2 bits) + generation (6 bits)
+/// - bit 63: entry-valid marker (keeps the all-zero word as the empty sentinel)
 ///
-/// Total: 48 bits used, 16 bits spare.
+/// Total: 48 payload bits plus one validity bit; 15 bits remain spare.
 pub(super) fn pack_entry(
     depth: u8,
     score: i16,
@@ -86,7 +91,8 @@ pub(super) fn pack_entry(
     let bound_gen: u8 =
         (bound_type.to_u8() & BOUND_MASK) | ((generation & GENERATION_MASK) << GENERATION_SHIFT);
 
-    (mv as u64)
+    VALID_BIT
+        | (mv as u64)
         | ((sc as u64) << SCORE_SHIFT)
         | ((depth as u64) << DEPTH_SHIFT)
         | ((bound_gen as u64) << BOUND_GEN_SHIFT)

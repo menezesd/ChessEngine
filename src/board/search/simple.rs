@@ -27,17 +27,144 @@ use std::time::Instant;
 use crate::tt::BoundType;
 
 use super::constants::{
-    COUNTER_SCORE, KILLER1_SCORE, KILLER2_SCORE, KILLER3_SCORE, LMR_IDX_BASE, LMR_SCORE_THRESHOLD,
+    COUNTER_SCORE, KILLER1_SCORE, KILLER2_SCORE, KILLER3_SCORE, LMR_SCORE_THRESHOLD,
     LMR_TABLE_MAX_DEPTH, LMR_TABLE_MAX_IDX, MATE_THRESHOLD, PAWN_EXTENSION_RANK_BLACK,
     PAWN_EXTENSION_RANK_WHITE, SCORE_INFINITE, SCORE_NEAR_MATE, SCORE_SAFE_MAX, TT_MOVE_SCORE,
 };
 use super::{SearchInfoCallback, SearchState, MATE_SCORE};
 use crate::board::nnue::network::feature_index;
-use crate::board::nnue::NnueAccumulator;
+use crate::board::nnue::{NnueAccumulator, NnueNetwork};
 use crate::board::{Board, Color, Move, MoveList, ScoredMoveList, Square, EMPTY_MOVE, MAX_PLY};
 use crate::eval_math::{blended_eval, scaled_eval};
 
 use super::super::Piece;
+
+const SHORT_TIME_FUTILITY_LIMIT_MS: u64 = 300;
+const SHORT_TIME_FUTILITY_MARGIN: i32 = 130;
+const STATIC_TRACE_MAX_PLY: usize = 8;
+const STATIC_TRACE_NODE_INTERVAL_LOG2: u32 = 6;
+
+/// Result of an SMP preflight that may avoid creating worker threads.
+pub(super) enum RootSearchResolution {
+    /// The root is terminal or exactly resolved, with an optional legal move.
+    Resolved(Option<Move>),
+    /// Normal tree search is required.
+    RequiresSearch,
+}
+
+/// Whether the side to move has a legal mate in one.
+fn has_mate_in_one(board: &mut Board) -> bool {
+    for mv in board.generate_moves() {
+        let info = board.make_move(mv);
+        let is_mate = board.is_checkmate();
+        board.unmake_move(mv, info);
+
+        if is_mate {
+            return true;
+        }
+    }
+    false
+}
+
+/// Convert a root-relative mate score into a TT-relative score.
+///
+/// The same position can be reached at a different ply through a
+/// transposition. Storing mate scores without this adjustment makes a mate
+/// found deeper in one line appear equally distant when probed from another.
+#[inline]
+fn score_to_tt(score: i32, ply: usize) -> i32 {
+    let ply_score = ply.min(MAX_PLY) as i32;
+    if score >= MATE_THRESHOLD {
+        score.saturating_add(ply_score)
+    } else if score <= -MATE_THRESHOLD {
+        score.saturating_sub(ply_score)
+    } else {
+        score
+    }
+}
+
+/// Convert a TT-relative mate score back into a root-relative score.
+#[inline]
+fn score_from_tt(score: i32, ply: usize) -> i32 {
+    let ply_score = ply.min(MAX_PLY) as i32;
+    if score >= MATE_THRESHOLD {
+        score.saturating_sub(ply_score)
+    } else if score <= -MATE_THRESHOLD {
+        score.saturating_add(ply_score)
+    } else {
+        score
+    }
+}
+
+/// Return a mating move for the exceptional K+NN versus K mate-in-one case,
+/// or a drawing move for every other position in that material class.
+pub(super) fn exact_two_knights_root_move(
+    board: &mut Board,
+    available_moves: &[Move],
+) -> Option<Move> {
+    let knight_side = board.two_knights_vs_bare_king_side()?;
+
+    if board.side_to_move() != knight_side {
+        // A pair of knights cannot force mate, but a bare king can still
+        // blunder into an immediate mate.  Preserve the draw by selecting a
+        // legal reply that does not allow one, rather than returning an
+        // arbitrary king move.
+        for &mv in available_moves {
+            let info = board.make_move(mv);
+            let permits_mate = has_mate_in_one(board);
+            board.unmake_move(mv, info);
+
+            if !permits_mate {
+                return Some(mv);
+            }
+        }
+
+        // K+NN cannot force mate against a bare king, so a safe move should
+        // always exist in a legal position. Keep a legal fallback for
+        // malformed positions and future move-generation changes.
+        return available_moves.first().copied();
+    }
+
+    for &mv in available_moves {
+        let info = board.make_move(mv);
+        let is_mate = board.is_checkmate();
+        board.unmake_move(mv, info);
+
+        if is_mate {
+            return Some(mv);
+        }
+    }
+
+    available_moves.first().copied()
+}
+
+/// Resolve root positions that do not require tree expansion.
+///
+/// Used by SMP before worker creation. The regular search path performs the
+/// equivalent checks after filtering `MultiPV` exclusions.
+pub(super) fn immediate_root_result(board: &mut Board) -> RootSearchResolution {
+    let moves = board.generate_moves();
+    if moves.is_empty() {
+        return RootSearchResolution::Resolved(None);
+    }
+    if moves.len() == 1 || board.is_theoretical_draw() {
+        return RootSearchResolution::Resolved(moves.first());
+    }
+
+    exact_two_knights_root_move(board, moves.as_slice())
+        .map_or(RootSearchResolution::RequiresSearch, |best_move| {
+            RootSearchResolution::Resolved(Some(best_move))
+        })
+}
+
+#[inline]
+pub(super) fn effective_futility_margin(time_limit_ms: u64, configured_margin: i32) -> i32 {
+    if time_limit_ms > 0 && time_limit_ms <= SHORT_TIME_FUTILITY_LIMIT_MS {
+        configured_margin.min(SHORT_TIME_FUTILITY_MARGIN)
+    } else {
+        configured_margin
+    }
+}
 
 /// Search context for a single search
 pub struct SimpleSearchContext<'a> {
@@ -48,6 +175,7 @@ pub struct SimpleSearchContext<'a> {
     pub time_limit_ms: u64,
     pub node_limit: u64,
     pub nodes: u64,
+    pub futility_margin: i32,
     pub initial_depth: u32,
     /// Static eval at each ply for improving detection
     pub static_eval: [i32; MAX_PLY],
@@ -61,6 +189,8 @@ pub struct SimpleSearchContext<'a> {
     pub root_moves: Vec<Move>,
     /// NNUE accumulator stack indexed by ply (heap-allocated)
     pub acc_stack: Box<[NnueAccumulator]>,
+    /// Optional static-eval NNUE accumulator stack indexed by ply.
+    pub static_acc_stack: Box<[NnueAccumulator]>,
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +226,85 @@ struct StagedMoveResult {
 }
 
 impl SimpleSearchContext<'_> {
+    fn update_accumulator_stack_for_move(
+        board: &Board,
+        stack: &mut [NnueAccumulator],
+        network: &NnueNetwork,
+        ply: usize,
+        m: Move,
+        moving_piece: Piece,
+        moving_color: Color,
+    ) {
+        if ply + 1 >= stack.len() {
+            return;
+        }
+
+        stack[ply + 1] = stack[ply].clone();
+        let acc = &mut stack[ply + 1];
+
+        let feat = |piece: Piece, color: Color, sq: usize| -> (usize, usize) {
+            (
+                feature_index(piece.index(), color.index(), sq, 0),
+                feature_index(piece.index(), color.index(), sq, 1),
+            )
+        };
+
+        if m.is_castling() {
+            let (wf, bf) = feat(Piece::King, moving_color, m.from().index());
+            acc.sub_feature(wf, bf, network);
+            let (wf, bf) = feat(Piece::King, moving_color, m.to().index());
+            acc.add_feature(wf, bf, network);
+
+            let (rook_from_file, rook_to_file) = if m.to().file() == 6 { (7, 5) } else { (0, 3) };
+            let rank = m.from().rank();
+            let rook_from = Square::new(rank, rook_from_file).index();
+            let rook_to = Square::new(rank, rook_to_file).index();
+            let (wf, bf) = feat(Piece::Rook, moving_color, rook_from);
+            acc.sub_feature(wf, bf, network);
+            let (wf, bf) = feat(Piece::Rook, moving_color, rook_to);
+            acc.add_feature(wf, bf, network);
+        } else {
+            if m.is_en_passant() {
+                let cap_rank = if moving_color == Color::White {
+                    m.to().rank() - 1
+                } else {
+                    m.to().rank() + 1
+                };
+                let cap_sq = Square::new(cap_rank, m.to().file()).index();
+                let (wf, bf) = feat(Piece::Pawn, moving_color.opponent(), cap_sq);
+                acc.sub_feature(wf, bf, network);
+            } else if m.is_capture() {
+                if let Some((cap_color, cap_piece)) = board.piece_at(m.to()) {
+                    let (wf, bf) = feat(cap_piece, cap_color, m.to().index());
+                    acc.sub_feature(wf, bf, network);
+                }
+            }
+
+            let (wf, bf) = feat(moving_piece, moving_color, m.from().index());
+            acc.sub_feature(wf, bf, network);
+
+            let placed_piece = m.promotion().unwrap_or(moving_piece);
+            let (wf, bf) = feat(placed_piece, moving_color, m.to().index());
+            acc.add_feature(wf, bf, network);
+        }
+    }
+
+    #[inline]
+    fn evaluate_static_nnue(&self, ply: usize) -> Option<i32> {
+        let static_nnue = self.state.tables.static_nnue.as_ref()?;
+        if ply >= self.static_acc_stack.len() {
+            return None;
+        }
+        let score = if static_nnue.supports_tactical_features() {
+            let mut acc = self.static_acc_stack[ply].clone();
+            self.board.add_nnue_dynamic_features(&mut acc, static_nnue);
+            static_nnue.evaluate(&acc, self.board.white_to_move)
+        } else {
+            static_nnue.evaluate(&self.static_acc_stack[ply], self.board.white_to_move)
+        };
+        Some(scaled_eval(score, self.state.nnue_static_eval_scale))
+    }
+
     /// Compute extensions for a move
     fn compute_extensions(ctx: &MoveContext, node: &NodeContext) -> u32 {
         let mut extension = 0u32;
@@ -143,7 +352,7 @@ impl SimpleSearchContext<'_> {
             } else {
                 0
             };
-            let futility_margin = self.state.params.futility_margin * depth as i32;
+            let futility_margin = self.futility_margin * depth as i32;
             if static_eval + futility_margin <= alpha {
                 return true;
             }
@@ -383,7 +592,7 @@ impl SimpleSearchContext<'_> {
             }
 
             // LMR reduction
-            let reduction = Self::compute_lmr_reduction(
+            let reduction = self.compute_lmr_reduction(
                 i - 1,
                 move_count,
                 depth,
@@ -457,6 +666,14 @@ impl SimpleSearchContext<'_> {
             }
         }
 
+        // A stop can arrive after move generation but before the first move
+        // is searched.  Do not let that look like an empty legal-move list:
+        // returning a terminal score here would turn an interrupted search
+        // into a fictitious mate or stalemate in the parent.
+        if self.should_stop() {
+            return 0;
+        }
+
         // Check for checkmate/stalemate
         if moves_tried == 0 {
             return if in_check {
@@ -466,7 +683,7 @@ impl SimpleSearchContext<'_> {
             };
         }
 
-        self.store_tt(depth, best_score, raised_alpha, best_move);
+        self.store_tt(depth, best_score, raised_alpha, best_move, ply);
 
         // Update correction history for exact bounds (when we have reliable score vs static eval)
         if raised_alpha && ply < MAX_PLY && !in_check && best_score.abs() < SCORE_NEAR_MATE {
@@ -474,7 +691,7 @@ impl SimpleSearchContext<'_> {
             let raw_eval = self.static_eval[ply];
             // Remove the previously applied correction to get raw eval
             let old_correction = self.state.tables.correction_history.get(pawn_hash);
-            let static_eval_raw = raw_eval - old_correction;
+            let static_eval_raw = raw_eval.saturating_sub(old_correction);
             self.state.tables.correction_history.update(
                 pawn_hash,
                 static_eval_raw,
@@ -492,6 +709,13 @@ impl SimpleSearchContext<'_> {
         if self.stop.load(Ordering::Relaxed) {
             return true;
         }
+        if self
+            .state
+            .hard_stop_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return true;
+        }
         if self.node_limit > 0 && self.nodes >= self.node_limit {
             return true;
         }
@@ -505,16 +729,41 @@ impl SimpleSearchContext<'_> {
         false
     }
 
+    /// Account for a searched node without crossing a caller's hard node cap.
+    #[inline]
+    fn try_visit_node(&mut self) -> bool {
+        if self.should_stop() {
+            return false;
+        }
+        self.nodes = self.nodes.saturating_add(1);
+        true
+    }
+
     /// Evaluate position from side-to-move's perspective.
     /// Uses NNUE with incremental accumulator if available, otherwise HCE.
     #[inline]
     fn evaluate(&self, ply: usize) -> i32 {
-        let hce_eval = || self.board.evaluate_simple();
+        let hce_eval = || {
+            if self.state.hce_options.use_full {
+                if self.state.hce_options.use_tuned {
+                    self.board
+                        .evaluate_tuned_hce_cached(&self.state.tables.pawn_hash)
+                } else {
+                    self.board.evaluate_cached(&self.state.tables.pawn_hash)
+                }
+            } else {
+                self.board.evaluate_simple()
+            }
+        };
         if let Some(ref nnue) = self.state.tables.nnue {
-            let nnue_eval = scaled_eval(
-                nnue.evaluate(&self.acc_stack[ply], self.board.white_to_move),
-                self.state.nnue_eval_scale,
-            );
+            let nnue_score = if nnue.supports_tactical_features() {
+                let mut acc = self.acc_stack[ply].clone();
+                self.board.add_nnue_dynamic_features(&mut acc, nnue);
+                nnue.evaluate(&acc, self.board.white_to_move)
+            } else {
+                nnue.evaluate(&self.acc_stack[ply], self.board.white_to_move)
+            };
+            let nnue_eval = scaled_eval(nnue_score, self.state.nnue_eval_scale);
             if self.state.nnue_hce_blend >= 100 {
                 nnue_eval
             } else {
@@ -530,8 +779,43 @@ impl SimpleSearchContext<'_> {
     /// switches this to NNUE for no-HCE experiments.
     #[inline]
     fn evaluate_simple(&self, ply: usize) -> i32 {
-        if self.state.nnue_pure_static_eval {
+        if self.state.trace
+            && ply <= STATIC_TRACE_MAX_PLY
+            && self.nodes.trailing_zeros() >= STATIC_TRACE_NODE_INTERVAL_LOG2
+        {
+            println!("info string staticevalfen {}", self.board.to_fen());
+        }
+
+        let hce_eval = || {
+            if self.state.static_eval_options.use_full_hce {
+                if self.state.hce_options.use_tuned {
+                    self.board
+                        .evaluate_tuned_hce_cached(&self.state.tables.pawn_hash)
+                } else {
+                    self.board.evaluate_cached(&self.state.tables.pawn_hash)
+                }
+            } else {
+                self.board.evaluate_simple()
+            }
+        };
+
+        if self.state.nnue_static_blend <= 0 && self.state.tables.static_nnue.is_some() {
+            hce_eval()
+        } else if let Some(nnue_eval) = self.evaluate_static_nnue(ply) {
+            if self.state.nnue_static_blend >= 100 {
+                nnue_eval
+            } else {
+                blended_eval(nnue_eval, hce_eval(), self.state.nnue_static_blend)
+            }
+        } else if self.state.static_eval_options.nnue_pure {
             self.evaluate(ply)
+        } else if self.state.static_eval_options.use_full_hce {
+            if self.state.hce_options.use_tuned {
+                self.board
+                    .evaluate_tuned_hce_cached(&self.state.tables.pawn_hash)
+            } else {
+                self.board.evaluate_cached(&self.state.tables.pawn_hash)
+            }
         } else {
             self.board.evaluate_simple()
         }
@@ -544,6 +828,11 @@ impl SimpleSearchContext<'_> {
             self.acc_stack[ply] = NnueAccumulator::new(&nnue.feature_bias);
             self.acc_stack[ply].refresh(&wf, &bf, nnue);
         }
+        if let Some(ref static_nnue) = self.state.tables.static_nnue {
+            let (wf, bf) = self.board.compute_nnue_features();
+            self.static_acc_stack[ply] = NnueAccumulator::new(&static_nnue.feature_bias);
+            self.static_acc_stack[ply].refresh(&wf, &bf, static_nnue);
+        }
     }
 
     /// Update accumulator incrementally for a move.
@@ -555,86 +844,75 @@ impl SimpleSearchContext<'_> {
         moving_piece: Piece,
         moving_color: Color,
     ) {
-        let Some(ref nnue) = self.state.tables.nnue else {
-            return;
-        };
-        if ply + 1 >= self.acc_stack.len() {
-            return;
+        if let Some(ref nnue) = self.state.tables.nnue {
+            Self::update_accumulator_stack_for_move(
+                self.board,
+                &mut self.acc_stack,
+                nnue,
+                ply,
+                m,
+                moving_piece,
+                moving_color,
+            );
         }
-
-        // Clone parent accumulator to ply+1
-        self.acc_stack[ply + 1] = self.acc_stack[ply].clone();
-        let acc = &mut self.acc_stack[ply + 1];
-
-        // Helper: compute feature indices for both perspectives
-        let feat = |piece: Piece, color: Color, sq: usize| -> (usize, usize) {
-            (
-                feature_index(piece.index(), color.index(), sq, 0),
-                feature_index(piece.index(), color.index(), sq, 1),
-            )
-        };
-
-        if m.is_castling() {
-            // King: from -> to
-            let (wf, bf) = feat(Piece::King, moving_color, m.from().index());
-            acc.sub_feature(wf, bf, nnue);
-            let (wf, bf) = feat(Piece::King, moving_color, m.to().index());
-            acc.add_feature(wf, bf, nnue);
-
-            // Rook: determine from/to based on king destination file
-            let (rook_from_file, rook_to_file) = if m.to().file() == 6 {
-                (7, 5) // Kingside
-            } else {
-                (0, 3) // Queenside
-            };
-            let rank = m.from().rank();
-            let rook_from = Square::new(rank, rook_from_file).index();
-            let rook_to = Square::new(rank, rook_to_file).index();
-            let (wf, bf) = feat(Piece::Rook, moving_color, rook_from);
-            acc.sub_feature(wf, bf, nnue);
-            let (wf, bf) = feat(Piece::Rook, moving_color, rook_to);
-            acc.add_feature(wf, bf, nnue);
-        } else {
-            // Remove captured piece if any
-            if m.is_en_passant() {
-                // En passant: captured pawn is on a different square
-                let cap_rank = if moving_color == Color::White {
-                    m.to().rank() - 1
-                } else {
-                    m.to().rank() + 1
-                };
-                let cap_sq = Square::new(cap_rank, m.to().file()).index();
-                let (wf, bf) = feat(Piece::Pawn, moving_color.opponent(), cap_sq);
-                acc.sub_feature(wf, bf, nnue);
-            } else if m.is_capture() {
-                // Normal capture: captured piece is on m.to()
-                if let Some((cap_color, cap_piece)) = self.board.piece_at(m.to()) {
-                    let (wf, bf) = feat(cap_piece, cap_color, m.to().index());
-                    acc.sub_feature(wf, bf, nnue);
-                }
-            }
-
-            // Remove moving piece from source
-            let (wf, bf) = feat(moving_piece, moving_color, m.from().index());
-            acc.sub_feature(wf, bf, nnue);
-
-            // Add piece to destination (may be promoted piece)
-            let placed_piece = m.promotion().unwrap_or(moving_piece);
-            let (wf, bf) = feat(placed_piece, moving_color, m.to().index());
-            acc.add_feature(wf, bf, nnue);
+        if let Some(ref static_nnue) = self.state.tables.static_nnue {
+            Self::update_accumulator_stack_for_move(
+                self.board,
+                &mut self.static_acc_stack,
+                static_nnue,
+                ply,
+                m,
+                moving_piece,
+                moving_color,
+            );
         }
     }
 
     /// Copy accumulator forward for null moves (no pieces change).
     #[inline]
     fn copy_accumulator_for_null_move(&mut self, ply: usize) {
-        self.acc_stack[ply + 1] = self.acc_stack[ply].clone();
+        if ply + 1 < self.acc_stack.len() {
+            self.acc_stack[ply + 1] = self.acc_stack[ply].clone();
+        }
+        if ply + 1 < self.static_acc_stack.len() {
+            self.static_acc_stack[ply + 1] = self.static_acc_stack[ply].clone();
+        }
     }
 
     /// Check for repetition (returns true if position repeated)
     #[inline]
     fn is_repetition(&self) -> bool {
         self.board.repetition_counts.get(self.board.hash) > 1
+    }
+
+    /// Score the exact K+NN versus K material class without expanding a
+    /// non-forcing search tree. Mate-in-one positions must be searched first:
+    /// two knights cannot force mate, but legal mating positions do exist.
+    fn two_knights_vs_bare_king_score(&mut self, ply: usize) -> Option<i32> {
+        let knight_side = self.board.two_knights_vs_bare_king_side()?;
+        let moves = self.board.generate_moves();
+
+        if moves.is_empty() {
+            return Some(if self.board.is_in_check(self.board.side_to_move()) {
+                -MATE_SCORE + ply as i32
+            } else {
+                0
+            });
+        }
+
+        if self.board.side_to_move() == knight_side {
+            for m in &moves {
+                let info = self.board.make_move(*m);
+                let is_mate = self.board.is_checkmate();
+                self.board.unmake_move(*m, info);
+
+                if is_mate {
+                    return Some(MATE_SCORE - ply as i32 - 1);
+                }
+            }
+        }
+
+        Some(0)
     }
 
     /// Check if the position is improving (eval better than 2 plies ago)
@@ -688,7 +966,7 @@ impl SimpleSearchContext<'_> {
                 KILLER3_SCORE
             } else if *m == counter {
                 COUNTER_SCORE
-            } else if m.is_capture() {
+            } else if m.is_tactical() {
                 self.state.tables.mvv_lva_score(self.board, m)
             } else {
                 // Combine history, continuation history, and countermove history for quiet moves
@@ -726,7 +1004,7 @@ impl SimpleSearchContext<'_> {
     /// Handle beta cutoff: update killers, history, counter moves, continuation history, and TT
     fn handle_beta_cutoff(&mut self, m: Move, ply: usize, depth: u32, score: i32, best_move: Move) {
         // Update killers for quiet moves
-        if !m.is_capture() && ply < MAX_PLY {
+        if m.is_quiet() && ply < MAX_PLY {
             self.state.tables.killer_moves.update(ply, m);
 
             // Update counter move: what move refuted the opponent's previous move?
@@ -783,7 +1061,7 @@ impl SimpleSearchContext<'_> {
             self.state.tables.tt.store(
                 self.board.hash,
                 depth,
-                score,
+                score_to_tt(score, ply),
                 BoundType::LowerBound,
                 Some(best_move),
                 self.state.generation,
@@ -792,7 +1070,14 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Store position in transposition table
-    fn store_tt(&mut self, depth: u32, score: i32, raised_alpha: bool, best_move: Move) {
+    fn store_tt(
+        &mut self,
+        depth: u32,
+        score: i32,
+        raised_alpha: bool,
+        best_move: Move,
+        ply: usize,
+    ) {
         if self.should_stop() || best_move == EMPTY_MOVE {
             return;
         }
@@ -804,7 +1089,7 @@ impl SimpleSearchContext<'_> {
         self.state.tables.tt.store(
             self.board.hash,
             depth,
-            score,
+            score_to_tt(score, ply),
             bound,
             Some(best_move),
             self.state.generation,
@@ -818,6 +1103,7 @@ impl SimpleSearchContext<'_> {
         depth: u32,
         alpha: i32,
         beta: i32,
+        ply: usize,
         is_pv: bool,
         excluded_move_active: bool,
     ) -> (Move, i32, BoundType, Option<i32>) {
@@ -826,12 +1112,12 @@ impl SimpleSearchContext<'_> {
         };
 
         let tt_move = entry.best_move().unwrap_or(EMPTY_MOVE);
-        let tt_score = entry.score();
+        let tt_score = score_from_tt(entry.score(), ply);
         let tt_bound = entry.bound_type();
 
         // Check for cutoff
         if !excluded_move_active && entry.depth() >= depth && !self.is_repetition() {
-            let score = entry.score();
+            let score = tt_score;
             let cutoff = match entry.bound_type() {
                 BoundType::Exact => {
                     if !is_pv || (score > alpha && score < beta) {
@@ -865,6 +1151,7 @@ impl SimpleSearchContext<'_> {
     ///
     /// Uses `NodeContext` and `MoveContext` to reduce parameter count.
     fn compute_lmr_reduction(
+        &self,
         move_idx: usize,
         move_count: usize,
         depth: u32,
@@ -872,9 +1159,9 @@ impl SimpleSearchContext<'_> {
         move_ctx: &MoveContext,
         tt_tactical: bool,
     ) -> u32 {
-        let lmr_ok = move_idx > LMR_IDX_BASE + move_count / 4
+        let lmr_ok = move_idx > self.state.params.lmr_min_move + move_count / 4
             && move_ctx.move_score < LMR_SCORE_THRESHOLD
-            && depth > 1
+            && depth >= self.state.params.lmr_min_depth
             && !node.in_check
             && !move_ctx.gives_check
             && move_ctx.is_quiet
@@ -933,9 +1220,29 @@ impl SimpleSearchContext<'_> {
             singular_extension: 0,
         };
 
-        // Repetition check
-        if !is_root && self.is_repetition() {
+        // A repeated position on the current line can be claimed as a draw.
+        // The board-level rules also cover the fifty-move rule and positions
+        // with insufficient mating material. Do this before probing the TT: a
+        // transposition entry does not encode the halfmove clock or history.
+        if !is_root && (self.is_repetition() || self.board.is_theoretical_draw()) {
             return 0;
+        }
+
+        // K+NN versus K is theoretically drawn except for an existing mate
+        // or a mate in one after a defender blunder. Resolve that exceptional
+        // case exactly, then avoid spending depth on a non-forcing ending.
+        if !is_root {
+            if let Some(score) = self.two_knights_vs_bare_king_score(ply) {
+                return score;
+            }
+        }
+
+        // Extensions can make the game-tree ply exceed the nominal search
+        // depth.  Keep recursion inside the fixed heuristic stacks rather
+        // than risking an out-of-bounds continuation/NNUE access in an
+        // unusually long checking sequence.
+        if ply >= MAX_PLY {
+            return self.evaluate_simple(ply);
         }
 
         // Quiescence at leaf
@@ -943,14 +1250,11 @@ impl SimpleSearchContext<'_> {
             return self.quiesce(alpha, beta, ply, 0);
         }
 
-        self.nodes += 1;
+        if !self.try_visit_node() {
+            return 0;
+        }
         if (ply as u32 + 1) > self.state.stats.seldepth {
             self.state.stats.seldepth = ply as u32 + 1;
-        }
-
-        // Check stopping conditions periodically
-        if self.should_stop() {
-            return 0;
         }
 
         // Check for missing king (illegal position)
@@ -968,7 +1272,7 @@ impl SimpleSearchContext<'_> {
 
         // Probe TT for best move and potential cutoff
         let (tt_move, tt_score, tt_bound, tt_cutoff) =
-            self.probe_tt_for_cutoff(depth, alpha, beta, is_pv, excluded_move_active);
+            self.probe_tt_for_cutoff(depth, alpha, beta, ply, is_pv, excluded_move_active);
         node.tt_move = tt_move;
         node.tt_score = tt_score;
         node.tt_bound = tt_bound;
@@ -1103,7 +1407,10 @@ impl SimpleSearchContext<'_> {
 
         // Internal Iterative Reduction (IIR)
         // If we have no TT move at high depth, reduce depth to find a move faster
-        let search_depth = if tt_move == EMPTY_MOVE && depth >= 4 && !excluded_move_active {
+        let search_depth = if tt_move == EMPTY_MOVE
+            && depth >= self.state.params.iir_min_depth
+            && !excluded_move_active
+        {
             depth - 1
         } else {
             depth
@@ -1194,5 +1501,197 @@ impl SimpleSearchContext<'_> {
             score,
             raised_alpha: score > alpha,
         })
+    }
+}
+
+#[cfg(test)]
+mod evaluation_tests {
+    use std::sync::atomic::AtomicBool;
+    use std::time::Instant;
+
+    use crate::board::nnue::NnueAccumulator;
+    use crate::board::{Board, SearchState, EMPTY_MOVE, MAX_PLY};
+
+    use super::{NodeContext, SimpleSearchContext, MATE_SCORE, SCORE_INFINITE};
+    use crate::tt::BoundType;
+
+    #[test]
+    fn static_full_hce_uses_tuned_evaluation_when_enabled() {
+        let mut board =
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let mut state = SearchState::new(1);
+        state.static_eval_options.use_full_hce = true;
+        state.hce_options.use_tuned = true;
+        let expected = board.evaluate_tuned_hce_cached(&state.tables.pawn_hash);
+        let untuned = board.evaluate_cached(&state.tables.pawn_hash);
+        assert_ne!(
+            expected, untuned,
+            "test position must distinguish HCE modes"
+        );
+        let stop = AtomicBool::new(false);
+        let futility_margin = state.params.futility_margin;
+        let ctx = SimpleSearchContext {
+            board: &mut board,
+            state: &mut state,
+            stop: &stop,
+            start_time: Instant::now(),
+            time_limit_ms: 0,
+            node_limit: 0,
+            nodes: 0,
+            futility_margin,
+            initial_depth: 1,
+            static_eval: [0; MAX_PLY],
+            previous_move: [EMPTY_MOVE; MAX_PLY],
+            previous_piece: [None; MAX_PLY],
+            info_callback: None,
+            root_moves: Vec::new(),
+            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+        };
+
+        assert_eq!(ctx.evaluate_simple(0), expected);
+    }
+
+    #[test]
+    fn interrupted_move_loop_returns_neutral_score_not_terminal_score() {
+        let mut board = Board::new();
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(true);
+        let futility_margin = state.params.futility_margin;
+        let mut ctx = SimpleSearchContext {
+            board: &mut board,
+            state: &mut state,
+            stop: &stop,
+            start_time: Instant::now(),
+            time_limit_ms: 0,
+            node_limit: 0,
+            nodes: 0,
+            futility_margin,
+            initial_depth: 1,
+            static_eval: [0; MAX_PLY],
+            previous_move: [EMPTY_MOVE; MAX_PLY],
+            previous_piece: [None; MAX_PLY],
+            info_callback: None,
+            root_moves: Vec::new(),
+            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+        };
+        let moves = ctx.board.generate_moves();
+        let node = NodeContext {
+            ply: 0,
+            is_pv: false,
+            in_check: false,
+            improving: false,
+            excluded_move: EMPTY_MOVE,
+            tt_move: EMPTY_MOVE,
+            tt_score: 0,
+            tt_bound: BoundType::Exact,
+            singular_extension: 0,
+        };
+
+        assert_eq!(
+            ctx.search_moves(&node, 1, -SCORE_INFINITE, SCORE_INFINITE, &moves, None),
+            0
+        );
+    }
+
+    #[test]
+    fn transposition_table_mate_scores_preserve_distance_across_plies() {
+        let winning_score = MATE_SCORE - 10;
+        let losing_score = -MATE_SCORE + 10;
+
+        assert_eq!(super::score_to_tt(winning_score, 10), MATE_SCORE);
+        assert_eq!(super::score_from_tt(MATE_SCORE, 4), MATE_SCORE - 4);
+        assert_eq!(super::score_to_tt(losing_score, 10), -MATE_SCORE);
+        assert_eq!(super::score_from_tt(-MATE_SCORE, 4), -MATE_SCORE + 4);
+
+        for score in [winning_score, losing_score, 437, -437] {
+            assert_eq!(
+                super::score_from_tt(super::score_to_tt(score, 10), 10),
+                score,
+                "score {score} must round-trip at its storage ply"
+            );
+        }
+    }
+
+    #[test]
+    fn transposition_table_probe_decodes_mate_score_at_current_ply() {
+        let mut board = Board::new();
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let futility_margin = state.params.futility_margin;
+        let score_at_storage_ply = MATE_SCORE - 8;
+        state.tables.tt.store(
+            board.hash(),
+            4,
+            super::score_to_tt(score_at_storage_ply, 8),
+            BoundType::Exact,
+            None,
+            state.generation,
+        );
+        let ctx = SimpleSearchContext {
+            board: &mut board,
+            state: &mut state,
+            stop: &stop,
+            start_time: Instant::now(),
+            time_limit_ms: 0,
+            node_limit: 0,
+            nodes: 0,
+            futility_margin,
+            initial_depth: 1,
+            static_eval: [0; MAX_PLY],
+            previous_move: [EMPTY_MOVE; MAX_PLY],
+            previous_piece: [None; MAX_PLY],
+            info_callback: None,
+            root_moves: Vec::new(),
+            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+        };
+
+        let (_, score, _, cutoff) =
+            ctx.probe_tt_for_cutoff(4, -SCORE_INFINITE, SCORE_INFINITE, 3, false, false);
+
+        assert_eq!(score, MATE_SCORE - 3);
+        assert_eq!(cutoff, Some(MATE_SCORE - 3));
+    }
+
+    #[test]
+    fn search_ply_limit_returns_static_score_without_descending() {
+        let mut board = Board::new();
+        let expected = board.evaluate_simple();
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let futility_margin = state.params.futility_margin;
+        let mut ctx = SimpleSearchContext {
+            board: &mut board,
+            state: &mut state,
+            stop: &stop,
+            start_time: Instant::now(),
+            time_limit_ms: 0,
+            node_limit: 0,
+            nodes: 0,
+            futility_margin,
+            initial_depth: 1,
+            static_eval: [0; MAX_PLY],
+            previous_move: [EMPTY_MOVE; MAX_PLY],
+            previous_piece: [None; MAX_PLY],
+            info_callback: None,
+            root_moves: Vec::new(),
+            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+        };
+
+        assert_eq!(
+            ctx.alphabeta(
+                4,
+                -SCORE_INFINITE,
+                SCORE_INFINITE,
+                true,
+                MAX_PLY,
+                EMPTY_MOVE
+            ),
+            expected
+        );
+        assert_eq!(ctx.nodes, 0, "ply-limit guard must not expand a node");
     }
 }

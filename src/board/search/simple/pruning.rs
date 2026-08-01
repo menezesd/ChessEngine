@@ -1,6 +1,11 @@
 use super::super::constants::SCORE_NEAR_MATE;
 use super::{NodeContext, SimpleSearchContext};
 
+#[inline]
+fn null_move_reduction(configured_reduction: u32, depth: u32) -> u32 {
+    configured_reduction.saturating_add((depth + 1) / 3)
+}
+
 impl SimpleSearchContext<'_> {
     /// Try null move pruning with verification
     pub(super) fn try_null_move_pruning(
@@ -16,7 +21,7 @@ impl SimpleSearchContext<'_> {
         // Allow null move when eval is slightly below beta (more aggressive)
         if node.in_check
             || dominated_phase == 0
-            || depth <= 2
+            || depth < self.state.params.null_min_depth
             || depth >= self.initial_depth
             || node.ply == 0
             || eval < beta - 20
@@ -24,7 +29,7 @@ impl SimpleSearchContext<'_> {
             return None;
         }
 
-        let r = super::super::constants::NULL_MOVE_BASE_REDUCTION + (depth + 1) / 3;
+        let r = null_move_reduction(self.state.params.null_reduction, depth);
         let reduced_depth = depth.saturating_sub(r);
 
         self.copy_accumulator_for_null_move(node.ply);
@@ -67,8 +72,10 @@ impl SimpleSearchContext<'_> {
         let captures = self.board.generate_tactical_moves();
 
         for m in &captures {
-            // Only consider good captures (positive SEE)
-            if self.board.see(m.from(), m.to()) < 0 {
+            // SEE models only the exchange on the target square. A
+            // promotion's material gain is not represented there, so never
+            // reject a promotion on a capture-only SEE score.
+            if !m.is_promotion() && self.board.see(m.from(), m.to()) < 0 {
                 continue;
             }
 
@@ -156,5 +163,16 @@ impl SimpleSearchContext<'_> {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::null_move_reduction;
+
+    #[test]
+    fn null_move_reduction_uses_configured_base() {
+        assert_eq!(null_move_reduction(1, 3), 2);
+        assert_eq!(null_move_reduction(4, 9), 7);
     }
 }

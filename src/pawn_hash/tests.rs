@@ -50,6 +50,17 @@ fn test_store_and_probe() {
 }
 
 #[test]
+fn test_store_and_probe_zero_hash_and_score() {
+    let table = PawnHashTable::new(64);
+
+    table.store(0, 0, 0);
+
+    let entry = table.probe(0).expect("zero-valued entry should be cached");
+    assert_eq!(entry.mg, 0);
+    assert_eq!(entry.eg, 0);
+}
+
+#[test]
 fn test_no_false_positives() {
     let table = PawnHashTable::new(64);
     let hash1 = 0x123456789ABCDEF0;

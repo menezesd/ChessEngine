@@ -3,6 +3,7 @@
 //! Tests for alpha-beta, quiescence, pruning, and extensions.
 
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::board::search::{find_best_move, search, SearchConfig, SearchState, MATE_SCORE};
@@ -24,6 +25,119 @@ fn alphabeta_finds_mate_in_one() {
 
     let mv = best.unwrap();
     assert_eq!(mv.to_string(), "e1e8", "Should find Qe8#");
+}
+
+#[test]
+fn alphabeta_keeps_mate_on_fifty_move_boundary() {
+    let mut board = Board::from_fen("6k1/5ppp/8/8/8/8/8/4Q2K w - - 99 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 2, &stop);
+
+    assert_eq!(best.map(|mv| mv.to_string()), Some("e1e8".to_string()));
+}
+
+#[test]
+fn two_knights_endgame_keeps_mate_in_one() {
+    let mut board = Board::from_fen("8/8/8/8/8/2N5/8/k1K1N3 w - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 12, &stop);
+    assert_eq!(best.map(|mv| mv.to_string()), Some("e1c2".to_string()));
+}
+
+#[test]
+fn two_knights_endgame_prunes_non_forcing_lines() {
+    let mut board = Board::from_fen("7k/8/8/8/8/8/4N1N1/K7 w - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 12, &stop);
+    assert!(
+        best.is_some(),
+        "the drawn endgame should still provide a legal move"
+    );
+    assert_eq!(
+        state.stats.nodes, 0,
+        "K+NN versus K should resolve at the root without expanding a search tree"
+    );
+}
+
+#[test]
+fn two_knights_endgame_prunes_when_bare_king_is_to_move() {
+    let mut board = Board::from_fen("7k/8/8/8/8/8/4N1N1/K7 b - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 12, &stop);
+    assert!(
+        best.is_some(),
+        "the bare king should retain a legal drawing move"
+    );
+    assert!(board.is_legal_move(best.unwrap()));
+    assert_eq!(state.stats.nodes, 0);
+}
+
+#[test]
+fn two_knights_endgame_bare_king_avoids_mate_in_one_blunder() {
+    // ...Ka3? permits Nc2#. The other legal king moves maintain the draw.
+    let mut board = Board::from_fen("8/8/8/NK6/8/8/1k6/2N5 b - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 12, &stop)
+        .expect("the bare king must have a drawing move");
+    assert_ne!(best.to_string(), "b2a3", "the resolver must avoid ...Ka3?");
+    assert_eq!(state.stats.nodes, 0);
+
+    let info = board.make_move(best);
+    let has_mate_in_one = board.generate_moves().iter().any(|&reply| {
+        let reply_info = board.make_move(reply);
+        let is_mate = board.is_checkmate();
+        board.unmake_move(reply, reply_info);
+        is_mate
+    });
+    board.unmake_move(best, info);
+
+    assert!(
+        !has_mate_in_one,
+        "the selected king move must preserve the draw"
+    );
+}
+
+#[test]
+fn zero_tree_root_result_clears_prior_search_statistics() {
+    let mut board = Board::from_fen("7k/8/8/8/8/8/4N1N1/K7 w - - 0 1");
+    let mut state = SearchState::new(1);
+    state.stats.nodes = 123;
+    state.stats.seldepth = 9;
+    state.stats.tt_hits = 17;
+    state.stats.total_nodes = 456;
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 12, &stop);
+
+    assert!(best.is_some());
+    assert_eq!(state.stats.nodes, 0);
+    assert_eq!(state.stats.seldepth, 0);
+    assert_eq!(state.stats.tt_hits, 0);
+    assert_eq!(state.stats.total_nodes, 456);
+}
+
+#[test]
+fn proven_draw_root_returns_a_legal_move_without_searching() {
+    let mut board = Board::from_fen("7k/8/8/8/8/8/8/K1B5 w - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 12, &stop);
+
+    assert!(board.is_theoretical_draw());
+    assert!(best.is_some());
+    assert!(board.is_legal_move(best.unwrap()));
+    assert_eq!(state.stats.nodes, 0);
 }
 
 #[test]
@@ -93,9 +207,32 @@ fn search_respects_stop_flag() {
     let stop = AtomicBool::new(true); // Already stopped
 
     let best = find_best_move(&mut board, &mut state, 10, &stop);
-    // Should return quickly due to stop flag
-    // May or may not have a move depending on timing
-    let _ = best;
+
+    assert!(
+        best.is_some(),
+        "stopped search should retain a legal fallback"
+    );
+    assert!(board.is_legal_move(best.unwrap()));
+}
+
+#[test]
+fn search_respects_state_hard_deadline() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    state.set_hard_stop_at(Some(Instant::now()));
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 10, &stop);
+
+    assert!(
+        best.is_some(),
+        "hard-stopped search should retain a legal fallback"
+    );
+    assert!(board.is_legal_move(best.unwrap()));
+    assert_eq!(
+        state.stats.nodes, 0,
+        "expired deadline must stop before search"
+    );
 }
 
 #[test]
@@ -112,6 +249,79 @@ fn search_with_node_limit() {
         result.best_move.is_some(),
         "Should find a move with node limit"
     );
+    assert!(
+        state.stats.nodes <= 1_000,
+        "single-PV search exceeded its 1000-node budget: {}",
+        state.stats.nodes
+    );
+}
+
+#[test]
+fn search_with_single_node_limit_never_overshoots() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let result = search(
+        &mut board,
+        &mut state,
+        SearchConfig::depth(20).with_nodes(1),
+        &stop,
+    );
+
+    assert!(
+        result.best_move.is_some_and(|mv| board.is_legal_move(mv)),
+        "an immediately limited search should retain a legal root fallback"
+    );
+    assert!(
+        state.stats.nodes <= 1,
+        "single-PV search exceeded its one-node budget: {}",
+        state.stats.nodes
+    );
+}
+
+#[test]
+fn multipv_search_shares_one_node_budget() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let config = SearchConfig::depth(20).with_nodes(1_000).with_multi_pv(3);
+    let _ = search(&mut board, &mut state, config, &stop);
+
+    assert!(
+        state.stats.total_nodes <= 1_000,
+        "MultiPV searched {} nodes with a 1000-node budget",
+        state.stats.total_nodes
+    );
+}
+
+#[test]
+fn multipv_info_callback_reports_each_requested_line() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let callback_lines = Arc::clone(&reported);
+    let callback = Arc::new(move |info: &crate::board::SearchIterationInfo| {
+        callback_lines
+            .lock()
+            .expect("callback mutex poisoned")
+            .push(info.multipv);
+    });
+
+    let _ = search(
+        &mut board,
+        &mut state,
+        SearchConfig::depth(1)
+            .with_multi_pv(2)
+            .with_info_callback(callback),
+        &stop,
+    );
+
+    let reported = reported.lock().expect("callback mutex poisoned");
+    assert!(reported.contains(&1), "first PV line was not reported");
+    assert!(reported.contains(&2), "second PV line was not reported");
 }
 
 #[test]
@@ -450,6 +660,11 @@ fn killer_update_out_of_bounds_safe() {
 #[test]
 fn search_state_new_search_resets() {
     let mut state = SearchState::new(1);
+
+    assert!(state.hce_options.use_full);
+    assert!(state.hce_options.use_tuned);
+    assert!(!state.static_eval_options.nnue_pure);
+    assert!(!state.static_eval_options.use_full_hce);
 
     // Populate some state
     state.stats.nodes = 1000;
