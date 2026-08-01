@@ -31,6 +31,29 @@ impl SearchStats {
     }
 }
 
+/// Configuration for the full position evaluation used by the main search.
+#[derive(Clone, Copy)]
+pub struct HceOptions {
+    pub use_full: bool,
+    pub use_tuned: bool,
+}
+
+impl Default for HceOptions {
+    fn default() -> Self {
+        Self {
+            use_full: true,
+            use_tuned: true,
+        }
+    }
+}
+
+/// Configuration for the static evaluation used by pruning and quiescence.
+#[derive(Clone, Copy, Default)]
+pub struct StaticEvalOptions {
+    pub nnue_pure: bool,
+    pub use_full_hce: bool,
+}
+
 /// Search state persisted across searches
 pub struct SearchState {
     pub stats: SearchStats,
@@ -41,7 +64,8 @@ pub struct SearchState {
     pub params: SearchParams,
     pub nnue_eval_scale: i32,
     pub nnue_hce_blend: i32,
-    pub nnue_pure_static_eval: bool,
+    pub hce_options: HceOptions,
+    pub static_eval_options: StaticEvalOptions,
     pub nnue_static_eval_scale: i32,
     pub nnue_static_blend: i32,
     pub trace: bool,
@@ -59,7 +83,8 @@ impl SearchState {
             params: SearchParams::default(),
             nnue_eval_scale: 100,
             nnue_hce_blend: 100,
-            nnue_pure_static_eval: false,
+            hce_options: HceOptions::default(),
+            static_eval_options: StaticEvalOptions::default(),
             nnue_static_eval_scale: 100,
             nnue_static_blend: 100,
             trace: false,
@@ -85,7 +110,8 @@ impl SearchState {
             params: SearchParams::default(),
             nnue_eval_scale: 100,
             nnue_hce_blend: 100,
-            nnue_pure_static_eval: false,
+            hce_options: HceOptions::default(),
+            static_eval_options: StaticEvalOptions::default(),
             nnue_static_eval_scale: 100,
             nnue_static_blend: 100,
             trace: false,

@@ -133,8 +133,20 @@ impl SearchTables {
     /// with capture history as a secondary factor
     #[must_use]
     pub fn mvv_lva_score(&self, board: &Board, mv: &Move) -> i32 {
-        if !mv.is_capture() {
+        if !mv.is_tactical() {
             return 0;
+        }
+
+        // MVV-LVA only sees the target piece. Promotions also gain the
+        // difference between the pawn and its promoted piece, including for
+        // non-capturing promotions, so account for that separately.
+        let promotion_bonus = mv.promotion().map_or(0, |piece| {
+            (move_order::piece_value(piece) - move_order::piece_value(Piece::Pawn))
+                .saturating_mul(MVV_LVA_VICTIM_SCALE)
+        });
+
+        if !mv.is_capture() {
+            return constants::CAPTURE_BASE_SCORE.saturating_add(promotion_bonus);
         }
 
         let Some((_, attacker_piece)) = board.piece_at(mv.from()) else {
@@ -147,7 +159,7 @@ impl SearchTables {
             return capture_order_score(
                 0,
                 mvv_lva,
-                0,
+                promotion_bonus,
                 self.capture_history_bonus(attacker_piece, Piece::Pawn),
             );
         }
@@ -174,7 +186,7 @@ impl SearchTables {
         capture_order_score(
             constants::CAPTURE_BASE_SCORE,
             mvv_lva,
-            see_score,
+            see_score.saturating_add(promotion_bonus),
             self.capture_history_bonus(attacker_piece, victim_piece),
         )
     }
