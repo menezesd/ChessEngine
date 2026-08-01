@@ -11,10 +11,25 @@ fn test_pawn_storm() {
 
 #[test]
 fn test_chain_links() {
-    let board: Board = "8/8/8/4P3/3P4/8/8/8 w - - 0 1".parse().unwrap();
+    let board: Board = "7k/8/8/4P3/3P4/8/8/K7 w - - 0 1".parse().unwrap();
     let white_pawns = board.pieces_of(Color::White, Piece::Pawn);
     let links = Board::count_chain_links(white_pawns, Color::White);
     assert!(links >= 1, "e5 should be defended by d4");
+}
+
+#[test]
+fn test_chain_links_count_each_pawn_defended_by_one_pawn() {
+    // d4 defends both c5 and e5, which are two distinct chain links.
+    let white: Board = "7k/8/8/2P1P3/3P4/8/8/K7 w - - 0 1".parse().unwrap();
+    let white_links =
+        Board::count_chain_links(white.pieces_of(Color::White, Piece::Pawn), Color::White);
+    assert_eq!(white_links, 2);
+
+    // Black has the mirrored configuration: d5 defends c4 and e4.
+    let black: Board = "7k/8/8/3p4/2p1p3/8/8/K7 b - - 0 1".parse().unwrap();
+    let black_links =
+        Board::count_chain_links(black.pieces_of(Color::Black, Piece::Pawn), Color::Black);
+    assert_eq!(black_links, 2);
 }
 
 #[test]

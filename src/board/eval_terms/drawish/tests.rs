@@ -22,10 +22,24 @@ fn test_kb_vs_k_is_draw() {
 }
 
 #[test]
-fn test_knn_vs_k_is_drawish() {
-    // Two knights vs lone king - theoretically drawn but keep signal for blunder mates
+fn test_knn_vs_k_is_game_theoretic_draw() {
+    // Legal mate-in-one positions exist, but the ending cannot force mate.
     let board: Board = "8/8/8/4k3/8/8/4K3/3NN3 w - - 0 1".parse().unwrap();
-    assert_eq!(board.get_draw_multiplier(Color::White), DRAW_LIKELY);
+    assert_eq!(board.get_draw_multiplier(Color::White), DRAW_CERTAIN);
+}
+
+#[test]
+fn test_same_color_bishops_are_a_certain_draw() {
+    let board: Board = "7k/8/8/8/8/4B3/8/2B1K3 w - - 0 1".parse().unwrap();
+
+    assert_eq!(board.get_draw_multiplier(Color::White), DRAW_CERTAIN);
+}
+
+#[test]
+fn test_knight_vs_promotable_pawn_is_not_scaled_as_bare_king_draw() {
+    let board: Board = "7k/8/8/8/8/K7/p7/2N5 w - - 0 1".parse().unwrap();
+
+    assert_eq!(board.get_draw_multiplier(Color::White), NO_DRAW_SCALING);
 }
 
 #[test]

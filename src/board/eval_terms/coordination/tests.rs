@@ -15,6 +15,13 @@ fn test_doubled_rooks() {
 }
 
 #[test]
+fn test_blocked_doubled_rooks_do_not_get_file_bonus() {
+    let board: Board = "7k/8/8/8/4R3/4N3/8/4R2K w - - 0 1".parse().unwrap();
+
+    assert_eq!(board.eval_batteries(Color::White), 0);
+}
+
+#[test]
 fn test_queen_rook_battery() {
     let board: Board = "8/8/8/4Q3/8/8/4R3/8 w - - 0 1".parse().unwrap();
     let bonus = board.eval_batteries(Color::White);
@@ -37,7 +44,8 @@ fn test_no_battery_unaligned() {
 #[test]
 fn test_cluster_defended_pieces() {
     let board: Board = "8/8/8/3N4/2B5/8/8/8 w - - 0 1".parse().unwrap();
-    let (mg, eg) = board.eval_clusters(Color::White);
+    let ctx = board.compute_attack_context();
+    let (mg, eg) = board.eval_clusters(Color::White, &ctx);
     assert!(mg > 0 || eg > 0, "defended piece should give cluster bonus");
 }
 

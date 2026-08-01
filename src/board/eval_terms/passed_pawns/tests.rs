@@ -57,3 +57,15 @@ fn test_rook_behind_passer() {
     assert!(mg1 > mg2, "rook behind passer should add bonus");
     assert!(eg1 > eg2, "rook behind passer should add eg bonus");
 }
+
+#[test]
+fn test_blocked_rook_does_not_support_passer() {
+    let open: Board = "7k/8/8/4P3/8/2B5/8/4R2K w - - 0 1".parse().unwrap();
+    let blocked: Board = "7k/8/8/4P3/8/4B3/8/4R2K w - - 0 1".parse().unwrap();
+
+    let (open_mg, open_eg) = open.eval_passed_pawns();
+    let (blocked_mg, blocked_eg) = blocked.eval_passed_pawns();
+
+    assert!(open_mg > blocked_mg, "open={open_mg}, blocked={blocked_mg}");
+    assert!(open_eg > blocked_eg, "open={open_eg}, blocked={blocked_eg}");
+}

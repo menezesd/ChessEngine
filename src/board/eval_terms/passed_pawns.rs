@@ -2,6 +2,7 @@
 //!
 //! Evaluates passed pawns with bonuses based on advancement and control of stop square.
 
+use crate::board::attack_tables::slider_attacks;
 use crate::board::masks::{
     fill_backward, relative_rank, FILES, PASSED_PAWN_BONUS_EG, PASSED_PAWN_BONUS_MG,
     PASSED_PAWN_MASK,
@@ -86,17 +87,22 @@ impl Board {
                 let our_rooks = self.pieces_of(color, Piece::Rook);
                 let their_rooks = self.opponent_pieces(color, Piece::Rook);
 
-                // Check if we have a rook behind (supporting) the passed pawn
+                // A rook behind the pawn helps only when the file between
+                // them is clear. Merely sharing the file can be blocked by a
+                // friendly piece, in which case it provides no support.
                 let behind_mask =
                     Bitboard(fill_backward(Bitboard::from_square(sq), color).0 & file_mask.0);
+                let clear_behind = Bitboard(
+                    slider_attacks(sq.index(), self.all_occupied.0, false) & behind_mask.0,
+                );
 
-                if (our_rooks.0 & behind_mask.0) != 0 {
+                if (our_rooks.0 & clear_behind.0) != 0 {
                     mg += sign * ROOK_BEHIND_PASSER_MG;
                     eg += sign * ROOK_BEHIND_PASSER_EG;
                 }
 
                 // Penalty if enemy rook is behind our passed pawn (blocking)
-                if (their_rooks.0 & behind_mask.0) != 0 {
+                if (their_rooks.0 & clear_behind.0) != 0 {
                     mg -= sign * (ROOK_BEHIND_PASSER_MG / 2);
                     eg -= sign * (ROOK_BEHIND_PASSER_EG / 2);
                 }

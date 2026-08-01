@@ -32,6 +32,17 @@ fn test_developed_pieces() {
 }
 
 #[test]
+fn test_development_does_not_double_count_a_surviving_minor() {
+    // White's other knight and bishop have been captured. Each remaining
+    // developed minor should earn one bonus, not one bonus per vacant start.
+    let knight: Board = "4k3/8/8/8/8/2N5/8/4K3 w - - 0 1".parse().unwrap();
+    let bishop: Board = "4k3/8/8/8/2B5/8/8/4K3 w - - 0 1".parse().unwrap();
+
+    assert_eq!(knight.eval_development(Color::White), DEVELOPMENT_BONUS_MG);
+    assert_eq!(bishop.eval_development(Color::White), DEVELOPMENT_BONUS_MG);
+}
+
+#[test]
 fn test_tempo_threat() {
     let board: Board = "8/8/8/3n4/4B3/8/8/8 w - - 0 1".parse().unwrap();
     let ctx = board.compute_attack_context();

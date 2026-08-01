@@ -57,13 +57,16 @@ fn is_protected_outpost(
 
     let can_be_attacked = match color {
         Color::White => {
-            // Black pawns above this square can attack it (pawns attack diagonally forward)
-            let mask = Bitboard(adj_files.0 & (u64::MAX << (sq.rank() * 8)));
+            // Only black pawns strictly above the outpost can ever attack it.
+            // A pawn on the same rank moves away from the square and must not
+            // invalidate a protected outpost.
+            let mask = Bitboard(adj_files.0 & (u64::MAX << ((sq.rank() + 1) * 8)));
             enemy_pawns.intersects(mask)
         }
         Color::Black => {
-            // White pawns below this square can attack it
-            let mask = Bitboard(adj_files.0 & !(u64::MAX << ((sq.rank() + 1) * 8)));
+            // Symmetrically, only white pawns strictly below the outpost can
+            // ever attack it.
+            let mask = Bitboard(adj_files.0 & !(u64::MAX << (sq.rank() * 8)));
             enemy_pawns.intersects(mask)
         }
     };

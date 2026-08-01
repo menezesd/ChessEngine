@@ -163,23 +163,25 @@ impl Board {
 
     /// Count pawn chain links (pawns defended by other pawns diagonally)
     fn count_chain_links(pawns: Bitboard, color: Color) -> i32 {
-        // A chain link is a pawn defended by another pawn
-        let defenders = match color {
+        // A chain link is a distinct pawn defended by another pawn. Shift
+        // actual pawn attacks forward and intersect with the pawn set, rather
+        // than shifting the higher pawns back: the latter collapses two pawns
+        // defended by one pawn into a single link.
+        let defended = match color {
             Color::White => {
-                // Pawns that can defend (shifted down-left and down-right)
-                let left = (pawns.0 >> 7) & !Bitboard::FILE_A.0;
-                let right = (pawns.0 >> 9) & !Bitboard::FILE_H.0;
+                let left = (pawns.0 & !Bitboard::FILE_A.0) << 7;
+                let right = (pawns.0 & !Bitboard::FILE_H.0) << 9;
                 Bitboard(left | right)
             }
             Color::Black => {
-                let left = (pawns.0 << 9) & !Bitboard::FILE_A.0;
-                let right = (pawns.0 << 7) & !Bitboard::FILE_H.0;
+                let left = (pawns.0 & !Bitboard::FILE_A.0) >> 9;
+                let right = (pawns.0 & !Bitboard::FILE_H.0) >> 7;
                 Bitboard(left | right)
             }
         };
 
         // Count pawns that are defended by other pawns
-        (pawns.0 & defenders.0).count_ones() as i32
+        (pawns.0 & defended.0).count_ones() as i32
     }
 }
 

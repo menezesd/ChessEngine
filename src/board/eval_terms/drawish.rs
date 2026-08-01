@@ -19,6 +19,14 @@ impl Board {
     /// Returns 0-64, where 0 = certain draw, 64 = no draw scaling.
     #[must_use]
     pub fn get_draw_multiplier(&self, strong: Color) -> i32 {
+        // Keep static HCE aligned with the exact dead-position classifier
+        // used by search. In particular, promoted bishops can leave multiple
+        // bishops on one colour complex; that material can never mate even
+        // though it is worth more than a single bishop.
+        if self.is_insufficient_material() {
+            return DRAW_CERTAIN;
+        }
+
         let weak = strong.opponent();
 
         // Count pieces
@@ -41,14 +49,18 @@ impl Board {
 
         // Strong side has no pawns
         if sp == 0 {
-            // KK, KNK, KBK, KNNK - certain draws
-            if s_major == 0 && s_minor <= 1 {
+            // KK, KNK, KBK - certain draws only against a bare king. An
+            // opposing pawn or major piece can still create promotion or
+            // mating chances, so it must not be scaled to an automatic zero.
+            if s_major == 0 && s_minor <= 1 && w_minor == 0 && w_major == 0 && wp == 0 {
                 return DRAW_CERTAIN;
             }
-            // KNNK (two knights vs lone king) - theoretically drawn but keep small signal
-            // to help engine make progress toward positions where opponent might blunder
+            // KNNK (two knights versus a lone king) is game-theoretically
+            // drawn. Search handles the exceptional legal mate-in-one
+            // positions explicitly, so the static HCE score should not retain
+            // a blunder-seeking bonus here.
             if s_major == 0 && sn == 2 && sb == 0 && w_minor == 0 && w_major == 0 && wp == 0 {
-                return DRAW_LIKELY;
+                return DRAW_CERTAIN;
             }
         }
 

@@ -150,55 +150,42 @@ impl Board {
     fn eval_development(&self, color: Color) -> i32 {
         let mut score = 0;
 
-        // Starting squares for pieces
-        let (back_rank, knight_starts, bishop_starts, _rook_starts, _queen_start, king_start) =
-            match color {
-                Color::White => (
-                    0x0000_0000_0000_00FFu64,
-                    [1, 6], // b1, g1
-                    [2, 5], // c1, f1
-                    [0, 7], // a1, h1
-                    3,      // d1
-                    4,      // e1
-                ),
-                Color::Black => (
-                    0xFF00_0000_0000_0000u64,
-                    [57, 62], // b8, g8
-                    [58, 61], // c8, f8
-                    [56, 63], // a8, h8
-                    59,       // d8
-                    60,       // e8
-                ),
-            };
+        let (back_rank, knight_starts, bishop_starts, king_start) = match color {
+            Color::White => (
+                0x0000_0000_0000_00FFu64,
+                [1, 6], // b1, g1
+                [2, 5], // c1, f1
+                4,      // e1
+            ),
+            Color::Black => (
+                0xFF00_0000_0000_0000u64,
+                [57, 62], // b8, g8
+                [58, 61], // c8, f8
+                60,       // e8
+            ),
+        };
 
         let back_rank_bb = Bitboard(back_rank);
 
-        // Check knights
+        // Penalize pieces that remain on their original squares, then award
+        // each actual developed piece once.  Counting development per empty
+        // starting square would award a surviving developed minor twice when
+        // its original partner had been captured.
         let knights = self.pieces_of(color, Piece::Knight);
         for &start_sq in &knight_starts {
             if knights.has_bit(start_sq) {
                 score += UNDEVELOPED_PENALTY_MG;
-            } else {
-                // Knight developed
-                let developed = knights.0 & !back_rank;
-                if developed.count_ones() > 0 {
-                    score += DEVELOPMENT_BONUS_MG;
-                }
             }
         }
+        score += (knights.0 & !back_rank).count_ones() as i32 * DEVELOPMENT_BONUS_MG;
 
-        // Check bishops
         let bishops = self.pieces_of(color, Piece::Bishop);
         for &start_sq in &bishop_starts {
             if bishops.has_bit(start_sq) {
                 score += UNDEVELOPED_PENALTY_MG;
-            } else {
-                let developed = bishops.and(back_rank_bb.not());
-                if !developed.is_empty() {
-                    score += DEVELOPMENT_BONUS_MG;
-                }
             }
         }
+        score += bishops.and(back_rank_bb.not()).popcount() as i32 * DEVELOPMENT_BONUS_MG;
 
         // Check if castled (king not on starting square and on castled square)
         let kings = self.pieces_of(color, Piece::King);

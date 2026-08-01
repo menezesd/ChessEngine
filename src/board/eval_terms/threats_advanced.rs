@@ -108,9 +108,8 @@ impl Board {
         bonus += self.eval_slider_pins_to_target(color, enemy_king_sq, opp, true);
 
         // Pins to queen (if queen exists)
-        if enemy_queen_bb.0 != 0 {
-            let enemy_queen_sq = enemy_queen_bb.0.trailing_zeros() as usize;
-            bonus += self.eval_slider_pins_to_target(color, enemy_queen_sq, opp, false);
+        for enemy_queen_sq in enemy_queen_bb.iter() {
+            bonus += self.eval_slider_pins_to_target(color, enemy_queen_sq.index(), opp, false);
         }
 
         bonus
@@ -129,11 +128,9 @@ impl Board {
             bonus += self.check_pin(bishop_sq.index(), target_sq, true, opponent, to_king);
         }
 
-        if to_king {
-            for queen_sq in self.pieces_of(color, Piece::Queen).iter() {
-                bonus += self.check_pin(queen_sq.index(), target_sq, true, opponent, to_king);
-                bonus += self.check_pin(queen_sq.index(), target_sq, false, opponent, to_king);
-            }
+        for queen_sq in self.pieces_of(color, Piece::Queen).iter() {
+            bonus += self.check_pin(queen_sq.index(), target_sq, true, opponent, to_king);
+            bonus += self.check_pin(queen_sq.index(), target_sq, false, opponent, to_king);
         }
 
         for rook_sq in self.pieces_of(color, Piece::Rook).iter() {
@@ -152,6 +149,22 @@ impl Board {
         opponent: Color,
         to_king: bool,
     ) -> i32 {
+        let slider_file = slider_sq % 8;
+        let slider_rank = slider_sq / 8;
+        let target_file = target_sq % 8;
+        let target_rank = target_sq / 8;
+        let file_delta = slider_file.abs_diff(target_file);
+        let rank_delta = slider_rank.abs_diff(target_rank);
+
+        let aligned = if diagonal {
+            file_delta == rank_delta && file_delta > 0
+        } else {
+            (file_delta == 0) != (rank_delta == 0)
+        };
+        if !aligned {
+            return 0;
+        }
+
         let attacks = slider_attacks(slider_sq, self.all_occupied.0, diagonal);
 
         // Check if slider attacks the target
@@ -291,13 +304,34 @@ impl Board {
             return false;
         }
 
-        // Check if there's a target behind
-        let x_ray = slider_attacks(
-            slider_sq,
-            self.all_occupied.0 & !(1u64 << front_sq),
-            diagonal,
-        );
-        (x_ray & back_targets) != 0
+        let Some((file_step, rank_step)) = Self::line_step(slider_sq, front_sq) else {
+            return false;
+        };
+
+        let slider_file = slider_sq % 8;
+        let slider_rank = slider_sq / 8;
+        let front_file = front_sq % 8;
+        let front_rank = front_sq / 8;
+        let is_diagonal = slider_file.abs_diff(front_file) == slider_rank.abs_diff(front_rank);
+        if is_diagonal != diagonal {
+            return false;
+        }
+
+        // A skewer target must be the first occupied square beyond the front
+        // piece on the same ray. Looking at all x-ray attacks incorrectly
+        // counts valuable pieces on unrelated rays.
+        let mut file = front_file as i32 + file_step;
+        let mut rank = front_rank as i32 + rank_step;
+        while (0..8).contains(&file) && (0..8).contains(&rank) {
+            let sq = (rank * 8 + file) as usize;
+            if self.all_occupied.0 & (1u64 << sq) != 0 {
+                return back_targets & (1u64 << sq) != 0;
+            }
+            file += file_step;
+            rank += rank_step;
+        }
+
+        false
     }
 
     /// Evaluate discovery potential.
@@ -319,8 +353,8 @@ impl Board {
             if (x_ray & (1u64 << enemy_king_sq)) != 0 {
                 // Our bishop could attack king if blockers moved
                 let between = Self::between_mask(bishop_sq.index(), enemy_king_sq);
-                let our_blockers = our_occupied & between;
-                if our_blockers.is_power_of_two() {
+                let blockers = self.all_occupied.0 & between;
+                if blockers.is_power_of_two() && (our_occupied & blockers) != 0 {
                     // One of our pieces can discover an attack
                     bonus += DISCOVERY_POTENTIAL_MG;
                 }
@@ -331,8 +365,8 @@ impl Board {
             let x_ray = slider_attacks(rook_sq.index(), 0, false);
             if (x_ray & (1u64 << enemy_king_sq)) != 0 {
                 let between = Self::between_mask(rook_sq.index(), enemy_king_sq);
-                let our_blockers = our_occupied & between;
-                if our_blockers.is_power_of_two() {
+                let blockers = self.all_occupied.0 & between;
+                if blockers.is_power_of_two() && (our_occupied & blockers) != 0 {
                     bonus += DISCOVERY_POTENTIAL_MG;
                 }
             }

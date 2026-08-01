@@ -95,4 +95,9 @@ impl PhaseFactors {
     pub(super) fn taper(&self, mg_score: i32, eg_score: i32) -> i32 {
         (mg_score * self.midphase + self.endgame_mult * eg_score * self.endphase) / PHASE_TOTAL
     }
+
+    #[inline]
+    pub(super) fn taper_pair(&self, (mg_score, eg_score): (i32, i32)) -> i32 {
+        self.taper(mg_score, eg_score)
+    }
 }

@@ -52,7 +52,7 @@ impl Board {
         mg += self.eval_batteries(color);
 
         // Piece cluster evaluation
-        let (cluster_mg, cluster_eg) = self.eval_clusters(color);
+        let (cluster_mg, cluster_eg) = self.eval_clusters(color, ctx);
         mg += cluster_mg;
         eg += cluster_eg;
 
@@ -98,7 +98,13 @@ impl Board {
         // Check for doubled rooks (Rook + Rook on same file)
         for rook1 in rooks.iter() {
             for rook2 in rooks.iter() {
-                if rook2.index() > rook1.index() && rook1.file() == rook2.file() {
+                if rook2.index() > rook1.index()
+                    && rook1.file() == rook2.file()
+                    && Self::attacks_square(
+                        slider_attacks(rook1.index(), self.all_occupied.0, false),
+                        rook2.index(),
+                    )
+                {
                     bonus += DOUBLED_ROOKS_MG;
                 }
             }
@@ -108,11 +114,11 @@ impl Board {
     }
 
     /// Evaluate piece clusters (pieces defending each other)
-    fn eval_clusters(&self, color: Color) -> (i32, i32) {
+    fn eval_clusters(&self, color: Color, ctx: &AttackContext) -> (i32, i32) {
         let mut defended_count = 0;
 
         // Count how many of our pieces are defended by other pieces
-        let own_attacks = self.all_attacks(color);
+        let own_attacks = ctx.all_attacks(color);
 
         // Check each piece type (except pawns, handled elsewhere)
         for piece_type in Piece::MINOR_AND_MAJOR {
@@ -213,6 +219,14 @@ impl Board {
         mask
     }
 
+    fn slider_defends_square(&self, from: usize, target: usize, diagonal: bool) -> bool {
+        Self::attacks_square(slider_attacks(from, self.all_occupied.0, diagonal), target)
+    }
+
+    fn attacks_square(attacks: u64, target: usize) -> bool {
+        Bitboard(attacks).has_bit(target)
+    }
+
     fn count_slider_defenders(&self, sq: usize, color: Color) -> i32 {
         let mut count = 0;
 
@@ -237,14 +251,6 @@ impl Board {
         }
 
         count
-    }
-
-    fn slider_defends_square(&self, from: usize, target: usize, diagonal: bool) -> bool {
-        Self::attacks_square(slider_attacks(from, self.all_occupied.0, diagonal), target)
-    }
-
-    fn attacks_square(attacks: u64, target: usize) -> bool {
-        Bitboard(attacks).has_bit(target)
     }
 
     /// Check if the defender of a piece is overloaded (defends multiple attacked pieces)

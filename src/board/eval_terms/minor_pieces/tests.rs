@@ -26,6 +26,17 @@ fn test_knight_outpost_can_be_attacked() {
 }
 
 #[test]
+fn test_knight_outpost_ignores_enemy_pawn_on_same_rank() {
+    // The c5 pawn attacks b4/d4, not the protected knight on d5.
+    let board: Board = "8/8/8/2pN4/2P5/8/8/8 w - - 0 1".parse().unwrap();
+    let ctx = board.compute_attack_context();
+    let (mg, eg) = board.eval_minor_pieces(&ctx);
+
+    assert!(mg > 0, "same-rank pawn must not cancel the outpost: {mg}");
+    assert!(eg > 0, "same-rank pawn must not cancel the outpost: {eg}");
+}
+
+#[test]
 fn test_bad_bishop() {
     let board: Board = "8/8/8/8/3P1P2/2P3P1/1P5P/2B5 w - - 0 1".parse().unwrap();
     let ctx = board.compute_attack_context();
