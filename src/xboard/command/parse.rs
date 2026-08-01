@@ -142,10 +142,11 @@ fn parse_level_command(parts: &CommandParts<'_>) -> Option<XBoardCommand> {
 }
 
 fn is_edit_piece(s: &str) -> bool {
-    s.len() >= 2
-        && s.chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_uppercase())
+    let bytes = s.as_bytes();
+    bytes.len() == 3
+        && matches!(bytes[0], b'P' | b'N' | b'B' | b'R' | b'Q' | b'K' | b'x')
+        && matches!(bytes[1], b'a'..=b'h')
+        && matches!(bytes[2], b'1'..=b'8')
 }
 
 /// Parse an `XBoard` command from a line of input.

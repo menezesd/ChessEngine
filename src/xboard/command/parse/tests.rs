@@ -65,6 +65,14 @@ fn test_san_move() {
 }
 
 #[test]
+fn test_malformed_edit_piece_is_unknown() {
+    match parse_xboard_command("Pa2extra") {
+        Some(XBoardCommand::Unknown(command)) => assert_eq!(command, "Pa2extra"),
+        _ => panic!("Expected malformed edit-piece command to remain unknown"),
+    }
+}
+
+#[test]
 fn test_setboard() {
     match parse_xboard_command("setboard rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
     {

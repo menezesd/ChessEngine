@@ -70,6 +70,13 @@ impl XBoardHandler {
 
     /// Handle a single `XBoard` command.
     pub fn handle_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
+        // Edit commands must win over the normal move handler. Several valid
+        // edit tokens (for example `Ke1`) are also valid-looking SAN moves,
+        // but inside edit mode they place pieces rather than play a move.
+        if let Some(response) = self.handle_edit_command(cmd) {
+            return Some(response);
+        }
+
         if let Some(response) = self.handle_game_management_command(cmd) {
             return Some(response);
         }
@@ -79,10 +86,6 @@ impl XBoardHandler {
         }
 
         if let Some(response) = self.handle_search_control_command(cmd) {
-            return Some(response);
-        }
-
-        if let Some(response) = self.handle_edit_command(cmd) {
             return Some(response);
         }
 

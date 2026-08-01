@@ -26,7 +26,7 @@ fn piece_from_edit_char(piece: u8) -> Option<Piece> {
 
 fn parse_edit_piece_command(piece_str: &str) -> Option<EditPieceCommand> {
     let bytes = piece_str.as_bytes();
-    if bytes.len() < EDIT_COMMAND_LEN {
+    if bytes.len() != EDIT_COMMAND_LEN {
         return None;
     }
 
@@ -47,6 +47,7 @@ impl XBoardHandler {
             XBoardCommand::Edit => {
                 self.edit_mode = true;
                 self.board.clear();
+                self.move_history.clear();
                 self.edit_white_to_move = true;
                 None
             }
@@ -55,6 +56,7 @@ impl XBoardHandler {
                 if !self.edit_white_to_move {
                     self.board.flip_side_to_move();
                 }
+                self.board.reset_repetition_history();
                 None
             }
             XBoardCommand::ClearBoard => {
@@ -73,6 +75,13 @@ impl XBoardHandler {
                 if self.edit_mode {
                     self.place_piece(piece_str);
                 }
+                None
+            }
+            // The protocol parser is intentionally context-free, so SAN-like
+            // edit tokens such as `Ke1` arrive as `UserMove`. In edit mode
+            // they unambiguously mean piece placement.
+            XBoardCommand::UserMove(piece_str) if self.edit_mode => {
+                self.place_piece(piece_str);
                 None
             }
             _ => None,
@@ -151,6 +160,7 @@ mod tests {
     fn rejects_short_or_unknown_edit_commands() {
         assert!(parse_edit_piece_command("").is_none());
         assert!(parse_edit_piece_command("P").is_none());
+        assert!(parse_edit_piece_command("Pa2extra").is_none());
         assert!(parse_edit_piece_command("Ze4").is_none());
     }
 

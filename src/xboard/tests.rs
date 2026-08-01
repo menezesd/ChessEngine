@@ -1,8 +1,9 @@
 use super::handler::{normalized_memory_mb, normalized_search_depth, seconds_to_centiseconds};
 use super::*;
 use crate::board::search::DEFAULT_MAX_DEPTH;
-use crate::board::{Color, DEFAULT_TT_MB};
+use crate::board::{Color, Piece, Square, DEFAULT_TT_MB};
 use crate::engine::time::TimeControl;
+use crate::xboard::command::parse_xboard_command;
 
 #[test]
 fn test_default_search_depth_matches_search_default() {
@@ -134,6 +135,48 @@ fn test_edit_mode() {
     assert!(handler.edit_mode);
     handler.handle_command(&XBoardCommand::EditDone);
     assert!(!handler.edit_mode);
+}
+
+#[test]
+fn test_edit_mode_accepts_san_like_piece_placement_and_removal() {
+    let mut handler = XBoardHandler::new();
+    handler.handle_command(&XBoardCommand::Edit);
+
+    // `Ke1` is parsed as a normal-looking move, but edit mode must treat it
+    // as a placement command.
+    let place = parse_xboard_command("Ke1").expect("edit placement command should parse");
+    handler.handle_command(&place);
+    assert_eq!(handler.board.piece_on(Square::new(0, 4)), Some(Piece::King));
+
+    let remove = parse_xboard_command("xe1").expect("edit removal command should parse");
+    handler.handle_command(&remove);
+    assert_eq!(handler.board.piece_on(Square::new(0, 4)), None);
+}
+
+#[test]
+fn test_edit_mode_discards_prior_undo_history() {
+    let mut handler = XBoardHandler::new();
+    let mv = handler.board.parse_move("e2e4").unwrap();
+    let info = handler.board.make_move(mv);
+    handler.move_history.push((mv, info));
+
+    handler.handle_command(&XBoardCommand::Edit);
+
+    assert!(handler.move_history.is_empty());
+}
+
+#[test]
+fn test_edit_mode_defaults_to_white_to_move_after_black_position() {
+    let mut handler = XBoardHandler::new();
+    handler.handle_command(&XBoardCommand::SetBoard(
+        "8/8/8/8/8/8/8/K1k5 b - - 0 1".to_string(),
+    ));
+    assert!(!handler.board.white_to_move());
+
+    handler.handle_command(&XBoardCommand::Edit);
+    handler.handle_command(&XBoardCommand::EditDone);
+
+    assert!(handler.board.white_to_move());
 }
 
 #[test]
