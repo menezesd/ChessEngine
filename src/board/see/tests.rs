@@ -140,12 +140,48 @@ fn test_see_en_passant_defended() {
 }
 
 #[test]
+fn test_see_en_passant_opens_rook_recapture() {
+    // The pawn on e5 blocks the rook before d5xe6 e.p.; removing it opens
+    // the e-file, so the rook can immediately recapture on e6.
+    let board = make_board("k7/8/8/3Pp3/8/8/8/K3r3 w - e6 0 1");
+    let from = Square::new(4, 3);
+    let to = Square::new(5, 4);
+    assert_eq!(board.see(from, to), 0);
+}
+
+#[test]
 fn test_see_no_capture() {
     let board = make_board("8/8/8/8/4N3/8/8/8 w - - 0 1");
     let from = Square::new(3, 4);
     let to = Square::new(5, 5);
     let see = board.see(from, to);
     assert_eq!(see, 0);
+}
+
+#[test]
+fn test_see_rejects_friendly_capture_and_wrong_side_attacker() {
+    let friendly_target = make_board("8/8/8/3P4/4P3/8/8/8 w - - 0 1");
+    assert_eq!(friendly_target.see(Square::new(3, 4), Square::new(4, 3)), 0);
+
+    let wrong_side = make_board("8/8/8/3p4/4PP2/8/8/8 w - - 0 1");
+    assert_eq!(wrong_side.see(Square::new(4, 3), Square::new(3, 5)), 0);
+}
+
+#[test]
+fn test_see_rejects_capturing_the_king() {
+    let board = make_board("4k3/8/8/8/8/8/8/4Q2K w - - 0 1");
+
+    assert_eq!(board.see(Square::new(0, 4), Square::new(7, 4)), 0);
+}
+
+#[test]
+fn test_see_rejects_rank_edge_en_passant_target_without_panicking() {
+    let board = crate::board::BoardBuilder::new()
+        .piece(Square::new(0, 1), Color::White, Piece::Pawn)
+        .en_passant(Square::new(0, 0))
+        .build();
+
+    assert_eq!(board.see(Square::new(0, 1), Square::new(0, 0)), 0);
 }
 
 #[test]

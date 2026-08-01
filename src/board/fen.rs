@@ -19,6 +19,9 @@ impl Board {
         if parts.len() < 4 {
             return Err(FenError::TooFewParts { found: parts.len() });
         }
+        if parts.len() > 6 {
+            return Err(FenError::TooManyParts { found: parts.len() });
+        }
 
         // Parse piece placement
         let mut rank_count = 0;
@@ -80,46 +83,10 @@ impl Board {
             }
         }
 
-        // Parse castling rights
-        for c in parts[2].chars() {
-            match c {
-                'K' => board.castling_rights |= CASTLE_WHITE_K,
-                'Q' => board.castling_rights |= CASTLE_WHITE_Q,
-                'k' => board.castling_rights |= CASTLE_BLACK_K,
-                'q' => board.castling_rights |= CASTLE_BLACK_Q,
-                '-' => {}
-                _ => return Err(FenError::InvalidCastling { char: c }),
-            }
-        }
+        parse_castling_rights(&mut board, parts[2])?;
+        board.en_passant_target = parse_en_passant_target(parts[3], board.white_to_move)?;
 
-        // Parse en passant target
-        board.en_passant_target = if parts[3] == "-" {
-            None
-        } else {
-            let bytes = parts[3].as_bytes();
-            if bytes.len() == 2
-                && (b'a'..=b'h').contains(&bytes[0])
-                && (b'1'..=b'8').contains(&bytes[1])
-            {
-                let file = (bytes[0] - b'a') as usize;
-                let rank = (bytes[1] - b'1') as usize;
-                Some(Square::new(rank, file))
-            } else {
-                return Err(FenError::InvalidEnPassant {
-                    found: parts[3].to_string(),
-                });
-            }
-        };
-
-        // Parse halfmove clock (optional)
-        if parts.len() >= 5 {
-            board.halfmove_clock =
-                parts[4]
-                    .parse()
-                    .map_err(|_| FenError::InvalidHalfmoveClock {
-                        found: parts[4].to_string(),
-                    })?;
-        }
+        parse_move_counters(&mut board, &parts)?;
 
         board.hash = board.calculate_initial_hash();
         board.repetition_counts.set(board.hash, 1);
@@ -135,6 +102,74 @@ impl Board {
     pub fn from_fen(fen: &str) -> Self {
         Self::try_from_fen(fen).expect("Invalid FEN string")
     }
+}
+
+fn parse_castling_rights(board: &mut Board, castling: &str) -> Result<(), FenError> {
+    if castling != "-" && castling.contains('-') {
+        return Err(FenError::InvalidCastling { char: '-' });
+    }
+
+    for c in castling.chars() {
+        let right = match c {
+            'K' => CASTLE_WHITE_K,
+            'Q' => CASTLE_WHITE_Q,
+            'k' => CASTLE_BLACK_K,
+            'q' => CASTLE_BLACK_Q,
+            '-' => continue,
+            _ => return Err(FenError::InvalidCastling { char: c }),
+        };
+        if board.castling_rights & right != 0 {
+            return Err(FenError::InvalidCastling { char: c });
+        }
+        board.castling_rights |= right;
+    }
+
+    Ok(())
+}
+
+fn parse_en_passant_target(target: &str, white_to_move: bool) -> Result<Option<Square>, FenError> {
+    if target == "-" {
+        return Ok(None);
+    }
+
+    let bytes = target.as_bytes();
+    if bytes.len() != 2 || !(b'a'..=b'h').contains(&bytes[0]) || !matches!(bytes[1], b'3' | b'6') {
+        return Err(FenError::InvalidEnPassant {
+            found: target.to_string(),
+        });
+    }
+
+    let rank = (bytes[1] - b'1') as usize;
+    let expected_rank = if white_to_move { 5 } else { 2 };
+    if rank != expected_rank {
+        return Err(FenError::InvalidEnPassant {
+            found: target.to_string(),
+        });
+    }
+
+    Ok(Some(Square::new(rank, (bytes[0] - b'a') as usize)))
+}
+
+fn parse_move_counters(board: &mut Board, parts: &[&str]) -> Result<(), FenError> {
+    if let Some(halfmove) = parts.get(4) {
+        board.halfmove_clock = halfmove
+            .parse()
+            .map_err(|_| FenError::InvalidHalfmoveClock {
+                found: (*halfmove).to_string(),
+            })?;
+    }
+
+    if let Some(fullmove) = parts.get(5) {
+        board.fullmove_number = fullmove
+            .parse()
+            .ok()
+            .filter(|number: &u32| *number > 0)
+            .ok_or_else(|| FenError::InvalidFullmoveNumber {
+                found: (*fullmove).to_string(),
+            })?;
+    }
+
+    Ok(())
 }
 
 impl FromStr for Board {

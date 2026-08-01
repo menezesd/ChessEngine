@@ -1,4 +1,4 @@
-use crate::board::{Board, Piece, Square};
+use crate::board::{Board, Piece, SanError, Square};
 
 #[test]
 fn test_pawn_moves() {
@@ -46,6 +46,22 @@ fn test_captures() {
     let mv = board.parse_san("exd5").unwrap();
     assert!(mv.is_capture());
     assert_eq!(board.move_to_san(&mv), "exd5");
+}
+
+#[test]
+fn test_capture_marker_must_match_move_type() {
+    let mut capture_position =
+        Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2");
+    assert!(matches!(
+        capture_position.parse_san("ed5"),
+        Err(SanError::NoMatchingMove { .. })
+    ));
+
+    let mut quiet_position = Board::new();
+    assert!(matches!(
+        quiet_position.parse_san("Nxf3"),
+        Err(SanError::NoMatchingMove { .. })
+    ));
 }
 
 #[test]
@@ -103,5 +119,17 @@ fn test_round_trip() {
         let parsed = board.parse_san(&san).unwrap();
         assert_eq!(mv.from(), parsed.from());
         assert_eq!(mv.to(), parsed.to());
+    }
+}
+
+#[test]
+fn test_malformed_disambiguation_is_rejected_without_panicking() {
+    let mut board = Board::new();
+
+    for san in ["N0a3", "N9a3", "Nixd4"] {
+        assert!(matches!(
+            board.parse_san(san),
+            Err(SanError::InvalidSquare { .. })
+        ));
     }
 }

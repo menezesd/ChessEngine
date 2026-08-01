@@ -48,12 +48,13 @@ impl Board {
             .map_or_else(|| "-".to_string(), |sq| sq.to_string());
 
         format!(
-            "{} {} {} {} {} 1",
+            "{} {} {} {} {} {}",
             rows.join("/"),
             active,
             castling,
             ep,
-            self.halfmove_clock
+            self.halfmove_clock,
+            self.fullmove_number
         )
     }
 }

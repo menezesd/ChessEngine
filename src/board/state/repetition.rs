@@ -29,4 +29,8 @@ impl RepetitionTable {
         self.set(hash, next);
         next
     }
+
+    pub(crate) fn clear(&mut self) {
+        self.counts.clear();
+    }
 }

@@ -74,6 +74,16 @@ fn test_null_move_preserves_castling_rights() {
 }
 
 #[test]
+fn test_null_move_restores_fullmove_number() {
+    let mut board = Board::from_fen("8/8/8/8/8/8/8/K1k5 b - - 0 57");
+    let info = board.make_null_move();
+    assert_eq!(board.fullmove_number(), 58);
+
+    board.unmake_null_move(info);
+    assert_eq!(board.fullmove_number(), 57);
+}
+
+#[test]
 fn test_legal_moves_stable_after_make_unmake() {
     let mut board = Board::new();
     let initial_moves = board.generate_moves();
@@ -124,6 +134,7 @@ fn test_random_playout_round_trip_state() {
     let mut board = Board::new();
     let initial_hash = board.hash();
     let initial_halfmove = board.halfmove_clock();
+    let initial_fullmove = board.fullmove_number();
     let initial_castling = board.castling_rights;
     let initial_ep = board.en_passant_target;
     let initial_rep = board.repetition_counts.get(initial_hash);
@@ -150,6 +161,7 @@ fn test_random_playout_round_trip_state() {
 
     assert_eq!(board.hash(), initial_hash);
     assert_eq!(board.halfmove_clock(), initial_halfmove);
+    assert_eq!(board.fullmove_number(), initial_fullmove);
     assert_eq!(board.castling_rights, initial_castling);
     assert_eq!(board.en_passant_target, initial_ep);
     assert_eq!(board.repetition_counts.get(initial_hash), initial_rep);

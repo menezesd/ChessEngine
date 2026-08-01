@@ -36,13 +36,31 @@ impl Board {
     /// Material balance in centipawns from the perspective of the side to move.
     #[must_use]
     pub fn see(&self, from: Square, to: Square) -> i32 {
+        let side_to_move = self.side_to_move();
+
         // Get the piece being captured
-        let captured = match self.piece_at(to) {
-            Some((_, piece)) => piece,
+        let (captured, en_passant_capture_square) = match self.piece_at(to) {
+            Some((color, piece)) if color == side_to_move.opponent() && piece != Piece::King => {
+                (piece, None)
+            }
+            Some(_) => return 0,
             None => {
                 // En passant - captured piece is a pawn
                 if self.en_passant_target == Some(to) {
-                    Piece::Pawn
+                    let capture_rank = if side_to_move == Color::White {
+                        to.rank().checked_sub(1)
+                    } else {
+                        to.rank().checked_add(1).filter(|rank| *rank < 8)
+                    };
+                    let Some(capture_rank) = capture_rank else {
+                        return 0;
+                    };
+                    let capture_square = Square::new(capture_rank, to.file());
+                    if self.piece_at(capture_square) != Some((side_to_move.opponent(), Piece::Pawn))
+                    {
+                        return 0;
+                    }
+                    (Piece::Pawn, Some(capture_square))
                 } else {
                     return 0; // No capture
                 }
@@ -50,11 +68,14 @@ impl Board {
         };
 
         // Get the attacking piece
-        let Some((_, attacker)) = self.piece_at(from) else {
+        let Some((color, attacker)) = self.piece_at(from) else {
             return 0;
         };
+        if color != side_to_move {
+            return 0;
+        }
 
-        self.see_impl(from, to, attacker, captured)
+        self.see_impl(from, to, attacker, captured, en_passant_capture_square)
     }
 
     /// SEE with known attacker and victim pieces.
@@ -63,11 +84,18 @@ impl Board {
     #[inline]
     #[must_use]
     pub fn see_with_pieces(&self, from: Square, to: Square, attacker: Piece, victim: Piece) -> i32 {
-        self.see_impl(from, to, attacker, victim)
+        self.see_impl(from, to, attacker, victim, None)
     }
 
     /// SEE implementation with known attacker and victim.
-    fn see_impl(&self, from: Square, to: Square, attacker: Piece, victim: Piece) -> i32 {
+    fn see_impl(
+        &self,
+        from: Square,
+        to: Square,
+        attacker: Piece,
+        victim: Piece,
+        en_passant_capture_square: Option<Square>,
+    ) -> i32 {
         // Maximum depth of exchanges (should never be exceeded)
         const MAX_DEPTH: usize = 32;
 
@@ -80,6 +108,9 @@ impl Board {
 
         // Build occupancy that we'll modify as pieces are "removed"
         let mut occupancy = self.all_occupied.0;
+        if let Some(capture_sq) = en_passant_capture_square {
+            occupancy &= !Bitboard::from_square(capture_sq).0;
+        }
 
         // Get all attackers to the target square
         let mut attackers = self.attackers_to(to, Bitboard(occupancy));

@@ -4,9 +4,10 @@ use crate::zobrist::{
     color_to_zobrist_index, piece_to_zobrist_index, square_to_zobrist_index, ZOBRIST,
 };
 
+use super::attack_tables::{slider_attacks, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS};
 use super::eval_update::pst_square;
 use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
-use super::{castle_bit, Board, Color, Move, Piece, Square};
+use super::{castle_bit, Bitboard, Board, Color, Move, Piece, Square};
 
 impl Board {
     fn revoke_castling_right(&mut self, color: Color, side: char, key_index: usize) -> u64 {
@@ -179,14 +180,97 @@ impl Board {
             [square_to_zobrist_index(m.to())]
     }
 
+    /// Return the en-passant hash component when the given side can capture it.
+    ///
+    /// Only a legal en-passant capture changes the set of legal moves, so an
+    /// adjacent pawn pinned to its king must not distinguish positions for
+    /// repetition detection.
+    pub(super) fn en_passant_hash_component(&self, ep_square: Square, capturer: Color) -> u64 {
+        let pawn_rank = match capturer {
+            Color::White if ep_square.rank() > 0 => ep_square.rank() - 1,
+            Color::Black if ep_square.rank() < 7 => ep_square.rank() + 1,
+            Color::White | Color::Black => return 0,
+        };
+        let captured_square = Square::new(pawn_rank, ep_square.file());
+        if !self.is_empty(ep_square)
+            || self.piece_at(captured_square) != Some((capturer.opponent(), Piece::Pawn))
+        {
+            return 0;
+        }
+
+        let file = ep_square.file();
+        let has_legal_capture = [file.checked_sub(1), file.checked_add(1)]
+            .into_iter()
+            .flatten()
+            .filter(|candidate| *candidate < 8)
+            .any(|candidate| {
+                let from = Square::new(pawn_rank, candidate);
+                self.piece_at(from) == Some((capturer, Piece::Pawn))
+                    && self.en_passant_capture_is_legal(from, ep_square, captured_square, capturer)
+            });
+
+        if has_legal_capture {
+            ZOBRIST.en_passant_keys[file]
+        } else {
+            0
+        }
+    }
+
+    /// Whether the given en-passant capture leaves the capturer's king safe.
+    ///
+    /// This is used while constructing a position hash, so it cannot make and
+    /// unmake a move. Recompute attacks on the king with just the three
+    /// en-passant occupancy changes applied instead.
+    fn en_passant_capture_is_legal(
+        &self,
+        from: Square,
+        ep_square: Square,
+        captured_square: Square,
+        capturer: Color,
+    ) -> bool {
+        let opponent = capturer.opponent();
+        let king_square = self.find_king(capturer);
+        let king_index = king_square.index();
+        let occupancy = (self.all_occupied.0
+            & !Bitboard::from_square(from).0
+            & !Bitboard::from_square(captured_square).0)
+            | Bitboard::from_square(ep_square).0;
+
+        let pawn_sources = if opponent == Color::White {
+            PAWN_ATTACKS[Color::Black.index()][king_index]
+        } else {
+            PAWN_ATTACKS[Color::White.index()][king_index]
+        };
+        let opponent_pawns =
+            self.pieces_of(opponent, Piece::Pawn).0 & !Bitboard::from_square(captured_square).0;
+        if opponent_pawns & pawn_sources != 0 {
+            return false;
+        }
+        if self.pieces_of(opponent, Piece::Knight).0 & KNIGHT_ATTACKS[king_index] != 0 {
+            return false;
+        }
+        if self.pieces_of(opponent, Piece::King).0 & KING_ATTACKS[king_index] != 0 {
+            return false;
+        }
+
+        let rook_like =
+            self.pieces_of(opponent, Piece::Rook).0 | self.pieces_of(opponent, Piece::Queen).0;
+        if slider_attacks(king_index, occupancy, false) & rook_like != 0 {
+            return false;
+        }
+        let bishop_like =
+            self.pieces_of(opponent, Piece::Bishop).0 | self.pieces_of(opponent, Piece::Queen).0;
+        slider_attacks(king_index, occupancy, true) & bishop_like == 0
+    }
+
     /// Update en passant target based on the move and return hash delta.
-    pub(super) fn update_en_passant_target(&mut self, m: Move) -> u64 {
+    pub(super) fn update_en_passant_target(&mut self, m: Move, capturer: Color) -> u64 {
         self.en_passant_target = None;
         if m.is_double_pawn_push() {
             let ep_row = usize::midpoint(m.from().rank(), m.to().rank());
             let ep_sq = Square::new(ep_row, m.from().file());
             self.en_passant_target = Some(ep_sq);
-            return ZOBRIST.en_passant_keys[ep_sq.file()];
+            return self.en_passant_hash_component(ep_sq, capturer);
         }
         0
     }

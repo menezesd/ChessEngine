@@ -6,6 +6,7 @@ struct SanMoveParts {
     disambig_rank: Option<usize>,
     dest_notation: String,
     promotion: Option<Piece>,
+    is_capture: bool,
 }
 
 impl Board {
@@ -50,14 +51,7 @@ impl Board {
                 notation: parts.dest_notation.clone(),
             })?;
 
-        self.find_san_move(
-            piece,
-            dest,
-            parts.disambig_file,
-            parts.disambig_rank,
-            parts.promotion,
-            san,
-        )
+        self.find_san_move(piece, dest, &parts, san)
     }
 
     /// Parse SAN components after the piece letter.
@@ -67,9 +61,11 @@ impl Board {
         let mut disambig_rank = None;
         let mut dest = String::new();
         let mut promotion = None;
+        let mut is_capture = false;
 
         while let Some(c) = chars.next() {
             if c == 'x' {
+                is_capture = true;
             } else if c == '=' {
                 if let Some(promo_char) = chars.next() {
                     promotion = Some(
@@ -84,6 +80,11 @@ impl Board {
                         dest.push(next);
                         chars.next();
                     } else if next == 'x' || next.is_ascii_lowercase() {
+                        if !matches!(c, 'a'..='h') {
+                            return Err(SanError::InvalidSquare {
+                                notation: san.to_string(),
+                            });
+                        }
                         disambig_file = Some(c as usize - 'a' as usize);
                     } else {
                         dest.push(c);
@@ -92,6 +93,11 @@ impl Board {
                     dest.push(c);
                 }
             } else if c.is_ascii_digit() && dest.is_empty() {
+                if !matches!(c, '1'..='8') {
+                    return Err(SanError::InvalidSquare {
+                        notation: san.to_string(),
+                    });
+                }
                 disambig_rank = Some(c as usize - '1' as usize);
             } else if c.is_ascii_digit() {
                 dest.push(c);
@@ -103,6 +109,7 @@ impl Board {
             disambig_rank,
             dest_notation: dest,
             promotion,
+            is_capture,
         })
     }
 
@@ -129,9 +136,7 @@ impl Board {
         &mut self,
         piece: Piece,
         dest: Square,
-        disambig_file: Option<usize>,
-        disambig_rank: Option<usize>,
-        promotion: Option<Piece>,
+        parts: &SanMoveParts,
         san: &str,
     ) -> Result<Move, SanError> {
         let moves = self.generate_moves();
@@ -146,16 +151,20 @@ impl Board {
                 continue;
             }
 
-            if mv.promotion() != promotion {
+            if mv.promotion() != parts.promotion {
                 continue;
             }
 
-            if let Some(file) = disambig_file {
+            if mv.is_capture() != parts.is_capture {
+                continue;
+            }
+
+            if let Some(file) = parts.disambig_file {
                 if mv.from().file() != file {
                     continue;
                 }
             }
-            if let Some(rank) = disambig_rank {
+            if let Some(rank) = parts.disambig_rank {
                 if mv.from().rank() != rank {
                     continue;
                 }

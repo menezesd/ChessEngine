@@ -70,28 +70,57 @@ impl Board {
         let mut legal_moves = MoveList::new();
 
         for m in &pseudo_moves {
-            if m.is_castling() {
-                let king_start_sq = m.from();
-                let from = m.from();
-                let to = m.to();
-                let king_mid_sq = Square::new(from.rank(), usize::midpoint(from.file(), to.file()));
-                let king_end_sq = m.to();
-
-                if self.is_square_attacked(king_start_sq, opponent_color)
-                    || self.is_square_attacked(king_mid_sq, opponent_color)
-                    || self.is_square_attacked(king_end_sq, opponent_color)
-                {
-                    continue;
-                }
-            }
-
-            let info = self.make_move(*m);
-            if !self.is_in_check(current_color) {
+            if self.is_legal_pseudo_move(*m, current_color, opponent_color) {
                 legal_moves.push(*m);
             }
-            self.unmake_move(*m, info);
         }
         legal_moves
+    }
+
+    /// Return whether the side to move has at least one legal move.
+    ///
+    /// This avoids materializing a complete legal move list for terminal-node
+    /// checks, which is especially useful in quiescence search.
+    pub(crate) fn has_legal_move(&mut self) -> bool {
+        let current_color = self.side_to_move();
+        let opponent_color = current_color.opponent();
+        self.generate_pseudo_moves()
+            .iter()
+            .any(|m| self.is_legal_pseudo_move(*m, current_color, opponent_color))
+    }
+
+    fn is_legal_pseudo_move(
+        &mut self,
+        m: Move,
+        current_color: super::Color,
+        opponent_color: super::Color,
+    ) -> bool {
+        // Kings are checked, never captured.  Legal game flow cannot reach a
+        // position where the side to move can take the opposing king, but an
+        // externally supplied malformed FEN can.  Reject it before making
+        // the move so the king cache and terminal logic stay intact.
+        if self
+            .piece_at(m.to())
+            .is_some_and(|(_, piece)| piece == Piece::King)
+        {
+            return false;
+        }
+
+        if m.is_castling() {
+            let from = m.from();
+            let king_mid_sq = Square::new(from.rank(), usize::midpoint(from.file(), m.to().file()));
+            if self.is_square_attacked(from, opponent_color)
+                || self.is_square_attacked(king_mid_sq, opponent_color)
+                || self.is_square_attacked(m.to(), opponent_color)
+            {
+                return false;
+            }
+        }
+
+        let info = self.make_move(m);
+        let legal = !self.is_in_check(current_color);
+        self.unmake_move(m, info);
+        legal
     }
 
     #[must_use]
@@ -146,6 +175,12 @@ impl Board {
         }
 
         // Make the move and check if king is left in check
+        if self
+            .piece_at(mv.to())
+            .is_some_and(|(_, piece)| piece == Piece::King)
+        {
+            return false;
+        }
         let info = self.make_move(mv);
         let legal = !self.is_in_check(current_color);
         self.unmake_move(mv, info);
@@ -188,6 +223,12 @@ impl Board {
         // Filter for legality
         let mut legal_tactical_moves = MoveList::new();
         for m in &pseudo_tactical_moves {
+            if self
+                .piece_at(m.to())
+                .is_some_and(|(_, piece)| piece == Piece::King)
+            {
+                continue;
+            }
             let info = self.make_move(*m);
             if !self.is_in_check(current_color) {
                 legal_tactical_moves.push(*m);

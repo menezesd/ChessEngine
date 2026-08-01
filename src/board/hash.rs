@@ -38,7 +38,7 @@ impl Board {
         }
 
         if let Some(ep_square) = self.en_passant_target {
-            hash ^= ZOBRIST.en_passant_keys[ep_square.file()];
+            hash ^= self.en_passant_hash_component(ep_square, self.side_to_move());
         }
 
         hash

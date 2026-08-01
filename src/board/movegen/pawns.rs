@@ -1,4 +1,4 @@
-use super::super::{Board, Color, Move, MoveList, Square, PROMOTION_PIECES};
+use super::super::{Board, Color, Move, MoveList, Piece, Square, PROMOTION_PIECES};
 
 impl Board {
     /// Add promotion moves for a pawn reaching the back rank
@@ -42,7 +42,14 @@ impl Board {
                     }
                 }
             } else if Some(target_sq) == self.en_passant_target {
-                moves.push(Move::en_passant(from, target_sq));
+                // A FEN en-passant square is only actionable when the pawn
+                // that just double-pushed is still beside the capturer. This
+                // is guaranteed in game play but must be checked for
+                // externally supplied FENs.
+                let captured_sq = Square::new(from.rank(), target_sq.file());
+                if self.piece_at(captured_sq) == Some((color.opponent(), Piece::Pawn)) {
+                    moves.push(Move::en_passant(from, target_sq));
+                }
             }
         }
     }

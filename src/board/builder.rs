@@ -24,6 +24,7 @@ pub struct BoardBuilder {
     castling_rights: u8,
     en_passant_target: Option<Square>,
     halfmove_clock: u32,
+    fullmove_number: u32,
 }
 
 impl Default for BoardBuilder {
@@ -42,6 +43,7 @@ impl BoardBuilder {
             castling_rights: 0,
             en_passant_target: None,
             halfmove_clock: 0,
+            fullmove_number: 1,
         }
     }
 
@@ -165,6 +167,13 @@ impl BoardBuilder {
         self
     }
 
+    /// Set the FEN fullmove number.
+    #[must_use]
+    pub const fn fullmove_number(mut self, number: u32) -> Self {
+        self.fullmove_number = if number == 0 { 1 } else { number };
+        self
+    }
+
     /// Build the board.
     ///
     /// Creates a Board with all the specified pieces and settings.
@@ -180,6 +189,7 @@ impl BoardBuilder {
         board.castling_rights = self.castling_rights;
         board.en_passant_target = self.en_passant_target;
         board.halfmove_clock = self.halfmove_clock;
+        board.fullmove_number = self.fullmove_number;
         board.hash = board.calculate_initial_hash();
         board.repetition_counts.set(board.hash, 1);
         board.recalculate_incremental_eval();

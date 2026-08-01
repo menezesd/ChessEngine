@@ -7,6 +7,8 @@ use std::fmt;
 pub enum FenError {
     /// FEN string has too few parts (needs at least 4)
     TooFewParts { found: usize },
+    /// FEN string has more fields than the six fields defined by the format
+    TooManyParts { found: usize },
     /// Invalid piece character in position string
     InvalidPiece { char: char },
     /// Invalid empty-square count in piece placement
@@ -19,6 +21,8 @@ pub enum FenError {
     InvalidEnPassant { found: String },
     /// Invalid halfmove clock
     InvalidHalfmoveClock { found: String },
+    /// Invalid fullmove number
+    InvalidFullmoveNumber { found: String },
     /// Invalid rank in position string
     InvalidRank { rank: usize },
     /// Too few ranks in the piece placement
@@ -34,6 +38,9 @@ impl fmt::Display for FenError {
         match self {
             FenError::TooFewParts { found } => {
                 write!(f, "FEN must have at least 4 parts, found {found}")
+            }
+            FenError::TooManyParts { found } => {
+                write!(f, "FEN must have at most 6 parts, found {found}")
             }
             FenError::InvalidPiece { char } => {
                 write!(f, "Invalid piece character '{char}' in FEN")
@@ -52,6 +59,9 @@ impl fmt::Display for FenError {
             }
             FenError::InvalidHalfmoveClock { found } => {
                 write!(f, "Invalid halfmove clock '{found}'")
+            }
+            FenError::InvalidFullmoveNumber { found } => {
+                write!(f, "Invalid fullmove number '{found}'")
             }
             FenError::InvalidRank { rank } => {
                 write!(f, "Invalid rank index {rank} in FEN")

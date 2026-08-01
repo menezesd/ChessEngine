@@ -92,6 +92,17 @@ fn test_halfmove_clock() {
 }
 
 #[test]
+fn test_fullmove_number() {
+    let board = BoardBuilder::new()
+        .piece(Square::new(0, 4), Color::White, Piece::King)
+        .piece(Square::new(7, 4), Color::Black, Piece::King)
+        .fullmove_number(42)
+        .build();
+
+    assert_eq!(board.fullmove_number(), 42);
+}
+
+#[test]
 fn test_castle_queenside() {
     let board = BoardBuilder::starting_position()
         .no_castling_rights()

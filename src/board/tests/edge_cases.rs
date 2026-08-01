@@ -82,6 +82,21 @@ fn test_en_passant_removes_correct_pawn() {
 }
 
 #[test]
+fn en_passant_target_without_double_pushed_pawn_generates_no_move() {
+    // The target rank is syntactically valid FEN, but there is no Black pawn
+    // on d5 for e5xd6 en passant to capture.
+    let mut board = Board::from_fen("7k/8/8/4P3/8/8/8/K7 w - d6 0 1");
+    let fabricated_ep = Move::en_passant(Square::new(4, 4), Square::new(5, 3));
+
+    assert!(!board.is_legal_move(fabricated_ep));
+    assert!(!board.generate_moves().iter().any(|mv| *mv == fabricated_ep));
+    assert!(!board
+        .generate_tactical_moves()
+        .iter()
+        .any(|mv| *mv == fabricated_ep));
+}
+
+#[test]
 fn test_castling_blocked_by_check() {
     let mut board = Board::from_fen("r3k2r/8/8/8/4Q3/8/8/R3K2R b KQkq - 0 1");
     let moves = board.generate_moves();
@@ -129,6 +144,22 @@ fn test_checkmate_back_rank() {
 
     board.make_move(*mate_move.unwrap());
     assert!(board.is_checkmate());
+}
+
+#[test]
+fn king_captures_are_never_generated_from_malformed_fen() {
+    // This is not a reachable game position (Black is already in check), but
+    // protocol clients may supply arbitrary FENs. The engine must still
+    // represent checkmate rather than allowing Qxe8 as a king capture.
+    let mut board = Board::from_fen("4k3/4Q3/8/8/8/8/8/K7 w - - 0 1");
+    let king_capture = Move::capture(Square::new(6, 4), Square::new(7, 4));
+
+    assert!(!board.is_legal_move(king_capture));
+    assert!(!board.generate_moves().iter().any(|mv| *mv == king_capture));
+    assert!(!board
+        .generate_tactical_moves()
+        .iter()
+        .any(|mv| *mv == king_capture));
 }
 
 #[test]

@@ -17,6 +17,7 @@ impl Board {
         let previous_en_passant_target = self.en_passant_target;
         let previous_castling_rights = self.castling_rights;
         let previous_halfmove_clock = self.halfmove_clock;
+        let previous_fullmove_number = self.fullmove_number;
         let previous_eval_mg = self.eval_mg;
         let previous_eval_eg = self.eval_eg;
         let previous_game_phase = self.game_phase;
@@ -31,7 +32,7 @@ impl Board {
 
         // Remove old en passant from hash
         if let Some(old_ep) = self.en_passant_target {
-            current_hash ^= ZOBRIST.en_passant_keys[old_ep.file()];
+            current_hash ^= self.en_passant_hash_component(old_ep, color);
         }
 
         // Handle captures
@@ -60,10 +61,13 @@ impl Board {
         current_hash ^= self.place_moving_piece(m, color, moving_piece, c_idx, is_white);
 
         // Handle double pawn push - set new en passant target
-        current_hash ^= self.update_en_passant_target(m);
+        current_hash ^= self.update_en_passant_target(m, color.opponent());
 
         // Update halfmove clock
         self.update_halfmove_clock(moving_piece, m.is_capture());
+        if color == Color::Black {
+            self.fullmove_number = self.fullmove_number.saturating_add(1);
+        }
 
         // Update castling rights
         current_hash ^= self.update_castling_rights(&m, moving_piece, color, captured_piece_info);
@@ -80,6 +84,7 @@ impl Board {
             previous_castling_rights,
             previous_hash,
             previous_halfmove_clock,
+            previous_fullmove_number,
             made_hash,
             previous_repetition_count,
             previous_eval_mg,
@@ -91,19 +96,25 @@ impl Board {
     pub(crate) fn make_null_move(&mut self) -> NullMoveInfo {
         let previous_hash = self.hash;
         let previous_en_passant_target = self.en_passant_target;
+        let previous_fullmove_number = self.fullmove_number;
         let mut current_hash = self.hash;
+        let color = self.side_to_move();
 
         current_hash ^= ZOBRIST.black_to_move_key;
         if let Some(old_ep) = self.en_passant_target {
-            current_hash ^= ZOBRIST.en_passant_keys[old_ep.file()];
+            current_hash ^= self.en_passant_hash_component(old_ep, color);
         }
         self.en_passant_target = None;
+        if color == Color::Black {
+            self.fullmove_number = self.fullmove_number.saturating_add(1);
+        }
         self.white_to_move = !self.white_to_move;
         self.hash = current_hash;
 
         NullMoveInfo {
             previous_en_passant_target,
             previous_hash,
+            fullmove_number: previous_fullmove_number,
         }
     }
 
@@ -155,6 +166,7 @@ impl Board {
         self.castling_rights = info.previous_castling_rights;
         self.hash = info.previous_hash;
         self.halfmove_clock = info.previous_halfmove_clock;
+        self.fullmove_number = info.previous_fullmove_number;
 
         // Restore incremental eval
         self.eval_mg = info.previous_eval_mg;
@@ -174,5 +186,6 @@ impl Board {
         self.white_to_move = !self.white_to_move;
         self.en_passant_target = info.previous_en_passant_target;
         self.hash = info.previous_hash;
+        self.fullmove_number = info.fullmove_number;
     }
 }

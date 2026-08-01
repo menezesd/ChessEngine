@@ -1,5 +1,6 @@
 use super::*;
 use crate::board::error::MoveParseError;
+use crate::board::FenError;
 
 #[test]
 fn test_fen_round_trip() {
@@ -22,6 +23,12 @@ fn test_fen_black_to_move() {
 fn test_fen_error_too_few_parts() {
     let result = Board::try_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w");
     assert!(matches!(result, Err(FenError::TooFewParts { .. })));
+}
+
+#[test]
+fn test_fen_error_too_many_parts() {
+    let result = Board::try_from_fen("8/8/8/8/8/8/8/K1k5 w - - 0 1 trailing");
+    assert!(matches!(result, Err(FenError::TooManyParts { found: 7 })));
 }
 
 #[test]
@@ -73,9 +80,34 @@ fn test_fen_error_invalid_castling() {
 }
 
 #[test]
+fn test_fen_error_malformed_castling() {
+    for castling in ["KK", "K-", "-K"] {
+        let fen = format!("8/8/8/8/8/8/8/K1k5 w {castling} - 0 1");
+        assert!(matches!(
+            Board::try_from_fen(&fen),
+            Err(FenError::InvalidCastling { .. })
+        ));
+    }
+}
+
+#[test]
 fn test_fen_error_invalid_en_passant() {
     let result = Board::try_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq z9 0 1");
     assert!(matches!(result, Err(FenError::InvalidEnPassant { .. })));
+}
+
+#[test]
+fn test_fen_error_en_passant_wrong_rank_or_side_to_move() {
+    for fen in [
+        "8/8/8/8/8/8/8/K1k5 w - e3 0 1",
+        "8/8/8/8/8/8/8/K1k5 b - e6 0 1",
+        "8/8/8/8/8/8/8/K1k5 w - e4 0 1",
+    ] {
+        assert!(matches!(
+            Board::try_from_fen(fen),
+            Err(FenError::InvalidEnPassant { .. })
+        ));
+    }
 }
 
 #[test]
@@ -167,4 +199,24 @@ fn test_make_move_uci() {
 fn test_halfmove_clock_parsing() {
     let board = Board::try_from_fen("8/8/8/8/8/8/8/K1k5 w - - 42 1").unwrap();
     assert_eq!(board.halfmove_clock, 42);
+}
+
+#[test]
+fn test_fullmove_number_round_trip() {
+    let fen = "8/8/8/8/8/8/8/K1k5 b - - 42 57";
+    let board = Board::try_from_fen(fen).unwrap();
+
+    assert_eq!(board.fullmove_number(), 57);
+    assert_eq!(board.to_fen(), fen);
+}
+
+#[test]
+fn test_fen_error_invalid_fullmove_number() {
+    for fullmove in ["0", "nope"] {
+        let fen = format!("8/8/8/8/8/8/8/K1k5 w - - 0 {fullmove}");
+        assert!(matches!(
+            Board::try_from_fen(&fen),
+            Err(FenError::InvalidFullmoveNumber { .. })
+        ));
+    }
 }
