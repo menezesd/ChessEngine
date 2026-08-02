@@ -134,14 +134,22 @@ impl Board {
             // Get king square index
             let king_sq_idx = self.king_square_index(color);
             let king_file = king_sq_idx % 8;
-
-            // Get pawn shield mask based on king file
-            let shield_mask = PAWN_SHIELD_MASK[color_idx][king_file];
+            let king_rank = king_sq_idx / 8;
             let our_pawns = self.pieces_of(color, Piece::Pawn);
 
-            // Count shield pawns
-            let shield_pawns = shield_mask.intersect_popcount(our_pawns) as i32;
-            mg += sign * shield_pawns * KING_SHIELD_BONUS_MG;
+            // The shield mask is anchored to the back ranks, so it only
+            // describes a real shield for a castled or uncastled back-rank
+            // king. A king that has marched up the board must not collect
+            // a bonus for pawns it left behind.
+            let on_back_ranks = match color {
+                Color::White => king_rank <= 1,
+                Color::Black => king_rank >= 6,
+            };
+            if on_back_ranks {
+                let shield_mask = PAWN_SHIELD_MASK[color_idx][king_file];
+                let shield_pawns = shield_mask.intersect_popcount(our_pawns) as i32;
+                mg += sign * shield_pawns * KING_SHIELD_BONUS_MG;
+            }
 
             // Penalize open files near king
             let file_mask = FILES[king_file];
