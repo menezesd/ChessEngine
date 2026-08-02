@@ -29,7 +29,14 @@ pub fn build_search_request(
     let (soft_ms, hard_ms) = planned_limits;
     let has_active_time_limits = !infinite && !time_control.is_unlimited();
 
-    let max_nodes = nodes.unwrap_or(config.default_max_nodes);
+    // `go infinite` must run until `stop`: never inherit the default
+    // node budget, which would end the search and emit an unsolicited
+    // `bestmove`.
+    let max_nodes = if infinite {
+        0
+    } else {
+        nodes.unwrap_or(config.default_max_nodes)
+    };
 
     (
         SearchRequest {

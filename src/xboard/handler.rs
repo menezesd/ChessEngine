@@ -40,7 +40,7 @@ impl XBoardHandler {
                 self.force_mode = false;
                 self.engine_color = Some(Color::Black);
                 self.move_history.clear();
-                self.state.lock().new_search();
+                self.state.lock().new_game();
                 None
             }
             XBoardCommand::SetBoard(fen) => {

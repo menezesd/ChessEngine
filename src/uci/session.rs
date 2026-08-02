@@ -88,7 +88,9 @@ impl UciSession {
     }
 
     fn handle_eval(&self) {
-        self.engine.with_search_state_ref(|state| {
+        // Non-blocking: a running search holds the state lock for its full
+        // duration, and blocking here would freeze the protocol loop.
+        let ran = self.engine.try_with_search_state_ref(|state| {
             let nnue = state.tables.nnue.as_ref().map(|network| {
                 scaled_eval(
                     self.engine.board().evaluate_nnue(network),
@@ -120,6 +122,9 @@ impl UciSession {
                 nnue = nnue.map_or_else(|| "none".to_string(), |v| v.to_string())
             );
         });
+        if ran.is_none() {
+            println!("info string eval unavailable while searching");
+        }
     }
 
     fn handle_eval_features(&self) {
@@ -151,8 +156,15 @@ impl UciSession {
     fn handle_command(&mut self, cmd: UciCommand) -> bool {
         match cmd {
             UciCommand::Uci => {
-                self.engine
-                    .with_search_state_ref(|state| self.options.print(state));
+                // Non-blocking: if a running search holds the state lock,
+                // still complete the handshake with the state-independent
+                // options rather than freezing the protocol loop.
+                let printed = self
+                    .engine
+                    .try_with_search_state_ref(|state| self.options.print(state));
+                if printed.is_none() {
+                    self.options.print_basic();
+                }
             }
             UciCommand::IsReady => {
                 print_ready();

@@ -168,7 +168,9 @@ impl EngineController {
         let num_threads = self.num_threads;
         let info_callback = self.info_callback.clone();
 
-        let handle = if num_threads > 1 {
+        // MultiPV is only implemented by the single-threaded search path;
+        // the SMP path would silently ignore it and report one line.
+        let handle = if num_threads > 1 && params.multi_pv <= 1 {
             let smp_config = SmpConfig {
                 num_threads,
                 max_depth: params
@@ -178,6 +180,7 @@ impl EngineController {
                 time_limit_ms: Self::search_time_limit_ms(&params),
                 node_limit,
                 info_callback,
+                ponder: params.ponder,
             };
 
             let handle = thread::Builder::new()

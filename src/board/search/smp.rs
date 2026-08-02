@@ -38,6 +38,10 @@ pub struct SmpConfig {
     pub node_limit: u64,
     /// Optional callback for iteration info
     pub info_callback: Option<SearchInfoCallback>,
+    /// Whether this is a ponder search. A ponder search must leave the
+    /// shared stop flag untouched on completion: the controller uses that
+    /// flag to hold the result until `ponderhit` or `stop` arrives.
+    pub ponder: bool,
 }
 
 impl Default for SmpConfig {
@@ -48,6 +52,7 @@ impl Default for SmpConfig {
             time_limit_ms: 0,
             node_limit: 0,
             info_callback: None,
+            ponder: false,
         }
     }
 }
@@ -239,8 +244,22 @@ pub fn smp_search(
         handles.push(handle);
     }
 
-    // Wait for all workers to complete
+    // Join the main worker first: it defines search completion. Helpers
+    // search one ply deeper, so without a completion signal a fixed-depth
+    // search would block here until the slowest helper finishes its deeper
+    // tree. The stop flag is created fresh for each search, so setting it
+    // cannot leak into a later search. A ponder search must not set it:
+    // the controller uses this flag to hold the result until `ponderhit`.
     let mut results: Vec<WorkerResult> = Vec::with_capacity(num_threads);
+    let mut handles = handles.into_iter();
+    if let Some(main_handle) = handles.next() {
+        if let Ok(result) = main_handle.join() {
+            results.push(result);
+        }
+        if !config.ponder {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
     for handle in handles {
         if let Ok(result) = handle.join() {
             results.push(result);

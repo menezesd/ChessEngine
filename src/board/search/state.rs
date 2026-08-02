@@ -168,6 +168,21 @@ impl SearchState {
         self.tables.counter_moves.reset();
     }
 
+    /// Reset all state that must not leak between independent games.
+    ///
+    /// Unlike `new_search`, this clears the transposition table and every
+    /// learned heuristic table so back-to-back games are reproducible and a
+    /// previous game's corrections cannot bias the new game's evaluations.
+    pub fn new_game(&mut self) {
+        self.new_search();
+        self.tables.tt.clear();
+        self.tables.history.reset();
+        self.tables.continuation_history.reset();
+        self.tables.countermove_history.reset();
+        self.tables.capture_history.reset();
+        self.tables.correction_history.reset();
+    }
+
     pub fn set_max_nodes(&mut self, max_nodes: u64) {
         self.stats.max_nodes = max_nodes;
     }

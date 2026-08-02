@@ -69,16 +69,23 @@ pub(super) fn compute_incremental_limits(
     let safe_ms = time_left_ms.saturating_sub(config.move_overhead_ms);
 
     if is_critical_time(time_left_ms, config.move_overhead_ms) {
-        return critical_time_limits(time_left_ms);
+        // Budget from the time that remains after transmission overhead;
+        // budgeting from the raw clock here can schedule more thinking
+        // time than actually exists and flag on the spot.
+        return critical_time_limits(safe_ms);
     }
 
     if safe_ms < PANIC_THRESHOLD_MS {
         return panic_time_limits(safe_ms, inc_ms);
     }
 
-    let moves_to_go = movestogo
-        .unwrap_or_else(|| estimated_moves_to_go(safe_ms))
-        .max(MIN_MOVES_TO_GO);
+    // The floor guards only our own estimate. An explicit `movestogo` from
+    // the GUI is authoritative: with `movestogo 1` (last move before a time
+    // control) the engine should spend most of the clock, not a tenth.
+    let moves_to_go = movestogo.map_or_else(
+        || estimated_moves_to_go(safe_ms).max(MIN_MOVES_TO_GO),
+        |mtg| mtg.max(1),
+    );
 
     let base_time = (safe_ms / moves_to_go).saturating_add(inc_ms);
     let soft_cap = safe_ms.saturating_mul(config.soft_time_percent) / PERCENT_DENOMINATOR;

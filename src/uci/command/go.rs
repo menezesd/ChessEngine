@@ -26,12 +26,26 @@ fn assign_if_parsed<T: std::str::FromStr>(target: &mut Option<T>, value: Option<
     true
 }
 
+/// Parse a clock value, clamping negatives to zero.
+///
+/// GUIs report negative remaining time when the engine is already over
+/// budget. Rejecting the value would silently fall back to the default
+/// 5-second clock; an empty clock keeps the engine in instant-move mode.
+fn assign_clamped_clock(target: &mut Option<u64>, value: Option<&str>) -> bool {
+    let Some(parsed) = parsed_value::<i64>(value) else {
+        return false;
+    };
+
+    *target = Some(u64::try_from(parsed.max(0)).unwrap_or_default());
+    true
+}
+
 fn assign_numeric_param(params: &mut GoParams, name: &str, value: Option<&str>) -> bool {
     match name {
-        "wtime" => assign_if_parsed(&mut params.wtime, value),
-        "btime" => assign_if_parsed(&mut params.btime, value),
-        "winc" => assign_if_parsed(&mut params.winc, value),
-        "binc" => assign_if_parsed(&mut params.binc, value),
+        "wtime" => assign_clamped_clock(&mut params.wtime, value),
+        "btime" => assign_clamped_clock(&mut params.btime, value),
+        "winc" => assign_clamped_clock(&mut params.winc, value),
+        "binc" => assign_clamped_clock(&mut params.binc, value),
         "movetime" => assign_if_parsed(&mut params.movetime, value),
         "movestogo" => assign_if_parsed(&mut params.movestogo, value),
         "nodes" => assign_if_parsed(&mut params.nodes, value),

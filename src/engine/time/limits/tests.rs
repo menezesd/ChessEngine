@@ -60,10 +60,32 @@ fn compute_incremental_limits_saturates_extreme_clock_values() {
 }
 
 #[test]
-fn compute_time_limits_uses_half_clock_when_time_is_critical() {
+fn compute_time_limits_uses_half_remaining_time_when_critical() {
+    // 100 ms on the clock with 50 ms move overhead leaves 50 ms of real
+    // thinking time; budgeting from the raw clock would flag on the spot.
     let (soft, hard) = compute_incremental_limits(100, 0, None, &test_config());
 
-    assert_eq!((soft, hard), (50, 50));
+    assert_eq!((soft, hard), (25, 25));
+}
+
+#[test]
+fn compute_time_limits_honors_explicit_movestogo_below_estimate_floor() {
+    // `movestogo 1` is the last move before a time control: the engine
+    // should budget most of the clock (bounded by the soft/hard caps),
+    // not divide it by the internal 10-move estimate floor.
+    let config = TimeConfig {
+        move_overhead_ms: 50,
+        soft_time_percent: 80,
+        hard_time_percent: 90,
+        default_max_nodes: 0,
+    };
+    let (soft_one, _) = compute_incremental_limits(60_000, 0, Some(1), &config);
+    let (soft_ten, _) = compute_incremental_limits(60_000, 0, Some(10), &config);
+
+    assert!(
+        soft_one > soft_ten,
+        "movestogo 1 should budget more than movestogo 10: {soft_one} vs {soft_ten}"
+    );
 }
 
 #[test]

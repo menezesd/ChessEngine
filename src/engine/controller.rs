@@ -98,7 +98,7 @@ impl EngineController {
         self.stop_search();
         self.board = Board::new();
         let mut state = self.search_state.lock();
-        state.new_search();
+        state.new_game();
     }
 
     /// Stop any active search
@@ -148,15 +148,44 @@ impl EngineController {
         Some(f(&self.search_state.lock()))
     }
 
+    /// Execute a closure with mutable access to the search state without
+    /// blocking. Returns `None` when a search currently holds the lock.
+    ///
+    /// The search thread holds the state lock for the full duration of a
+    /// search, so protocol handlers that may run mid-search (`debug`, `uci`,
+    /// `eval`) must use this instead of the blocking accessors: a blocking
+    /// lock would freeze the protocol loop and it could never process the
+    /// `stop` that ends the search.
+    pub fn try_with_search_state<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut SearchState) -> R,
+    {
+        self.search_state.try_lock().map(|mut state| f(&mut state))
+    }
+
+    /// Execute a closure with immutable access to the search state without
+    /// blocking. Returns `None` when a search currently holds the lock.
+    pub fn try_with_search_state_ref<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&SearchState) -> R,
+    {
+        self.search_state.try_lock().map(|state| f(&state))
+    }
+
     /// Resize the transposition table
     pub fn resize_hash(&mut self, mb: usize) {
         self.stop_search();
         self.with_search_state(|state| state.reset_tables(mb));
     }
 
-    /// Set trace/debug mode
+    /// Set trace/debug mode.
+    ///
+    /// Non-blocking: `debug` may arrive while a search holds the state lock
+    /// (the UCI spec allows it "also when the engine is thinking"). A running
+    /// search snapshots the trace flag at start anyway, so skipping the
+    /// update in that case loses nothing; the caller can retry when idle.
     pub fn set_trace(&mut self, trace: bool) {
-        self.with_search_state(|state| state.set_trace(trace));
+        self.try_with_search_state(|state| state.set_trace(trace));
     }
 
     /// Set maximum nodes for search

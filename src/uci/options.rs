@@ -75,14 +75,28 @@ impl UciOptions {
     }
 
     pub fn print(&self, state: &SearchState) {
-        println!("id name chess_engine");
-        println!("id author Dean Menezes");
+        Self::print_id();
 
         self.print_engine_options();
         self.print_nnue_options(state);
         Self::print_search_options(state.params());
 
         println!("uciok");
+    }
+
+    /// Print id and engine-level options without reading `SearchState`.
+    ///
+    /// Fallback for a `uci` command that arrives while a running search
+    /// holds the state lock: the handshake must still complete with `uciok`.
+    pub fn print_basic(&self) {
+        Self::print_id();
+        self.print_engine_options();
+        println!("uciok");
+    }
+
+    fn print_id() {
+        println!("id name chess_engine");
+        println!("id author Dean Menezes");
     }
 
     fn print_engine_options(&self) {

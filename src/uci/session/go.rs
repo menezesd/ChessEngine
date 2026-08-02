@@ -62,6 +62,14 @@ impl UciSession {
 
     /// Handle the "go" command - start a search.
     pub(super) fn handle_go(&mut self, params: &GoParams) {
+        // Stop any active search before touching the search state: the
+        // search thread holds the state lock while running, so calling
+        // `set_max_nodes` first would block the protocol loop forever.
+        self.engine.stop_search();
+        // Re-apply the debug flag in case `debug` arrived mid-search, when
+        // the non-blocking `set_trace` cannot reach the locked state.
+        self.engine.set_trace(self.state.debug);
+
         let plan = self.build_go_plan(params, self.engine.board().white_to_move());
 
         self.engine.set_max_nodes(plan.max_nodes);
