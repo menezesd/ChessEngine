@@ -55,7 +55,7 @@ impl SimpleSearchContext<'_> {
                 estimated_nodes.saturating_mul(1000).checked_div(nps)
             } {
                 let remaining = self.time_limit_ms.saturating_sub(elapsed);
-                if estimated_time > remaining * 2 {
+                if estimated_time > remaining.saturating_mul(2) {
                     return true;
                 }
             }

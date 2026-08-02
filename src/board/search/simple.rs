@@ -545,12 +545,6 @@ impl SimpleSearchContext<'_> {
                 continue;
             }
 
-            if is_quiet && quiets_count < 64 {
-                // Track quiet moves for negative history (only if not the cutoff move)
-                quiets_tried[quiets_count] = m;
-                quiets_count += 1;
-            }
-
             // Get the piece that's moving for continuation history (before make_move)
             let moving_piece = self.board.piece_at(m.from()).map(|(_, p)| p);
 
@@ -589,6 +583,14 @@ impl SimpleSearchContext<'_> {
             if self.should_prune_quiet(&move_ctx, node, depth, moves_tried, alpha) {
                 self.board.unmake_move(m, info);
                 continue;
+            }
+
+            // Track quiet moves for negative history on a later beta cutoff.
+            // Only moves that are actually searched belong here: penalizing
+            // futility/LMP-pruned moves would poison the history tables.
+            if is_quiet && quiets_count < 64 {
+                quiets_tried[quiets_count] = m;
+                quiets_count += 1;
             }
 
             // LMR reduction
@@ -1097,7 +1099,7 @@ impl SimpleSearchContext<'_> {
     }
 
     /// Probe TT and check for cutoff.
-    /// Returns (`tt_move`, `tt_score`, `tt_bound`, `Option<cutoff_score>`)
+    /// Returns (`tt_move`, `tt_score`, `tt_bound`, `tt_depth`, `Option<cutoff_score>`)
     fn probe_tt_for_cutoff(
         &self,
         depth: u32,
@@ -1106,14 +1108,15 @@ impl SimpleSearchContext<'_> {
         ply: usize,
         is_pv: bool,
         excluded_move_active: bool,
-    ) -> (Move, i32, BoundType, Option<i32>) {
+    ) -> (Move, i32, BoundType, u32, Option<i32>) {
         let Some(entry) = self.state.tables.tt.probe(self.board.hash) else {
-            return (EMPTY_MOVE, 0, BoundType::Exact, None);
+            return (EMPTY_MOVE, 0, BoundType::Exact, 0, None);
         };
 
         let tt_move = entry.best_move().unwrap_or(EMPTY_MOVE);
         let tt_score = score_from_tt(entry.score(), ply);
         let tt_bound = entry.bound_type();
+        let tt_depth = entry.depth();
 
         // Check for cutoff
         if !excluded_move_active && entry.depth() >= depth && !self.is_repetition() {
@@ -1141,10 +1144,10 @@ impl SimpleSearchContext<'_> {
                     }
                 }
             };
-            return (tt_move, tt_score, tt_bound, cutoff);
+            return (tt_move, tt_score, tt_bound, tt_depth, cutoff);
         }
 
-        (tt_move, tt_score, tt_bound, None)
+        (tt_move, tt_score, tt_bound, tt_depth, None)
     }
 
     /// Compute LMR reduction for a move.
@@ -1271,7 +1274,7 @@ impl SimpleSearchContext<'_> {
         }
 
         // Probe TT for best move and potential cutoff
-        let (tt_move, tt_score, tt_bound, tt_cutoff) =
+        let (tt_move, tt_score, tt_bound, tt_depth, tt_cutoff) =
             self.probe_tt_for_cutoff(depth, alpha, beta, ply, is_pv, excluded_move_active);
         node.tt_move = tt_move;
         node.tt_score = tt_score;
@@ -1328,6 +1331,42 @@ impl SimpleSearchContext<'_> {
         }
 
         // ========================================================================
+        // SINGULAR EXTENSION
+        // ========================================================================
+        // If we have a reliable TT move, check if it's singular (much better than
+        // alternatives). If so, extend its search by 1 ply. This must run before
+        // the staged TT-move search below: the staged search is the only place
+        // the TT move is searched on that path, so an extension computed later
+        // would never apply.
+        if !excluded_move_active
+            && !is_root
+            && depth >= SINGULAR_MIN_DEPTH
+            && tt_move != EMPTY_MOVE
+            && tt_depth + 3 >= depth
+            && tt_score.abs() < MATE_THRESHOLD
+            && matches!(tt_bound, BoundType::LowerBound | BoundType::Exact)
+            && self.board.is_legal_move(tt_move)
+        {
+            let singular_beta = tt_score - SINGULAR_MARGIN * depth as i32;
+            let singular_depth = (depth - 1) / 2;
+
+            // Search with TT move excluded
+            let singular_score = self.alphabeta(
+                singular_depth,
+                singular_beta - 1,
+                singular_beta,
+                false,
+                ply,
+                tt_move,
+            );
+
+            if singular_score < singular_beta {
+                // TT move is singular - extend it
+                node.singular_extension = 1;
+            }
+        }
+
+        // ========================================================================
         // STAGED MOVE GENERATION: Try TT move before generating all moves
         // ========================================================================
         // After node-level pruning, try TT move first. If it causes a beta cutoff,
@@ -1372,37 +1411,6 @@ impl SimpleSearchContext<'_> {
             } else {
                 0 // Stalemate
             };
-        }
-
-        // ========================================================================
-        // SINGULAR EXTENSION
-        // ========================================================================
-        // If we have a reliable TT move, check if it's singular (much better than
-        // alternatives). If so, extend its search by 1 ply.
-        if !excluded_move_active
-            && !is_root
-            && depth >= SINGULAR_MIN_DEPTH
-            && tt_move != EMPTY_MOVE
-            && tt_score.abs() < MATE_THRESHOLD
-            && matches!(tt_bound, BoundType::LowerBound | BoundType::Exact)
-        {
-            let singular_beta = tt_score - SINGULAR_MARGIN * depth as i32;
-            let singular_depth = (depth - 1) / 2;
-
-            // Search with TT move excluded
-            let singular_score = self.alphabeta(
-                singular_depth,
-                singular_beta - 1,
-                singular_beta,
-                false,
-                ply,
-                tt_move,
-            );
-
-            if singular_score < singular_beta {
-                // TT move is singular - extend it
-                node.singular_extension = 1;
-            }
         }
 
         // Internal Iterative Reduction (IIR)
@@ -1648,7 +1656,7 @@ mod evaluation_tests {
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };
 
-        let (_, score, _, cutoff) =
+        let (_, score, _, _, cutoff) =
             ctx.probe_tt_for_cutoff(4, -SCORE_INFINITE, SCORE_INFINITE, 3, false, false);
 
         assert_eq!(score, MATE_SCORE - 3);
