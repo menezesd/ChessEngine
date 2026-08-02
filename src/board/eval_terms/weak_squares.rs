@@ -83,10 +83,12 @@ impl Board {
         (mg, eg)
     }
 
-    /// Half-board masks for each color (our half = opponent's side for outposts/holes)
+    /// Each color's own half of the board. Holes live in one's own
+    /// territory: they are the squares an advanced enemy piece can occupy
+    /// without ever being driven off by a pawn.
     const HALF_BOARD: [u64; 2] = [
-        0xFFFF_FFFF_0000_0000u64, // White: ranks 5-8
-        0x0000_0000_FFFF_FFFFu64, // Black: ranks 1-4
+        0x0000_0000_FFFF_FFFFu64, // White: ranks 1-4
+        0xFFFF_FFFF_0000_0000u64, // Black: ranks 5-8
     ];
 
     /// Find holes in a color's position.
