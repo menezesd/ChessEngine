@@ -79,8 +79,17 @@ impl SearchClock {
 pub struct SearchConfig {
     /// Maximum depth to search (None = unlimited, defaults to 64)
     pub max_depth: Option<u32>,
-    /// Time limit in milliseconds (0 = unlimited)
+    /// Soft time limit in milliseconds (0 = unlimited). The search aims to
+    /// stop here, but a running iteration may overrun it (bounded by the
+    /// hard limit) when the best move is unstable or the score is dropping.
     pub time_limit_ms: u64,
+    /// Hard time limit in milliseconds (0 = none). Absolute mid-tree abort
+    /// budget; when 0, the soft limit aborts mid-tree as well.
+    pub hard_time_limit_ms: u64,
+    /// Optional live clock shared with the controller. When present, the
+    /// search reads its deadlines instead of the static millisecond limits,
+    /// so a `ponderhit` reset takes effect on the running search.
+    pub clock: Option<Arc<SearchClock>>,
     /// Node limit (0 = unlimited)
     pub node_limit: u64,
     /// Whether to extract ponder move from TT after search
@@ -96,6 +105,8 @@ impl Default for SearchConfig {
         SearchConfig {
             max_depth: None,
             time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
             node_limit: 0,
             extract_ponder: true,
             info_callback: None,
@@ -126,12 +137,15 @@ impl SearchConfig {
     /// Create a config from `SearchLimits`
     #[must_use]
     pub fn from_limits(limits: &SearchLimits) -> Self {
-        let (_, soft_deadline, _) = limits.clock.snapshot();
-        let time_limit_ms = soft_deadline.map_or(0, |deadline| {
-            deadline_remaining_ms(deadline, Instant::now())
-        });
+        let (_, soft_deadline, hard_deadline) = limits.clock.snapshot();
+        let now = Instant::now();
+        let time_limit_ms = soft_deadline.map_or(0, |deadline| deadline_remaining_ms(deadline, now));
+        let hard_time_limit_ms =
+            hard_deadline.map_or(0, |deadline| deadline_remaining_ms(deadline, now));
         SearchConfig {
             time_limit_ms,
+            hard_time_limit_ms,
+            clock: Some(Arc::clone(&limits.clock)),
             ..Default::default()
         }
     }

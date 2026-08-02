@@ -41,6 +41,10 @@ use super::super::Piece;
 
 const SHORT_TIME_FUTILITY_LIMIT_MS: u64 = 300;
 const SHORT_TIME_FUTILITY_MARGIN: i32 = 130;
+/// How far past the soft time target a running iteration may continue when
+/// the hard budget is known. Covers the 1.3x/1.4x iteration-start
+/// extensions for unstable positions; the hard budget still caps it.
+const SOFT_OVERRUN_FACTOR: u64 = 2;
 const STATIC_TRACE_MAX_PLY: usize = 8;
 const STATIC_TRACE_NODE_INTERVAL_LOG2: u32 = 6;
 
@@ -172,7 +176,17 @@ pub struct SimpleSearchContext<'a> {
     pub state: &'a mut SearchState,
     pub stop: &'a AtomicBool,
     pub start_time: Instant,
+    /// Soft time target in milliseconds (0 = untimed).
     pub time_limit_ms: u64,
+    /// Hard time budget in milliseconds (0 = unknown). When known, a
+    /// running iteration may overrun the soft target up to
+    /// `SOFT_OVERRUN_FACTOR`x (never past this budget) so the stability
+    /// and score-drop time extensions can take effect.
+    pub hard_time_limit_ms: u64,
+    /// Optional live clock shared with the controller. When present, its
+    /// deadlines override the static millisecond limits above, so a
+    /// `ponderhit` reset re-times the running search.
+    pub clock: Option<std::sync::Arc<crate::board::search::SearchClock>>,
     pub node_limit: u64,
     pub nodes: u64,
     pub futility_margin: i32,
@@ -705,6 +719,44 @@ impl SimpleSearchContext<'_> {
         best_score
     }
 
+    /// Current `(elapsed, soft, hard)` time budget in milliseconds.
+    ///
+    /// With a live clock, deadlines and the start instant come from it, so
+    /// a `ponderhit` reset re-times the search from the hit; otherwise the
+    /// static limits captured at search start apply. A zero soft budget
+    /// means untimed.
+    pub(super) fn time_budget_ms(&self) -> (u64, u64, u64) {
+        let to_ms = |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        if let Some(clock) = &self.clock {
+            let (start, soft_deadline, hard_deadline) = clock.snapshot();
+            let elapsed = to_ms(Instant::now().saturating_duration_since(start));
+            let soft =
+                soft_deadline.map_or(0, |d| to_ms(d.saturating_duration_since(start)));
+            let hard =
+                hard_deadline.map_or(0, |d| to_ms(d.saturating_duration_since(start)));
+            (elapsed, soft, hard)
+        } else {
+            let elapsed = to_ms(self.start_time.elapsed());
+            (elapsed, self.time_limit_ms, self.hard_time_limit_ms)
+        }
+    }
+
+    /// Mid-tree time abort budget.
+    ///
+    /// Without a known hard budget this is exactly the soft target
+    /// (legacy behavior for direct callers). With one, the iteration may
+    /// run to `min(soft * SOFT_OVERRUN_FACTOR, hard)`: iteration-start
+    /// decisions still key on the soft target, so this headroom is what
+    /// lets an unstable position actually receive extra time.
+    #[inline]
+    fn in_tree_time_cap_ms(soft_ms: u64, hard_ms: u64) -> u64 {
+        if hard_ms > 0 {
+            soft_ms.saturating_mul(SOFT_OVERRUN_FACTOR).min(hard_ms)
+        } else {
+            soft_ms
+        }
+    }
+
     /// Check if we should stop searching
     #[inline]
     fn should_stop(&self) -> bool {
@@ -721,9 +773,9 @@ impl SimpleSearchContext<'_> {
         if self.node_limit > 0 && self.nodes >= self.node_limit {
             return true;
         }
-        if self.time_limit_ms > 0 && self.nodes.trailing_zeros() >= 10 {
-            let elapsed = self.start_time.elapsed().as_millis() as u64;
-            if elapsed >= self.time_limit_ms {
+        if (self.time_limit_ms > 0 || self.clock.is_some()) && self.nodes.trailing_zeros() >= 10 {
+            let (elapsed, soft_ms, hard_ms) = self.time_budget_ms();
+            if soft_ms > 0 && elapsed >= Self::in_tree_time_cap_ms(soft_ms, hard_ms) {
                 return true;
             }
         }
@@ -1544,6 +1596,8 @@ mod evaluation_tests {
             stop: &stop,
             start_time: Instant::now(),
             time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
             node_limit: 0,
             nodes: 0,
             futility_margin,
@@ -1572,6 +1626,8 @@ mod evaluation_tests {
             stop: &stop,
             start_time: Instant::now(),
             time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
             node_limit: 0,
             nodes: 0,
             futility_margin,
@@ -1643,6 +1699,8 @@ mod evaluation_tests {
             stop: &stop,
             start_time: Instant::now(),
             time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
             node_limit: 0,
             nodes: 0,
             futility_margin,
@@ -1664,6 +1722,51 @@ mod evaluation_tests {
     }
 
     #[test]
+    fn iteration_overruns_soft_target_only_within_hard_budget() {
+        let mut board = Board::new();
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let futility_margin = state.params.futility_margin;
+        let started_earlier = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(50))
+            .expect("process uptime exceeds 50ms");
+        let mut ctx = SimpleSearchContext {
+            board: &mut board,
+            state: &mut state,
+            stop: &stop,
+            start_time: started_earlier,
+            time_limit_ms: 40,
+            hard_time_limit_ms: 0,
+            clock: None,
+            node_limit: 0,
+            nodes: 0,
+            futility_margin,
+            initial_depth: 1,
+            static_eval: [0; MAX_PLY],
+            previous_move: [EMPTY_MOVE; MAX_PLY],
+            previous_piece: [None; MAX_PLY],
+            info_callback: None,
+            root_moves: Vec::new(),
+            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+        };
+
+        // Without a hard budget the soft target aborts mid-tree (legacy).
+        assert!(ctx.should_stop(), "soft target alone must abort at 40ms");
+
+        // A generous hard budget allows up to 2x the soft target.
+        ctx.hard_time_limit_ms = 1_000;
+        assert!(
+            !ctx.should_stop(),
+            "50ms elapsed is within the 80ms overrun cap"
+        );
+
+        // The hard budget always wins over the overrun factor.
+        ctx.hard_time_limit_ms = 45;
+        assert!(ctx.should_stop(), "hard budget of 45ms must abort at 50ms");
+    }
+
+    #[test]
     fn search_ply_limit_returns_static_score_without_descending() {
         let mut board = Board::new();
         let expected = board.evaluate_simple();
@@ -1676,6 +1779,8 @@ mod evaluation_tests {
             stop: &stop,
             start_time: Instant::now(),
             time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
             node_limit: 0,
             nodes: 0,
             futility_margin,

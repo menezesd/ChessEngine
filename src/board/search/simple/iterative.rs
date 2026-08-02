@@ -21,20 +21,21 @@ fn clamp_search_depth(max_depth: u32) -> u32 {
 impl SimpleSearchContext<'_> {
     /// Check if we should stop the current iteration based on time management.
     /// Returns true if we should stop iterating.
+    ///
+    /// Reads the live time budget so deadlines installed by `ponderhit`
+    /// govern the iterations that follow it.
     fn should_stop_iteration(
         &self,
         depth: u32,
-        soft_time_ms: u64,
         stability_count: u32,
         score: i32,
         previous_score: i32,
         prev_iter_nodes: u64,
     ) -> bool {
-        if depth <= 4 || self.time_limit_ms == 0 {
+        let (elapsed, soft_time_ms, _) = self.time_budget_ms();
+        if depth <= 4 || soft_time_ms == 0 {
             return false;
         }
-
-        let elapsed = self.start_time.elapsed().as_millis() as u64;
 
         // Base soft time, adjusted for stability and score changes
         let mut adjusted_soft_time = soft_time_ms;
@@ -54,7 +55,7 @@ impl SimpleSearchContext<'_> {
                 let estimated_nodes = prev_iter_nodes.saturating_mul(25) / 10;
                 estimated_nodes.saturating_mul(1000).checked_div(nps)
             } {
-                let remaining = self.time_limit_ms.saturating_sub(elapsed);
+                let remaining = soft_time_ms.saturating_sub(elapsed);
                 if estimated_time > remaining.saturating_mul(2) {
                     return true;
                 }
@@ -86,11 +87,6 @@ impl SimpleSearchContext<'_> {
         let mut stability_count = 0u32;
         let mut prev_iter_nodes = 0u64;
 
-        // `time_limit_ms` is the controller's soft deadline. Stability-based
-        // adjustments below decide whether to stop earlier; halving it here
-        // would otherwise discard half of the allotted thinking time.
-        let soft_time_ms = self.time_limit_ms;
-
         // Reset history at start of search
         self.state.tables.reset_history();
         self.state.stats.seldepth = 0;
@@ -106,7 +102,6 @@ impl SimpleSearchContext<'_> {
             // Soft time check: if we've used enough time and have a stable best move, stop
             if self.should_stop_iteration(
                 depth,
-                soft_time_ms,
                 stability_count,
                 score,
                 previous_score,
@@ -239,11 +234,14 @@ fn record_zero_node_root_result(state: &mut SearchState) {
 }
 
 /// Run the main search algorithm
+#[allow(clippy::too_many_arguments)]
 pub fn simple_search(
     board: &mut crate::board::Board,
     state: &mut SearchState,
     max_depth: u32,
     time_limit_ms: u64,
+    hard_time_limit_ms: u64,
+    clock: Option<std::sync::Arc<crate::board::search::SearchClock>>,
     node_limit: u64,
     stop: &AtomicBool,
     info_callback: Option<SearchInfoCallback>,
@@ -253,6 +251,8 @@ pub fn simple_search(
         state,
         max_depth,
         time_limit_ms,
+        hard_time_limit_ms,
+        clock,
         node_limit,
         stop,
         info_callback,
@@ -268,6 +268,8 @@ pub fn simple_search_multipv(
     state: &mut SearchState,
     max_depth: u32,
     time_limit_ms: u64,
+    hard_time_limit_ms: u64,
+    clock: Option<std::sync::Arc<crate::board::search::SearchClock>>,
     node_limit: u64,
     stop: &AtomicBool,
     info_callback: Option<SearchInfoCallback>,
@@ -324,6 +326,8 @@ pub fn simple_search_multipv(
         stop,
         start_time: Instant::now(),
         time_limit_ms,
+        hard_time_limit_ms,
+        clock,
         node_limit,
         nodes: 0,
         futility_margin,

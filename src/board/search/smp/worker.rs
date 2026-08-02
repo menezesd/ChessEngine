@@ -118,6 +118,8 @@ pub struct WorkerResult {
 pub(super) struct WorkerSearchConfig {
     pub(super) max_depth: u32,
     pub(super) time_limit_ms: u64,
+    pub(super) hard_time_limit_ms: u64,
+    pub(super) clock: Option<Arc<super::super::SearchClock>>,
     pub(super) node_limit: u64,
     pub(super) info_callback: Option<SearchInfoCallback>,
 }
@@ -179,6 +181,8 @@ pub(super) fn run_worker(
         &mut local_state,
         search_depth,
         config.time_limit_ms,
+        config.hard_time_limit_ms,
+        config.clock,
         config.node_limit,
         &shared.stop,
         config.info_callback,

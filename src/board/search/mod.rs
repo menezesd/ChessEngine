@@ -80,6 +80,8 @@ pub fn search(
             state,
             max_depth,
             config.time_limit_ms,
+            config.hard_time_limit_ms,
+            config.clock.clone(),
             config.node_limit,
             stop,
             info_callback,
@@ -102,6 +104,15 @@ pub fn search(
     let starting_total_nodes = state.stats.total_nodes;
     let search_start = Instant::now();
 
+    // Split the soft budget evenly across PV lines. Giving each line the
+    // full remaining budget would let line 1 consume everything and leave
+    // nothing to report for the other lines under a clock.
+    let per_line_soft_ms = if config.time_limit_ms == 0 {
+        0
+    } else {
+        (config.time_limit_ms / u64::from(multi_pv)).max(1)
+    };
+
     for pv_index in 1..=multi_pv {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             break;
@@ -117,22 +128,36 @@ pub fn search(
             }
             remaining
         };
+        let elapsed_ms = u64::try_from(search_start.elapsed().as_millis()).unwrap_or(u64::MAX);
         let time_limit_ms = if config.time_limit_ms == 0 {
             0
         } else {
-            let elapsed_ms = u64::try_from(search_start.elapsed().as_millis()).unwrap_or(u64::MAX);
             let remaining = config.time_limit_ms.saturating_sub(elapsed_ms);
+            if remaining == 0 {
+                break;
+            }
+            remaining.min(per_line_soft_ms)
+        };
+        let hard_time_limit_ms = if config.hard_time_limit_ms == 0 {
+            0
+        } else {
+            let remaining = config.hard_time_limit_ms.saturating_sub(elapsed_ms);
             if remaining == 0 {
                 break;
             }
             remaining
         };
 
+        // The per-line budgets above are static by design: a live clock
+        // would hand each line the full remaining budget and defeat the
+        // even split.
         let best_move = simple::simple_search_multipv(
             board,
             state,
             max_depth,
             time_limit_ms,
+            hard_time_limit_ms,
+            None,
             node_limit,
             stop,
             info_callback.clone(),
@@ -169,7 +194,7 @@ pub fn find_best_move(
     max_depth: u32,
     stop: &AtomicBool,
 ) -> Option<Move> {
-    simple::simple_search(board, state, max_depth, 0, 0, stop, None)
+    simple::simple_search(board, state, max_depth, 0, 0, None, 0, stop, None)
 }
 
 /// Find best move with fixed depth limit, returning ponder move too

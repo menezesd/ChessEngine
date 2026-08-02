@@ -34,6 +34,14 @@ impl EngineController {
         }
     }
 
+    fn search_hard_time_limit_ms(params: &SearchParams) -> u64 {
+        if Self::is_timed_search(params) {
+            params.hard_time_ms
+        } else {
+            0
+        }
+    }
+
     fn should_spawn_hard_stop_timer(params: &SearchParams) -> bool {
         Self::is_timed_search(params) && params.hard_time_ms > 0
     }
@@ -73,6 +81,7 @@ impl EngineController {
 
         if Self::is_timed_search(params) && params.soft_time_ms > 0 {
             config.time_limit_ms = params.soft_time_ms;
+            config.hard_time_limit_ms = params.hard_time_ms;
         }
         if node_limit > 0 {
             config = config.with_nodes(node_limit);
@@ -178,6 +187,8 @@ impl EngineController {
                     .unwrap_or(DEFAULT_MAX_DEPTH)
                     .min(DEFAULT_MAX_DEPTH),
                 time_limit_ms: Self::search_time_limit_ms(&params),
+                hard_time_limit_ms: Self::search_hard_time_limit_ms(&params),
+                clock: Some(Arc::clone(&clock)),
                 node_limit,
                 info_callback,
                 ponder: params.ponder,
@@ -202,7 +213,9 @@ impl EngineController {
                 .expect("failed to spawn search thread");
             handle
         } else {
-            let config = self.build_search_config(&params, node_limit);
+            let mut config = self.build_search_config(&params, node_limit);
+            // Live clock: lets a ponderhit reset re-time the running search.
+            config.clock = Some(Arc::clone(&clock));
             let mut search_board = search_board;
 
             let handle = thread::Builder::new()
@@ -300,6 +313,29 @@ mod tests {
         };
 
         assert!(EngineController::should_spawn_hard_stop_timer(&params));
+    }
+
+    #[test]
+    fn ponderhit_re_times_a_running_ponder_search() {
+        let (sender, receiver) = mpsc::channel();
+        let mut controller = EngineController::new(1);
+        controller.start_search(
+            SearchParams {
+                soft_time_ms: 60,
+                hard_time_ms: 120,
+                ponder: true,
+                ..SearchParams::default()
+            },
+            move |_| sender.send(()).expect("test receiver should remain alive"),
+        );
+
+        std::thread::sleep(Duration::from_millis(50));
+        controller.ponderhit();
+
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("search should finish shortly after ponderhit installs deadlines");
+        controller.stop_search();
     }
 
     #[test]

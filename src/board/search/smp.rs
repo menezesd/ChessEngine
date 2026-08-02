@@ -32,8 +32,12 @@ pub struct SmpConfig {
     pub num_threads: usize,
     /// Maximum depth to search
     pub max_depth: u32,
-    /// Time limit in milliseconds (0 = unlimited)
+    /// Soft time limit in milliseconds (0 = unlimited)
     pub time_limit_ms: u64,
+    /// Hard time limit in milliseconds (0 = none)
+    pub hard_time_limit_ms: u64,
+    /// Optional live clock shared with the controller (see `SearchConfig`)
+    pub clock: Option<Arc<super::SearchClock>>,
     /// Node limit (0 = unlimited)
     pub node_limit: u64,
     /// Optional callback for iteration info
@@ -50,6 +54,8 @@ impl Default for SmpConfig {
             num_threads: 1,
             max_depth: DEFAULT_MAX_DEPTH,
             time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
             node_limit: 0,
             info_callback: None,
             ponder: false,
@@ -72,6 +78,8 @@ impl SmpConfig {
         WorkerSearchConfig {
             max_depth: self.max_depth,
             time_limit_ms: self.time_limit_ms,
+            hard_time_limit_ms: self.hard_time_limit_ms,
+            clock: self.clock.clone(),
             node_limit: self.node_limit,
             info_callback: self.info_callback.clone(),
         }
@@ -188,6 +196,8 @@ pub fn smp_search(
         let search_config = SearchConfig {
             max_depth: Some(config.max_depth),
             time_limit_ms: config.time_limit_ms,
+            hard_time_limit_ms: config.hard_time_limit_ms,
+            clock: config.clock.clone(),
             node_limit: config.node_limit,
             extract_ponder: true,
             info_callback: config.info_callback,
