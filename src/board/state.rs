@@ -138,6 +138,38 @@ impl Board {
         self.reset_repetition_history();
     }
 
+    /// Resync the king-square cache after removing a King through the
+    /// single-square editing API.
+    ///
+    /// `remove_piece` clears the bitboard/mailbox but, unlike `set_piece`,
+    /// never touches `king_square` -- it is a hot path shared with
+    /// `make_move`/`unmake_move`, where a King relocation always pairs a
+    /// `remove_piece` with a `set_piece` that fixes the cache back up
+    /// within the same operation (castling unmake even orders them
+    /// `set_piece` then `remove_piece`, so resetting unconditionally on
+    /// every King removal would clobber the value it just restored).  The
+    /// editing API has no such pairing guarantee -- a caller can remove a
+    /// King and never place one, or overwrite its square with an unrelated
+    /// piece afterward -- so it must resync explicitly instead.
+    fn sync_king_square_after_removal(&mut self, color: Color, removed_piece: Piece) {
+        if removed_piece != Piece::King {
+            return;
+        }
+        let c_idx = color.index();
+        // Falls back to the standard back-rank square, matching `clear()`,
+        // when no King of this color remains on the board.
+        let default_sq = if color == Color::White {
+            Square::new(0, 4)
+        } else {
+            Square::new(7, 4)
+        };
+        self.king_square[c_idx] = self
+            .pieces_of(color, Piece::King)
+            .iter()
+            .next()
+            .unwrap_or(default_sq);
+    }
+
     /// Place a piece on the board (for edit mode)
     /// This updates bitboards, hash, and incremental eval
     pub fn place_piece(&mut self, sq: Square, color: Color, piece: Piece) {
@@ -148,6 +180,7 @@ impl Board {
             self.remove_piece(sq, old_color, old_piece);
             self.hash ^= ZOBRIST.piece_keys[old_piece.index()][old_color.index()][sq.index()];
             self.remove_piece_from_eval(sq, old_color, old_piece);
+            self.sync_king_square_after_removal(old_color, old_piece);
         }
 
         // Now add the new piece
@@ -166,6 +199,7 @@ impl Board {
             self.remove_piece(sq, color, piece);
             self.hash ^= ZOBRIST.piece_keys[piece.index()][color.index()][sq.index()];
             self.remove_piece_from_eval(sq, color, piece);
+            self.sync_king_square_after_removal(color, piece);
             self.reset_repetition_history();
         }
     }
@@ -280,5 +314,72 @@ impl Board {
     /// Count pieces of a given type for a color
     pub(crate) fn piece_count(&self, color: Color, piece: Piece) -> u32 {
         self.pieces_of(color, piece).popcount()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Board, Color, Piece, Square};
+
+    #[test]
+    fn removing_a_relocated_king_does_not_leave_a_stale_square() {
+        // Move White's king away from its default square first, the way an
+        // edit-mode GUI would when correcting a position: king on g1, not e1.
+        let mut board = Board::empty();
+        board.place_piece(Square::new(0, 6), Color::White, Piece::King);
+        board.place_piece(Square::new(7, 4), Color::Black, Piece::King);
+        assert_eq!(board.find_king(Color::White), Square::new(0, 6));
+
+        // Remove the king without immediately replacing it, then place an
+        // unrelated piece on the now-vacated g1. Before this fix,
+        // king_square[White] stayed at g1, so find_king would return a
+        // square that now holds a Black rook instead of White's king.
+        board.remove_piece_at(Square::new(0, 6));
+        board.place_piece(Square::new(0, 6), Color::Black, Piece::Rook);
+
+        let cached = board.find_king(Color::White);
+        assert_ne!(
+            cached,
+            Square::new(0, 6),
+            "king_square must not still point at the square now holding a Black rook"
+        );
+        assert_ne!(
+            board.piece_at(cached),
+            Some((Color::Black, Piece::Rook)),
+            "find_king(White) must never resolve to a piece_at() that isn't White's king"
+        );
+    }
+
+    #[test]
+    fn relocating_a_king_via_remove_then_place_updates_the_cache() {
+        let mut board = Board::empty();
+        board.place_piece(Square::new(0, 4), Color::White, Piece::King);
+        board.place_piece(Square::new(7, 4), Color::Black, Piece::King);
+
+        board.remove_piece_at(Square::new(0, 4));
+        board.place_piece(Square::new(0, 2), Color::White, Piece::King);
+
+        assert_eq!(board.find_king(Color::White), Square::new(0, 2));
+        assert_eq!(
+            board.piece_at(board.find_king(Color::White)),
+            Some((Color::White, Piece::King))
+        );
+    }
+
+    #[test]
+    fn overwriting_a_king_square_with_a_new_piece_resyncs_the_cache() {
+        // place_piece's "remove the old occupant" branch is exercised when a
+        // king square is directly overwritten rather than cleared first.
+        let mut board = Board::empty();
+        board.place_piece(Square::new(0, 6), Color::White, Piece::King);
+        board.place_piece(Square::new(7, 4), Color::Black, Piece::King);
+
+        board.place_piece(Square::new(0, 6), Color::Black, Piece::Queen);
+
+        assert_ne!(board.find_king(Color::White), Square::new(0, 6));
+        assert_ne!(
+            board.piece_at(board.find_king(Color::White)),
+            Some((Color::Black, Piece::Queen))
+        );
     }
 }
