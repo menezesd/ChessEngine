@@ -138,6 +138,40 @@ proptest! {
         }
     }
 
+    /// Property: incrementally maintained eval state always matches a
+    /// from-scratch recomputation.
+    ///
+    /// `make_move`/`unmake_move` update `eval_mg`/`eval_eg`/`game_phase`
+    /// incrementally rather than recomputing them; a missed or
+    /// double-applied update on any single move type (capture, en passant,
+    /// castling, promotion) would drift the running score without
+    /// affecting move counts, so perft cannot catch it. This mirrors
+    /// `prop_hash_consistency` but checks the eval accumulators against
+    /// `recalculate_incremental_eval`, the from-scratch oracle.
+    #[test]
+    fn prop_incremental_eval_matches_recompute(seed in seed_strategy(), num_moves in move_count_strategy()) {
+        use rand::prelude::*;
+
+        let mut board = Board::new();
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        for _ in 0..num_moves {
+            let moves = board.generate_moves();
+            if moves.is_empty() {
+                break;
+            }
+            let idx = rng.gen_range(0..moves.len());
+            let mv = moves.as_slice()[idx];
+            board.make_move(mv);
+
+            let mut recomputed = board.clone();
+            recomputed.recalculate_incremental_eval();
+            prop_assert_eq!(board.eval_mg, recomputed.eval_mg);
+            prop_assert_eq!(board.eval_eg, recomputed.eval_eg);
+            prop_assert_eq!(board.game_phase, recomputed.game_phase);
+        }
+    }
+
     /// Property: FEN round-trip preserves position
     #[test]
     fn prop_fen_roundtrip(seed in seed_strategy(), num_moves in move_count_strategy()) {
