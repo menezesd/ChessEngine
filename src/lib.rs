@@ -86,7 +86,6 @@ pub mod board;
 pub mod engine;
 pub(crate) mod eval_math;
 pub mod pawn_hash;
-pub mod sync;
 pub(crate) mod table_size;
 pub mod timer;
 pub mod tt;
