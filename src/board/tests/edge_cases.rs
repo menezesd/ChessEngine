@@ -253,6 +253,20 @@ fn test_movelist_index() {
 }
 
 #[test]
+fn generate_moves_handles_the_known_maximum_mobility_position() {
+    // A deliberately composed (not reachable from a real game -- 24 white
+    // queens, far past the 9 obtainable through legal promotion) position
+    // known to have 271 legal moves, the highest documented count for any
+    // chess position. It comfortably exceeds move-buffer sizes tuned only
+    // against the ~218-move ceiling of positions reachable in real play;
+    // MoveList::push previously wrote past a 256-slot backing array here
+    // and panicked on out-of-bounds access.
+    let mut board =
+        Board::from_fen("QQQQQQBk/Q5RB/Q6Q/Q6Q/Q6Q/Q6Q/Q6Q/KQQQQQQQ w - - 0 1");
+    assert_eq!(board.generate_moves().len(), 271);
+}
+
+#[test]
 fn test_board_from_str() {
     let board: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
         .parse()

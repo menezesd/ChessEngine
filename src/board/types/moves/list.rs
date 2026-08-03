@@ -17,9 +17,23 @@ impl MoveList {
         }
     }
 
+    /// Append a move, silently discarding it if the list is already at
+    /// capacity.
+    ///
+    /// `MAX_MOVES` comfortably exceeds the ~218-move ceiling for any legal
+    /// chess position, so this never triggers during ordinary play. It can
+    /// be reached from externally supplied FEN/EPD input (`position fen`,
+    /// `setboard`) that packs far more sliding pieces onto the board than
+    /// any legal game allows, which parses successfully -- piece counts per
+    /// type are unbounded -- and can push pseudo-legal generation past 256
+    /// moves before legality filtering thins the list. Dropping the
+    /// overflow keeps that pathological-but-parseable input from crashing
+    /// the engine process.
     pub(crate) fn push(&mut self, mv: Move) {
-        self.moves[self.len] = mv;
-        self.len += 1;
+        if self.len < MAX_MOVES {
+            self.moves[self.len] = mv;
+            self.len += 1;
+        }
     }
 
     #[must_use]
@@ -135,5 +149,21 @@ impl Index<usize> for MoveList {
             self.len
         );
         &self.moves[idx]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MoveList, MAX_MOVES};
+    use crate::board::{Move, Square};
+
+    #[test]
+    fn push_drops_moves_past_capacity_instead_of_panicking() {
+        let mut list = MoveList::new();
+        let mv = Move::quiet(Square::new(0, 0), Square::new(0, 1));
+        for _ in 0..(MAX_MOVES + 10) {
+            list.push(mv);
+        }
+        assert_eq!(list.len(), MAX_MOVES);
     }
 }

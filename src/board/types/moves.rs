@@ -252,6 +252,13 @@ impl fmt::Display for Move {
     }
 }
 
-pub(crate) const MAX_MOVES: usize = 256;
+/// Bound on legal moves in any position, with headroom above the
+/// documented worst case. A single legal position is known to reach 271
+/// legal moves ("QQQQQQBk/Q5RB/Q6Q/Q6Q/Q6Q/Q6Q/Q6Q/KQQQQQQQ w - - 0 1"),
+/// far beyond the ~218-move ceiling for positions reachable from a real
+/// game; 256 was not enough. `MoveList::push` also bounds-checks so any
+/// future record, or an outright malformed FEN, degrades instead of
+/// panicking.
+pub(crate) const MAX_MOVES: usize = 512;
 pub(crate) const MAX_PLY: usize = 128;
 pub(crate) const EMPTY_MOVE: Move = Move::null();

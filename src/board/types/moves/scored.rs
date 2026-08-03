@@ -27,11 +27,16 @@ impl ScoredMoveList {
         }
     }
 
-    /// Add a scored move to the list.
+    /// Add a scored move to the list, silently discarding it if the list
+    /// is already at capacity. See `MoveList::push` for why this can be
+    /// reached (pathological FEN/EPD input) despite never happening in
+    /// ordinary play.
     #[inline]
     pub fn push(&mut self, mv: Move, score: i32) {
-        self.moves[self.len] = ScoredMove { mv, score };
-        self.len += 1;
+        if self.len < MAX_MOVES {
+            self.moves[self.len] = ScoredMove { mv, score };
+            self.len += 1;
+        }
     }
 
     /// Get the number of moves in the list.
