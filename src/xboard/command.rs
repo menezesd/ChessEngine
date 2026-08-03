@@ -62,8 +62,8 @@ pub enum XBoardCommand {
     ClearBoard,
     /// Place piece in edit mode (e.g., "Pa2")
     EditPiece(String),
-    /// Set side to move in edit mode
-    EditColor(char),
+    /// Toggle the side to move in edit mode (CECP `c`; sent bare, no argument)
+    EditColor,
     /// Computer plays itself
     Computer,
     /// Set random mode

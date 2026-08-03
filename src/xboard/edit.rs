@@ -65,9 +65,12 @@ impl XBoardHandler {
                 }
                 None
             }
-            XBoardCommand::EditColor(color) => {
+            XBoardCommand::EditColor => {
+                // CECP's edit-mode "c" is a bare toggle, not a color select:
+                // it flips which side subsequent piece-placement commands
+                // add to, starting from White.
                 if self.edit_mode {
-                    self.edit_white_to_move = *color == 'W' || *color == 'w';
+                    self.edit_white_to_move = !self.edit_white_to_move;
                 }
                 None
             }
@@ -130,8 +133,9 @@ fn parse_square(file: u8, rank: u8) -> Option<Square> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_edit_piece_command, parse_square, EditPieceCommand};
+    use super::{parse_edit_piece_command, parse_square, EditPieceCommand, XBoardCommand};
     use crate::board::{Piece, Square};
+    use crate::xboard::state::XBoardHandler;
 
     #[test]
     fn parses_place_piece_command() {
@@ -154,6 +158,19 @@ mod tests {
             }
             _ => panic!("expected remove command"),
         }
+    }
+
+    #[test]
+    fn edit_color_command_toggles_placement_side() {
+        let mut handler = XBoardHandler::new();
+        handler.handle_edit_command(&XBoardCommand::Edit);
+        assert!(handler.edit_white_to_move, "edit mode starts on White");
+
+        handler.handle_edit_command(&XBoardCommand::EditColor);
+        assert!(!handler.edit_white_to_move, "c toggles to Black");
+
+        handler.handle_edit_command(&XBoardCommand::EditColor);
+        assert!(handler.edit_white_to_move, "c toggles back to White");
     }
 
     #[test]

@@ -52,6 +52,7 @@ fn parse_basic_command(cmd_str: &str) -> Option<XBoardCommand> {
         "edit" => Some(XBoardCommand::Edit),
         "." => Some(XBoardCommand::EditDone),
         "#" => Some(XBoardCommand::ClearBoard),
+        "c" => Some(XBoardCommand::EditColor),
         "computer" => Some(XBoardCommand::Computer),
         "random" => Some(XBoardCommand::Random),
         "post" => Some(XBoardCommand::Post),
@@ -81,10 +82,6 @@ fn parse_arg_command(parts: &CommandParts<'_>) -> Option<XBoardCommand> {
         "ping" => parts.parsed(1).map(XBoardCommand::Ping),
         "memory" => parts.parsed(1).map(XBoardCommand::Memory),
         "cores" => parts.parsed(1).map(XBoardCommand::Cores),
-        "c" => parts
-            .get(1)
-            .and_then(|v| v.chars().next())
-            .map(XBoardCommand::EditColor),
         _ => None,
     }
 }

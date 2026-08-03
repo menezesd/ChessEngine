@@ -73,6 +73,15 @@ fn test_malformed_edit_piece_is_unknown() {
 }
 
 #[test]
+fn test_edit_color_toggle_is_bare_command() {
+    // CECP edit mode: "c" alone toggles the color; it takes no argument.
+    assert!(matches!(
+        parse_xboard_command("c"),
+        Some(XBoardCommand::EditColor)
+    ));
+}
+
+#[test]
 fn test_setboard() {
     match parse_xboard_command("setboard rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
     {
