@@ -167,10 +167,13 @@ impl Board {
                 break;
             }
 
-            depth += 1;
-            if depth >= MAX_DEPTH {
+            // Leave the last slot unused: the minimax pass below reads
+            // `gain[depth + 1]`, so a sequence ending exactly at the array
+            // boundary would read out of bounds.
+            if depth + 1 >= MAX_DEPTH {
                 break;
             }
+            depth += 1;
 
             // Find least valuable attacker
             let (lva_piece, lva_bb) = self.find_least_valuable_attacker(side_attackers, side_color);

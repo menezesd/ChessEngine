@@ -139,6 +139,14 @@ impl NnueNetwork {
 
     fn parse_payload(data: &[u8]) -> std::io::Result<(&[u8], usize)> {
         if data.starts_with(NETWORK_MAGIC) {
+            // The magic alone does not guarantee a complete header; a
+            // truncated file must fail cleanly, not panic on slicing.
+            if data.len() < HEADER_BYTES {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "truncated NNUE file header",
+                ));
+            }
             let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
             let input_size = u32::from_le_bytes(data[12..16].try_into().unwrap());
             let hidden_size = u32::from_le_bytes(data[16..20].try_into().unwrap());
@@ -401,6 +409,15 @@ mod tests {
     #[test]
     fn oversized_raw_network_is_rejected() {
         let data = vec![0; raw_network_bytes(BASE_INPUT_SIZE) + 2];
+        assert!(NnueNetwork::from_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn truncated_headered_network_errors_instead_of_panicking() {
+        assert!(NnueNetwork::from_bytes(NETWORK_MAGIC).is_err());
+
+        let mut data = NETWORK_MAGIC.to_vec();
+        data.extend_from_slice(&[0, 0, 0]);
         assert!(NnueNetwork::from_bytes(&data).is_err());
     }
 
