@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
-import re
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -15,84 +13,21 @@ from pathlib import Path
 import chess
 
 
-SCORE_CP_RE = re.compile(r"score cp (-?\d+)")
-SCORE_MATE_RE = re.compile(r"score mate (-?\d+)")
+if __package__:
+    from .uci_client import UCIClient
+else:
+    from uci_client import UCIClient
 
 
-class Stockfish:
+class Stockfish(UCIClient):
     def __init__(self, path: str, hash_mb: int):
-        self.proc = subprocess.Popen(
-            [path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
-        self.lines: queue.Queue[str] = queue.Queue()
-        threading.Thread(target=self._reader, daemon=True).start()
-        self.send("uci")
-        self.wait_for("uciok")
-        self.send("setoption name Threads value 1")
-        self.send(f"setoption name Hash value {hash_mb}")
-        self.send("isready")
-        self.wait_for("readyok")
-
-    def _reader(self) -> None:
-        assert self.proc.stdout is not None
-        for line in self.proc.stdout:
-            self.lines.put(line.rstrip("\n"))
-
-    def send(self, cmd: str) -> None:
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(cmd + "\n")
-        self.proc.stdin.flush()
-
-    def wait_for(self, token: str, timeout: float = 10.0) -> str:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if token in line:
-                return line
-        raise RuntimeError(f"timeout waiting for {token}")
+        super().__init__(path, ["Threads value 1", f"Hash value {hash_mb}"])
 
     def evaluate(self, fen: str, depth: int) -> int | None:
-        self.send("ucinewgame")
-        self.send(f"position fen {fen}")
-        self.send(f"go depth {depth}")
-        score: int | None = None
-        deadline = time.time() + 90.0
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if match := SCORE_CP_RE.search(line):
-                score = int(match.group(1))
-            elif match := SCORE_MATE_RE.search(line):
-                mate = int(match.group(1))
-                score = 30000 - min(abs(mate), 100) * 100
-                if mate < 0:
-                    score = -score
-            elif line.startswith("bestmove"):
-                break
+        score, _ = self.score_position(fen, f"go depth {depth}", timeout=90.0)
         if score is None:
             return None
-
-        board = chess.Board(fen)
-        # Stockfish reports from side-to-move perspective; store white perspective.
-        return score if board.turn == chess.WHITE else -score
-
-    def quit(self) -> None:
-        if self.proc.poll() is None:
-            self.send("quit")
-            try:
-                self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        return score if chess.Board(fen).turn == chess.WHITE else -score
 
 
 def parse_rows(path: Path, limit: int) -> list[tuple[str, str]]:

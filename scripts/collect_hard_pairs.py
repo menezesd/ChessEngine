@@ -2,76 +2,31 @@
 """Collect ranking pairs from EPD positions missed by a UCI engine."""
 
 import argparse
-import queue
-import subprocess
-import threading
-import time
 
 import chess
 
+if __package__:
+    from .uci_client import UCIClient
+else:
+    from uci_client import UCIClient
 
-class UCIEngine:
-    def __init__(self, path: str, options: list[str]):
-        self.proc = subprocess.Popen(
-            [path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        self.lines: queue.Queue[str] = queue.Queue()
-        threading.Thread(target=self._reader, daemon=True).start()
-        self.send("uci")
-        self.wait_for("uciok")
-        for option in options:
-            self.send(f"setoption name {option}")
-        self.send("isready")
-        self.wait_for("readyok")
 
-    def _reader(self):
-        for line in self.proc.stdout:
-            self.lines.put(line.rstrip("\n"))
-
-    def send(self, cmd: str):
-        self.proc.stdin.write(cmd + "\n")
-        self.proc.stdin.flush()
-
-    def wait_for(self, token: str, timeout: float = 10.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if token in line:
-                return line
-        raise RuntimeError(f"timeout waiting for {token}")
-
+class UCIEngine(UCIClient):
     def bestmove(self, fen: str, movetime_ms: int) -> chess.Move | None:
+        board = chess.Board(fen)
         self.send("ucinewgame")
         self.send(f"position fen {fen}")
-        self.send(f"go movetime {movetime_ms}")
-        deadline = time.time() + movetime_ms / 1000 + 10
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
+        for line in self.search_lines(f"go movetime {movetime_ms}", movetime_ms / 1000 + 10):
             if line.startswith("bestmove"):
                 parts = line.split()
-                if len(parts) < 2 or parts[1] == "(none)":
+                if len(parts) < 2 or parts[1] in {"(none)", "0000"}:
                     return None
-                return chess.Move.from_uci(parts[1])
+                try:
+                    move = chess.Move.from_uci(parts[1])
+                except ValueError:
+                    return None
+                return move if move in board.legal_moves else None
         return None
-
-    def quit(self):
-        if self.proc.poll() is None:
-            self.send("quit")
-            try:
-                self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
 
 
 def parse_epd(line: str):

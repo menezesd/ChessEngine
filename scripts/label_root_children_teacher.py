@@ -2,117 +2,58 @@
 """Create weighted child-position ranking pairs from root MultiPV teacher scores."""
 
 import argparse
-import queue
 import re
-import subprocess
-import threading
-import time
 
 import chess
 
+if __package__:
+    from .uci_client import UCIClient, exact_score
+else:
+    from uci_client import UCIClient, exact_score
 
-SCORE_CP_RE = re.compile(r"\bscore cp (-?\d+)")
-SCORE_MATE_RE = re.compile(r"\bscore mate (-?\d+)")
+
 MULTIPV_RE = re.compile(r"\bmultipv (\d+)")
 DEPTH_RE = re.compile(r"\bdepth (\d+)")
 
 
-class UCIEngine:
-    def __init__(self, path: str, options: list[str]):
-        self.proc = subprocess.Popen(
-            [path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        self.lines: queue.Queue[str] = queue.Queue()
-        threading.Thread(target=self._reader, daemon=True).start()
-        self.send("uci")
-        self.wait_for("uciok")
-        for option in options:
-            self.send(f"setoption name {option}")
-        self.send("isready")
-        self.wait_for("readyok")
-
-    def _reader(self):
-        for line in self.proc.stdout:
-            self.lines.put(line.rstrip("\n"))
-
-    def send(self, cmd: str):
-        self.proc.stdin.write(cmd + "\n")
-        self.proc.stdin.flush()
-
-    def wait_for(self, token: str, timeout: float = 10.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if token in line:
-                return line
-        raise RuntimeError(f"timeout waiting for {token}")
-
-    @staticmethod
-    def _score_from_info(line: str) -> int | None:
-        if match := SCORE_CP_RE.search(line):
-            return int(match.group(1))
-        if match := SCORE_MATE_RE.search(line):
-            mate = int(match.group(1))
-            score = 30000 - min(abs(mate), 300) * 100
-            return score if mate > 0 else -score
-        return None
+class UCIEngine(UCIClient):
+    _score_from_info = staticmethod(exact_score)
 
     def multipv_scores(self, fen: str, depth: int, movetime_ms: int) -> dict[chess.Move, int]:
+        legal = set(chess.Board(fen).legal_moves)
         self.send("ucinewgame")
         self.send(f"position fen {fen}")
-        if depth > 0:
-            self.send(f"go depth {depth}")
-            timeout = 60.0
-        else:
-            self.send(f"go movetime {movetime_ms}")
-            timeout = movetime_ms / 1000 + 10
+        command = f"go depth {depth}" if depth > 0 else f"go movetime {movetime_ms}"
+        timeout = 60.0 if depth > 0 else movetime_ms / 1000 + 10
 
         by_slot: dict[int, tuple[int, int, chess.Move]] = {}
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
+        for line in self.search_lines(command, timeout):
+            if not line.startswith("info ") or " pv " not in line:
                 continue
-
-            if line.startswith("info ") and " pv " in line:
-                pv = line.split(" pv ", 1)[1].split()
-                if not pv:
-                    continue
-                try:
-                    move = chess.Move.from_uci(pv[0])
-                except ValueError:
-                    continue
-                score = self._score_from_info(line)
-                if score is None:
-                    continue
-                depth_match = DEPTH_RE.search(line)
-                slot_match = MULTIPV_RE.search(line)
-                seen_depth = int(depth_match.group(1)) if depth_match else 0
-                slot = int(slot_match.group(1)) if slot_match else 1
-                old = by_slot.get(slot)
-                if old is None or seen_depth >= old[0]:
-                    by_slot[slot] = (seen_depth, score, move)
-
-            if line.startswith("bestmove"):
-                return {move: score for _slot, (_depth, score, move) in by_slot.items()}
-        return {move: score for _slot, (_depth, score, move) in by_slot.items()}
-
-    def quit(self):
-        if self.proc.poll() is None:
-            self.send("quit")
+            pv = line.split(" pv ", 1)[1].split()
+            if not pv:
+                continue
             try:
-                self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+                move = chess.Move.from_uci(pv[0])
+            except ValueError:
+                continue
+            score = self._score_from_info(line)
+            if score is None or move not in legal:
+                continue
+            depth_match = DEPTH_RE.search(line)
+            slot_match = MULTIPV_RE.search(line)
+            seen_depth = int(depth_match.group(1)) if depth_match else 0
+            slot = int(slot_match.group(1)) if slot_match else 1
+            old = by_slot.get(slot)
+            if old is None or seen_depth >= old[0]:
+                by_slot[slot] = (seen_depth, score, move)
+
+        # When slots change between iterations, the same move can occur in
+        # two slots at different depths. Retain its deeper evaluation.
+        return {
+            move: score
+            for _depth, score, move in sorted(by_slot.values(), key=lambda row: row[0])
+        }
 
 
 def parse_epd(line: str):

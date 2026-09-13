@@ -34,10 +34,13 @@ def main() -> None:
     rng = random.Random(args.seed)
     rows: list[tuple[str, float]] = []
     games = 0
+    seen_positions = 0
 
     for path in args.pgn:
         with path.open(errors="replace") as handle:
             while True:
+                if args.max_games and games >= args.max_games:
+                    break
                 game = chess.pgn.read_game(handle)
                 if game is None:
                     break
@@ -53,10 +56,13 @@ def main() -> None:
                         continue
                     if board.is_game_over(claim_draw=True):
                         continue
-                    rows.append((board.fen(), result))
-                    if len(rows) > args.max_positions:
-                        rows[rng.randrange(len(rows))] = rows[-1]
-                        rows.pop()
+                    seen_positions += 1
+                    if len(rows) < args.max_positions:
+                        rows.append((board.fen(), result))
+                    else:
+                        index = rng.randrange(seen_positions)
+                        if index < args.max_positions:
+                            rows[index] = (board.fen(), result)
 
                 if args.max_games and games >= args.max_games:
                     break

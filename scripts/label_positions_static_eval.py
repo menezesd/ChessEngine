@@ -2,76 +2,38 @@
 """Label positions with the engine's static eval command."""
 
 import argparse
-import queue
 import re
-import subprocess
-import threading
 import time
 
 import chess
+
+if __package__:
+    from .uci_client import UCIClient
+else:
+    from uci_client import UCIClient
 
 
 EVAL_RE = re.compile(r"\bblended (-?\d+)")
 
 
-class UCIEngine:
-    def __init__(self, path: str, options: list[str]):
-        self.proc = subprocess.Popen(
-            [path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        self.lines: queue.Queue[str] = queue.Queue()
-        threading.Thread(target=self._reader, daemon=True).start()
-        self.send("uci")
-        self.wait_for("uciok")
-        for option in options:
-            self.send(f"setoption name {option}")
-        self.send("isready")
-        self.wait_for("readyok")
-
-    def _reader(self):
-        for line in self.proc.stdout:
-            self.lines.put(line.rstrip("\n"))
-
-    def send(self, cmd: str):
-        self.proc.stdin.write(cmd + "\n")
-        self.proc.stdin.flush()
-
-    def wait_for(self, token: str, timeout: float = 10.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if token in line:
-                return line
-        raise RuntimeError(f"timeout waiting for {token}")
-
+class UCIEngine(UCIClient):
     def static_eval(self, fen: str) -> int | None:
         self.send(f"position fen {fen}")
         self.send("eval")
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if match := EVAL_RE.search(line):
-                return int(match.group(1))
-        return None
-
-    def quit(self):
-        if self.proc.poll() is None:
-            self.send("quit")
-            try:
-                self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        # Consume the complete command response before labeling another FEN.
+        self.send("isready")
+        deadline = time.monotonic() + 5.0
+        score = None
+        try:
+            while True:
+                line = self.read_line(deadline)
+                if match := EVAL_RE.search(line):
+                    score = int(match.group(1))
+                if line == "readyok":
+                    return score
+        except TimeoutError:
+            self.quit()
+            raise
 
 
 def result_from_white_eval(eval_cp: int) -> float:

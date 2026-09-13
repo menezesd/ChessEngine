@@ -2,14 +2,15 @@
 """Label legal child positions from EPD tactical roots with Stockfish."""
 
 import argparse
-import queue
-import re
-import subprocess
-import threading
-import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import chess
+
+
+if __package__:
+    from .uci_client import UCIClient
+else:
+    from uci_client import UCIClient
 
 
 def parse_epd(line: str):
@@ -57,72 +58,15 @@ def result_from_move_result(_board: chess.Board) -> float:
     return 0.5
 
 
-class Stockfish:
+class Stockfish(UCIClient):
     def __init__(self, path: str, depth: int):
         self.depth = depth
-        self.proc = subprocess.Popen(
-            [path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
-        self.lines: queue.Queue[str] = queue.Queue()
-        threading.Thread(target=self._reader, daemon=True).start()
-        self.send("uci")
-        self.wait("uciok")
-        self.send("setoption name Threads value 1")
-        self.send("setoption name Hash value 64")
-        self.send("isready")
-        self.wait("readyok")
+        super().__init__(path, ["Threads value 1", "Hash value 64"])
 
-    def _reader(self):
-        for line in self.proc.stdout:
-            self.lines.put(line.strip())
-
-    def send(self, cmd: str):
-        self.proc.stdin.write(cmd + "\n")
-        self.proc.stdin.flush()
-
-    def wait(self, token: str, timeout: float = 10.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if line.startswith(token):
-                return line
-        raise RuntimeError(f"timeout waiting for {token}")
+    wait = UCIClient.wait_for
 
     def eval(self, fen: str) -> int | None:
-        self.send(f"position fen {fen}")
-        self.send(f"go depth {self.depth}")
-        score = None
-        deadline = time.time() + 60.0
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if match := re.search(r"score cp (-?\d+)", line):
-                score = int(match.group(1))
-            elif match := re.search(r"score mate (-?\d+)", line):
-                mate = int(match.group(1))
-                score = 30000 - abs(mate) * 100
-                if mate < 0:
-                    score = -score
-            if line.startswith("bestmove"):
-                return score
-        return score
-
-    def quit(self):
-        self.send("quit")
-        try:
-            self.proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
+        return self.score_position(fen, f"go depth {self.depth}", new_game=False)[0]
 
 
 def label_batch(batch, sf_path: str, depth: int):

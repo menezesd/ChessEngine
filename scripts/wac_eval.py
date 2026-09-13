@@ -18,7 +18,7 @@ import chess
 
 
 class UCIEngine:
-    def __init__(self, path: str, name: str, threads: int = 1):
+    def __init__(self, path: str, name: str, threads: int = 1, options: list[str] | None = None):
         self.name = name
         self.threads = threads
         self.proc = subprocess.Popen(
@@ -33,6 +33,7 @@ class UCIEngine:
         self._reader = collections.deque(maxlen=50)
         self._reader_thread = subprocess.Popen
         self._start_reader()
+        self.options = options or []
         self._handshake(threads)
 
     def _start_reader(self) -> None:
@@ -72,8 +73,35 @@ class UCIEngine:
         self._drain_until("uciok", timeout=5.0)
         if threads > 1:
             self._send(f"setoption name Threads value {threads}")
+        for opt in self.options:
+            self._send(f"setoption name {opt}")
         self._send("isready")
         self._drain_until("readyok", timeout=5.0)
+
+    def restart(self) -> None:
+        """Kill the engine process and start a fresh one with the same options.
+
+        Used to recover from rare engine stalls (search stops responding)
+        without losing the rest of the suite run.
+        """
+        if self.proc.poll() is None:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+            self.proc.wait(timeout=2.0)
+        self.proc = subprocess.Popen(
+            [self.proc.args[0]],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self.lines = queue.Queue()
+        self._reader = collections.deque(maxlen=50)
+        self._start_reader()
+        self._handshake(self.threads)
 
     def bestmove_for_fen(self, fen: str, movetime_ms: int, timeout: float) -> str:
         self._send("ucinewgame")
@@ -141,11 +169,12 @@ def uci_to_san(fen: str, uci_move: str) -> str:
         return uci_move  # Return original if conversion fails
 
 
-def run_wac(engine_path: str, epd_path: Path, limit: int, movetime_ms: int, threads: int = 1) -> None:
-    engine = UCIEngine(engine_path, "engine", threads=threads)
+def run_wac(engine_path: str, epd_path: Path, limit: int, movetime_ms: int, threads: int = 1, options: list[str] | None = None) -> None:
+    engine = UCIEngine(engine_path, "engine", threads=threads, options=options or [])
     total = 0
     correct = 0
     mismatches = []
+    stalls = 0
 
     with epd_path.open() as f:
         for line in f:
@@ -155,7 +184,19 @@ def run_wac(engine_path: str, epd_path: Path, limit: int, movetime_ms: int, thre
                 break
             fen, bms, epd_id = parse_epd_line(line)
             total += 1
-            best_uci = engine.bestmove_for_fen(fen, movetime_ms, timeout=10.0)
+            try:
+                best_uci = engine.bestmove_for_fen(fen, movetime_ms, timeout=10.0)
+            except RuntimeError:
+                stalls += 1
+                print(f"stall on {epd_id}; restarting engine and retrying once", file=sys.stderr)
+                engine.restart()
+                try:
+                    best_uci = engine.bestmove_for_fen(fen, movetime_ms, timeout=10.0)
+                except RuntimeError:
+                    print(f"retry also failed on {epd_id}; treating as miss", file=sys.stderr)
+                    stalls += 1
+                    mismatches.append((epd_id, "stall", bms[0]))
+                    continue
             best_san = uci_to_san(fen, best_uci)
             if best_san in bms or best_uci in bms:
                 correct += 1
@@ -164,6 +205,8 @@ def run_wac(engine_path: str, epd_path: Path, limit: int, movetime_ms: int, thre
 
     engine.quit()
     print(f"WAC results ({epd_path.name}, limit={limit}, movetime={movetime_ms}ms, threads={threads}): {correct}/{total}")
+    if stalls:
+        print(f"engine stalls recovered: {stalls}")
     if mismatches:
         print("Sample misses (id, got, expected):")
         for epd_id, got, exp in mismatches[:10]:
@@ -177,9 +220,11 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=20, help="Number of positions to evaluate")
     parser.add_argument("--movetime-ms", type=int, default=500, help="Movetime per position (ms)")
     parser.add_argument("--threads", type=int, default=1, help="Number of search threads")
+    parser.add_argument("--setoption", action="append", default=[], metavar="NAME VALUE",
+                        help="UCI setoption to send at init (repeatable, e.g. --setoption 'UseTunedHCE false')")
     args = parser.parse_args()
 
-    run_wac(args.engine, Path(args.epd), args.limit, args.movetime_ms, args.threads)
+    run_wac(args.engine, Path(args.epd), args.limit, args.movetime_ms, args.threads, args.setoption)
 
 
 if __name__ == "__main__":

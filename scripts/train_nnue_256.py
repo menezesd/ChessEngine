@@ -5,6 +5,7 @@ Matches the Rust implementation: (768 -> 256) x 2 perspectives -> 1
 """
 
 import argparse
+import math
 import os
 import struct
 import time
@@ -212,9 +213,9 @@ class NNUE256(nn.Module):
                             # Distribute PST info across hidden units with some variation
                             self.feature_weights.data[feature_idx, h] = scaled_value * (0.8 + 0.4 * ((h + piece_type) % 5) / 5)
 
-            # Initialize output weights to sum hidden units evenly
+            # Our material is positive; the opponent's material is negative.
             self.output_weights_white.data.fill_(1.0 / (HIDDEN_SIZE ** 0.5))
-            self.output_weights_black.data.fill_(1.0 / (HIDDEN_SIZE ** 0.5))
+            self.output_weights_black.data.fill_(-1.0 / (HIDDEN_SIZE ** 0.5))
 
         print("  PST initialization complete")
 
@@ -234,13 +235,9 @@ class NNUE256(nn.Module):
         us_acc = torch.where(white_to_move_exp, white_acc, black_acc)
         them_acc = torch.where(white_to_move_exp, black_acc, white_acc)
 
-        # Output computation
-        us_weights = torch.where(white_to_move_exp,
-                                  self.output_weights_white.unsqueeze(0),
-                                  self.output_weights_black.unsqueeze(0))
-        them_weights = torch.where(white_to_move_exp,
-                                    self.output_weights_black.unsqueeze(0),
-                                    self.output_weights_white.unsqueeze(0))
+        # Weights have fixed us/them roles; only accumulators follow the turn.
+        us_weights = self.output_weights_white
+        them_weights = self.output_weights_black
 
         output = (us_acc * us_weights).sum(dim=1) + \
                  (them_acc * them_weights).sum(dim=1) + \
@@ -250,6 +247,11 @@ class NNUE256(nn.Module):
 
     def export_quantized(self, path: str):
         """Export to quantized binary format for Rust."""
+        # Validate before opening the destination so a failed training run
+        # cannot replace a usable network with corrupt or truncated weights.
+        for name, parameter in self.named_parameters():
+            if not torch.isfinite(parameter).all().item():
+                raise ValueError(f"Cannot export non-finite parameter: {name}")
         with open(path, 'wb') as f:
             # Feature weights: INPUT_SIZE columns of HIDDEN_SIZE i16 values
             weights = (self.feature_weights.detach().cpu().numpy() * QA).round().clip(-32768, 32767).astype('<i2')
@@ -273,7 +275,7 @@ class NNUE256(nn.Module):
                 f.write(struct.pack('<h', int(out_b[j])))
 
             # Output bias
-            out_bias = (self.output_bias.detach().cpu().numpy() * QA * QB / SCALE).round().clip(-32768, 32767)
+            out_bias = (self.output_bias.detach().cpu().numpy() * QA * QB).round().clip(-32768, 32767)
             f.write(struct.pack('<h', int(out_bias[0])))
 
         print(f"Exported network to {path} ({os.path.getsize(path)} bytes)")
@@ -303,6 +305,9 @@ class ChessDataset(Dataset):
                     except ValueError:
                         continue
 
+                    if not math.isfinite(eval_score):
+                        continue
+
                     # Clamp extreme evals
                     eval_score = max(-2000, min(2000, eval_score))
 
@@ -321,7 +326,8 @@ class ChessDataset(Dataset):
                             stm_result = 1.0 - game_result
                         else:
                             stm_result = game_result
-                        self.positions.append((white_feat, black_feat, stm, eval_score, stm_result))
+                        stm_eval = eval_score if stm else -eval_score
+                        self.positions.append((white_feat, black_feat, stm, stm_eval, stm_result))
                         count += 1
                     except Exception:
                         continue
@@ -353,6 +359,7 @@ def train_epoch(model, dataloader, optimizer, device, wdl_lambda=0.5):
     model.train()
     total_loss = 0.0
     n_batches = 0
+    n_samples = 0
 
     for batch in dataloader:
         white_f, black_f, stm, target, result = [x.to(device) for x in batch]
@@ -375,13 +382,17 @@ def train_epoch(model, dataloader, optimizer, device, wdl_lambda=0.5):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-        total_loss += loss.item()
+        batch_size = len(target)
+        total_loss += loss.item() * batch_size
+        n_samples += batch_size
         n_batches += 1
 
         if n_batches % 500 == 0:
-            print(f"  Batch {n_batches}: loss={total_loss/n_batches:.6f}")
+            print(f"  Batch {n_batches}: loss={total_loss/n_samples:.6f}")
 
-    return total_loss / max(n_batches, 1)
+    if not n_samples:
+        raise ValueError("Training requires at least one sample")
+    return total_loss / n_samples
 
 
 def main():
@@ -405,7 +416,7 @@ def main():
     if args.init_from_pst and not args.checkpoint:
         model.init_from_pst()
 
-    if args.checkpoint and os.path.exists(args.checkpoint):
+    if args.checkpoint:
         print(f"Loading checkpoint: {args.checkpoint}")
         ckpt = torch.load(args.checkpoint, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
@@ -415,7 +426,7 @@ def main():
 
     dataset = ChessDataset(args.data, args.max_positions)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
-                           num_workers=4, pin_memory=True, drop_last=True)
+                           num_workers=4, pin_memory=True, drop_last=False)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr*0.01)

@@ -8,15 +8,17 @@ import random
 def reservoir_sample(path: str, n: int, seed: int) -> list[str]:
     rng = random.Random(seed)
     sample: list[str] = []
+    seen = 0
     with open(path) as f:
-        for i, line in enumerate(f, 1):
+        for line in f:
             line = line.strip()
             if not line:
                 continue
+            seen += 1
             if len(sample) < n:
                 sample.append(line)
             else:
-                j = rng.randrange(i)
+                j = rng.randrange(seen)
                 if j < n:
                     sample[j] = line
     return sample

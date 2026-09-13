@@ -2,9 +2,14 @@
 """Compare HCE and NNUE WAC decisions and print static eval context."""
 
 import argparse
+from contextlib import ExitStack
 from dataclasses import dataclass
+import time
 
-from wac_eval_nnue import UCIEngine, parse_epd, uci_to_san
+if __package__:
+    from .wac_eval_nnue import UCIEngine, iter_epd, uci_to_san
+else:
+    from wac_eval_nnue import UCIEngine, iter_epd, uci_to_san
 
 
 @dataclass
@@ -19,10 +24,19 @@ class EvalEngine(UCIEngine):
     def static_eval(self, fen: str) -> str:
         self._send(f"position fen {fen}")
         self._send("eval")
-        while True:
-            line = self.lines.get(timeout=5.0)
-            if line.startswith("info string eval "):
-                return line
+        self._send("isready")
+        deadline = time.monotonic() + 5.0
+        evaluation = ""
+        try:
+            while True:
+                line = self.read_line(deadline)
+                if line.startswith("info string eval "):
+                    evaluation = line
+                if line == "readyok":
+                    return evaluation
+        except TimeoutError:
+            self.quit()
+            raise
 
 
 def decide(engine: EvalEngine, fen: str, expected: list[str], movetime_ms: int, depth: int) -> Decision:
@@ -49,42 +63,33 @@ def main() -> None:
     parser.add_argument("--max-print", type=int, default=50)
     args = parser.parse_args()
 
-    hce = EvalEngine(
-        args.engine,
-        options=["UseNNUE value false", *args.hce_setoption],
-    )
-    nnue = EvalEngine(
-        args.engine,
-        nnue_file=args.nnue,
-        options=["UseNNUE value true", "NnueHceBlend value 100", *args.nnue_setoption],
-    )
-
     total = hce_correct = nnue_correct = printed = 0
-    try:
-        with open(args.epd) as f:
-            for line in f:
-                if not line.strip() or total >= args.limit:
-                    break
-                fen, expected, epd_id = parse_epd(line)
-                if fen is None:
-                    continue
+    with ExitStack() as cleanup:
+        hce = EvalEngine(
+            args.engine,
+            options=["UseNNUE value false", *args.hce_setoption],
+        )
+        cleanup.callback(hce.quit)
+        nnue = EvalEngine(
+            args.engine,
+            nnue_file=args.nnue,
+            options=["UseNNUE value true", "NnueHceBlend value 100", *args.nnue_setoption],
+        )
+        cleanup.callback(nnue.quit)
+        for fen, expected, epd_id in iter_epd(args.epd, args.limit):
+            total += 1
+            h = decide(hce, fen, expected, args.movetime_ms, args.depth)
+            n = decide(nnue, fen, expected, args.movetime_ms, args.depth)
+            hce_correct += int(h.correct)
+            nnue_correct += int(n.correct)
 
-                total += 1
-                h = decide(hce, fen, expected, args.movetime_ms, args.depth)
-                n = decide(nnue, fen, expected, args.movetime_ms, args.depth)
-                hce_correct += int(h.correct)
-                nnue_correct += int(n.correct)
-
-                if h.correct != n.correct and printed < args.max_print:
-                    printed += 1
-                    print(f"{epd_id}: expected={','.join(expected)}")
-                    print(f"  HCE : {h.move}/{h.san} correct={h.correct} {h.eval_line}")
-                    print(f"  NNUE: {n.move}/{n.san} correct={n.correct} {n.eval_line}")
+            if h.correct != n.correct and printed < args.max_print:
+                printed += 1
+                print(f"{epd_id}: expected={','.join(expected)}")
+                print(f"  HCE : {h.move}/{h.san} correct={h.correct} {h.eval_line}")
+                print(f"  NNUE: {n.move}/{n.san} correct={n.correct} {n.eval_line}")
 
         print(f"summary hce={hce_correct}/{total} nnue={nnue_correct}/{total}")
-    finally:
-        hce.quit()
-        nnue.quit()
 
 
 if __name__ == "__main__":

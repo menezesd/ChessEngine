@@ -12,6 +12,8 @@ Key improvements over train_nnue_256.py:
 """
 
 import argparse
+import math
+from contextlib import nullcontext
 import os
 import random
 import struct
@@ -23,13 +25,13 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, Subset
 
 from train_nnue_256 import MATERIAL_EG, MATERIAL_MG, PST_EG, PST_MG
 
 # Constants matching Rust implementation
 INPUT_SIZE = 768  # 64 squares × 6 pieces × 2 colors
-HIDDEN_SIZE = 512
+HIDDEN_SIZE = 256  # Must match the Rust network and exported file layout.
 SCALE = 400
 QA = 255
 QB = 64
@@ -214,8 +216,9 @@ class NNUE256(nn.Module):
                                 0.8 + 0.4 * ((h + piece_type) % 5) / 5
                             )
 
+            # Keep the output roles signed when the side to move swaps.
             self.output_weights_white.data.fill_(1.0 / (HIDDEN_SIZE**0.5))
-            self.output_weights_black.data.fill_(1.0 / (HIDDEN_SIZE**0.5))
+            self.output_weights_black.data.fill_(-1.0 / (HIDDEN_SIZE**0.5))
 
         print("  PST initialization complete")
 
@@ -248,17 +251,9 @@ class NNUE256(nn.Module):
         us_acc = torch.where(white_to_move_exp, white_acc, black_acc)
         them_acc = torch.where(white_to_move_exp, black_acc, white_acc)
 
-        # Output computation
-        us_weights = torch.where(
-            white_to_move_exp,
-            self.output_weights_white.unsqueeze(0),
-            self.output_weights_black.unsqueeze(0),
-        )
-        them_weights = torch.where(
-            white_to_move_exp,
-            self.output_weights_black.unsqueeze(0),
-            self.output_weights_white.unsqueeze(0),
-        )
+        # Weights have fixed us/them roles; only accumulators follow the turn.
+        us_weights = self.output_weights_white
+        them_weights = self.output_weights_black
 
         output = (
             (us_acc * us_weights).sum(dim=1)
@@ -270,6 +265,11 @@ class NNUE256(nn.Module):
 
     def export_quantized(self, path: str):
         """Export to quantized binary format for Rust."""
+        # Validate before opening the destination so a failed training run
+        # cannot replace a usable network with corrupt or truncated weights.
+        for name, parameter in self.named_parameters():
+            if not torch.isfinite(parameter).all().item():
+                raise ValueError(f"Cannot export non-finite parameter: {name}")
         with open(path, "wb") as f:
             # Feature weights
             weights = (
@@ -312,7 +312,7 @@ class NNUE256(nn.Module):
 
             # Output bias
             out_bias = (
-                (self.output_bias.detach().cpu().numpy() * QA * QB / SCALE)
+                (self.output_bias.detach().cpu().numpy() * QA * QB)
                 .round()
                 .clip(-32768, 32767)
             )
@@ -358,7 +358,7 @@ class ImprovedChessDataset(Dataset):
                         continue
 
                     # Filter extreme evaluations (likely mates or errors)
-                    if abs(eval_score) > eval_clip:
+                    if not math.isfinite(eval_score) or abs(eval_score) > eval_clip:
                         skipped += 1
                         continue
 
@@ -408,11 +408,6 @@ class ImprovedChessDataset(Dataset):
             if max_positions and count >= max_positions:
                 break
 
-        # Shuffle positions across all files for better train/val split
-        import random
-
-        random.shuffle(self.positions)
-
         print(f"Loaded {len(self.positions):,} positions (skipped {skipped:,})")
         if augment:
             print(f"With augmentation: {len(self.positions) * 2:,} effective positions")
@@ -456,119 +451,136 @@ class ImprovedChessDataset(Dataset):
         )
 
 
-def train_epoch(
-    model,
-    dataloader,
-    optimizer,
-    device,
-    wdl_lambda=0.25,
-    accumulation_steps=1,
-    scaler=None,
-    raw_eval_loss=True,
-    use_huber=True,
-):
-    """Train one epoch with gradient accumulation."""
-    model.train()
-    total_loss = 0.0
-    total_eval_loss = 0.0
-    total_wdl_loss = 0.0
-    n_batches = 0
+def split_dataset(dataset, val_split, seed=42):
+    """Keep duplicate positions and all their mirrors in a single split."""
+    if not 0.0 <= val_split < 1.0:
+        raise ValueError("val_split must be between 0 (inclusive) and 1 (exclusive)")
+    if not dataset.positions:
+        raise ValueError("no usable training positions")
 
+    def position_key(pos):
+        # Move counters do not make a new position for the neural evaluator.
+        return " ".join(pos["fen"].split()[:4])
+
+    keys = list(dict.fromkeys(position_key(pos) for pos in dataset.positions))
+    random.Random(seed).shuffle(keys)
+    val_count = min(len(keys) - 1, max(1, int(len(keys) * val_split))) if val_split else 0
+    validation_keys = set(keys[:val_count])
+    train_indices, validation_indices = [], []
+    count = len(dataset.positions)
+    for index, pos in enumerate(dataset.positions):
+        indices = validation_indices if position_key(pos) in validation_keys else train_indices
+        indices.append(index)
+        if dataset.augment:
+            indices.append(index + count)
+    return Subset(dataset, train_indices), Subset(dataset, validation_indices)
+
+
+def _training_losses(
+    model, batch, wdl_lambda, raw_eval_loss, use_huber, anchors, anchor_lambda,
+):
+    white_f, black_f, stm, target, result = batch
+    output = model(white_f, black_f, stm)
+    pred_wdl = torch.sigmoid(output)
+    if raw_eval_loss:
+        eval_loss = (
+            F.smooth_l1_loss(output, target) if use_huber else F.mse_loss(output, target)
+        )
+    else:
+        eval_loss = F.mse_loss(pred_wdl, torch.sigmoid(target))
+    wdl_loss = F.mse_loss(pred_wdl, result) * wdl_lambda
+    loss = eval_loss + wdl_loss
+    if anchors and anchor_lambda > 0.0:
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in anchors:
+                loss = loss + anchor_lambda * F.mse_loss(param, anchors[name])
+    return loss, eval_loss, wdl_loss
+
+
+def train_epoch(
+    model, dataloader, optimizer, device, wdl_lambda=0.25, accumulation_steps=1,
+    scaler=None, raw_eval_loss=True, use_huber=True, anchors=None, anchor_lambda=0.0,
+):
+    """Train on every sample, including partial accumulation groups."""
+    if accumulation_steps < 1:
+        raise ValueError("accumulation_steps must be positive")
+    model.train()
+    total_loss = total_eval_loss = total_wdl_loss = 0.0
+    n_samples = group_samples = 0
     optimizer.zero_grad()
 
-    for batch_idx, batch in enumerate(dataloader):
-        white_f, black_f, stm, target, result = [x.to(device) for x in batch]
-
-        # Mixed precision forward pass (if using CUDA)
+    def step(samples):
         if scaler is not None:
-            with torch.cuda.amp.autocast():
-                output = model(white_f, black_f, stm)
-                if raw_eval_loss:
-                    eval_loss = (
-                        F.smooth_l1_loss(output, target)
-                        if use_huber
-                        else F.mse_loss(output, target)
-                    )
-                    pred_wdl = torch.sigmoid(output)
-                else:
-                    pred_wdl = torch.sigmoid(output)
-                    target_sig = torch.sigmoid(target)
-                    eval_loss = F.mse_loss(pred_wdl, target_sig)
-                wdl_loss = F.mse_loss(pred_wdl, result) * wdl_lambda
-                loss = (eval_loss + wdl_loss) / accumulation_steps
-            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+        # Accumulated losses are sums, so normalize by actual sample count.
+        # This also handles a smaller final batch without overweighting it.
+        for param in model.parameters():
+            if param.grad is not None:
+                param.grad.div_(samples)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        if scaler is None:
+            optimizer.step()
         else:
-            output = model(white_f, black_f, stm)
-            if raw_eval_loss:
-                eval_loss = (
-                    F.smooth_l1_loss(output, target)
-                    if use_huber
-                    else F.mse_loss(output, target)
-                )
-                pred_wdl = torch.sigmoid(output)
-            else:
-                pred_wdl = torch.sigmoid(output)
-                target_sig = torch.sigmoid(target)
-                eval_loss = F.mse_loss(pred_wdl, target_sig)
-            wdl_loss = F.mse_loss(pred_wdl, result) * wdl_lambda
-            loss = (eval_loss + wdl_loss) / accumulation_steps
-            loss.backward()
+            scaler.step(optimizer)
+            scaler.update()
+        optimizer.zero_grad()
 
-        # Gradient accumulation step
+    for batch_idx, batch in enumerate(dataloader):
+        batch = [x.to(device) for x in batch]
+        samples = len(batch[0])
+        context = torch.cuda.amp.autocast() if scaler is not None else nullcontext()
+        with context:
+            loss, eval_loss, wdl_loss = _training_losses(
+                model, batch, wdl_lambda, raw_eval_loss, use_huber, anchors, anchor_lambda,
+            )
+        summed_loss = loss * samples
+        if scaler is None:
+            summed_loss.backward()
+        else:
+            scaler.scale(summed_loss).backward()
+        group_samples += samples
         if (batch_idx + 1) % accumulation_steps == 0:
-            if scaler is not None:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-            optimizer.zero_grad()
+            step(group_samples)
+            group_samples = 0
 
-        total_loss += loss.item() * accumulation_steps
-        total_eval_loss += eval_loss.item()
-        total_wdl_loss += wdl_loss.item()
-        n_batches += 1
-
-        if n_batches % 500 == 0:
+        total_loss += loss.item() * samples
+        total_eval_loss += eval_loss.item() * samples
+        total_wdl_loss += wdl_loss.item() * samples
+        n_samples += samples
+        if (batch_idx + 1) % 100 == 0:
             print(
-                f"  Batch {n_batches}: loss={total_loss / n_batches:.6f} "
-                f"(eval={total_eval_loss / n_batches:.6f}, wdl={total_wdl_loss / n_batches:.6f})"
+                f"  Batch {batch_idx + 1}: loss={total_loss / n_samples:.6f} "
+                f"(eval={total_eval_loss / n_samples:.6f}, wdl={total_wdl_loss / n_samples:.6f})",
+                flush=True,
             )
 
-    return total_loss / max(n_batches, 1)
+    if group_samples:
+        step(group_samples)
+    if not n_samples:
+        raise ValueError("training dataset contains no samples")
+    return total_loss / n_samples
 
 
 def validate(
-    model, dataloader, device, wdl_lambda=0.25, raw_eval_loss=True, use_huber=True
+    model, dataloader, device, wdl_lambda=0.25, raw_eval_loss=True, use_huber=True,
+    anchors=None, anchor_lambda=0.0,
 ):
-    """Validate model."""
+    """Return loss per sample, independent of validation batch sizes."""
     model.eval()
     total_loss = 0.0
-    n_batches = 0
-
+    n_samples = 0
     with torch.no_grad():
         for batch in dataloader:
-            white_f, black_f, stm, target, result = [x.to(device) for x in batch]
-            output = model(white_f, black_f, stm)
-            if raw_eval_loss:
-                eval_loss = (
-                    F.smooth_l1_loss(output, target)
-                    if use_huber
-                    else F.mse_loss(output, target)
-                )
-                pred_wdl = torch.sigmoid(output)
-            else:
-                pred_wdl = torch.sigmoid(output)
-                target_sig = torch.sigmoid(target)
-                eval_loss = F.mse_loss(pred_wdl, target_sig)
-            wdl_loss = F.mse_loss(pred_wdl, result) * wdl_lambda
-            loss = eval_loss + wdl_loss
-            total_loss += loss.item()
-            n_batches += 1
-
-    return total_loss / max(n_batches, 1)
+            batch = [x.to(device) for x in batch]
+            loss, _, _ = _training_losses(
+                model, batch, wdl_lambda, raw_eval_loss, use_huber, anchors, anchor_lambda,
+            )
+            samples = len(batch[0])
+            total_loss += loss.item() * samples
+            n_samples += samples
+    if not n_samples:
+        raise ValueError("validation dataset contains no samples")
+    return total_loss / n_samples
 
 
 def main():
@@ -630,7 +642,7 @@ def main():
     if args.init_from_pst and not args.checkpoint:
         model.init_from_pst()
 
-    if args.checkpoint and os.path.exists(args.checkpoint):
+    if args.checkpoint:
         print(f"Loading checkpoint: {args.checkpoint}")
         ckpt = torch.load(args.checkpoint, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
@@ -647,14 +659,7 @@ def main():
         eval_clip=args.eval_clip,
     )
 
-    # Split into train/val
-    val_size = int(len(full_dataset) * args.val_split)
-    train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = random_split(
-        full_dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    train_dataset, val_dataset = split_dataset(full_dataset, args.val_split)
 
     print(f"Train: {len(train_dataset):,}, Val: {len(val_dataset):,}")
 
@@ -664,7 +669,7 @@ def main():
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        drop_last=True,
+        drop_last=False,
         **loader_config,
     )
     val_loader = DataLoader(
@@ -723,13 +728,15 @@ def main():
             args.wdl_lambda,
             raw_eval_loss=not args.sigmoid_eval_loss,
             use_huber=args.eval_loss == "huber",
-        )
+        ) if len(val_dataset) else None
+        selection_loss = train_loss if val_loss is None else val_loss
+        validation_label = "disabled" if val_loss is None else f"{val_loss:.6f}"
         scheduler.step()
         elapsed = time.time() - t0
 
         print(
             f"Epoch {epoch + 1}/{args.epochs}: "
-            f"train={train_loss:.6f}, val={val_loss:.6f}, "
+            f"train={train_loss:.6f}, val={validation_label}, "
             f"lr={optimizer.param_groups[0]['lr']:.6f}, time={elapsed:.1f}s"
         )
 
@@ -745,8 +752,8 @@ def main():
         )
 
         # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if selection_loss < best_val_loss:
+            best_val_loss = selection_loss
             model.export_quantized(args.output)
             print(f"  -> New best! Saved to {args.output}")
             patience_counter = 0
@@ -756,7 +763,8 @@ def main():
                 print(f"Early stopping: no improvement for {patience} epochs")
                 break
 
-    print(f"\nDone! Best validation loss: {best_val_loss:.6f}")
+    metric = "validation" if len(val_dataset) else "training"
+    print(f"\nDone! Best {metric} loss: {best_val_loss:.6f}")
 
 
 if __name__ == "__main__":

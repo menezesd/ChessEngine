@@ -41,6 +41,8 @@ def read_payload(path: Path) -> tuple[bytes, int]:
             raise ValueError(f"unsupported NNUE version {version}")
         if hidden_size != HIDDEN_SIZE:
             raise ValueError(f"expected hidden size {HIDDEN_SIZE}, got {hidden_size}")
+        if input_size not in (BASE_INPUT_SIZE, TACTICAL_INPUT_SIZE):
+            raise ValueError(f"unsupported NNUE input layout {input_size}")
         payload = data[len(MAGIC) + 12 :]
         if len(payload) != payload_size(input_size):
             raise ValueError("headered NNUE payload size does not match header")
@@ -52,16 +54,17 @@ def read_payload(path: Path) -> tuple[bytes, int]:
 
 
 def expand_payload(payload: bytes, input_size: int) -> bytes:
+    if input_size not in (BASE_INPUT_SIZE, TACTICAL_INPUT_SIZE):
+        raise ValueError(f"unsupported NNUE input layout {input_size}")
+    if len(payload) != payload_size(input_size):
+        raise ValueError("NNUE payload size does not match input layout")
     if input_size == TACTICAL_INPUT_SIZE:
         return payload
-    if input_size > TACTICAL_INPUT_SIZE:
-        raise ValueError(f"cannot shrink unexpected input size {input_size}")
 
     row_bytes = HIDDEN_SIZE * 2
     base_weight_bytes = input_size * row_bytes
     copied_weights = payload[:base_weight_bytes]
     tail = payload[base_weight_bytes:]
-    added_rows = TACTICAL_INPUT_SIZE - BASE_INPUT_SIZE
     added_rows = TACTICAL_INPUT_SIZE - input_size
     return copied_weights + bytes(added_rows * row_bytes) + tail
 

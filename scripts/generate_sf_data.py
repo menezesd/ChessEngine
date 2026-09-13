@@ -14,97 +14,31 @@ Usage:
 """
 import argparse
 import os
-import queue
 import random
-import re
-import subprocess
-import sys
-import threading
-import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import chess
 import chess.pgn
 
 
+if __package__:
+    from .uci_client import UCIClient
+else:
+    from uci_client import UCIClient
+
+
 def sf_worker(positions_batch, sf_path, depth):
-    """Label a batch of positions with Stockfish."""
-    proc = subprocess.Popen(
-        [sf_path],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-    )
-    lines_q = queue.Queue()
-    threading.Thread(
-        target=lambda: [lines_q.put(l.strip()) for l in proc.stdout], daemon=True
-    ).start()
-
-    def send(cmd):
-        proc.stdin.write(cmd + "\n")
-        proc.stdin.flush()
-
-    def wait_for(tok, timeout=10.0):
-        dl = time.time() + timeout
-        while time.time() < dl:
-            try:
-                line = lines_q.get(timeout=0.1)
-                if line.startswith(tok):
-                    return line
-            except queue.Empty:
-                continue
-        return None
-
-    send("uci")
-    wait_for("uciok")
-    send("setoption name Threads value 1")
-    send("setoption name Hash value 64")
-    send("isready")
-    wait_for("readyok")
-
+    """Label a batch without allowing timed-out searches to cross positions."""
+    engine = UCIClient(sf_path, ["Threads value 1", "Hash value 64"])
     results = []
-    for fen, game_result in positions_batch:
-        send(f"position fen {fen}")
-        send(f"go depth {depth}")
-
-        score = None
-        is_mate = False
-        dl = time.time() + 60.0
-        while time.time() < dl:
-            try:
-                line = lines_q.get(timeout=0.1)
-                m = re.search(r"score cp (-?\d+)", line)
-                if m:
-                    score = int(m.group(1))
-                    is_mate = False
-                m2 = re.search(r"score mate (-?\d+)", line)
-                if m2:
-                    mate_in = int(m2.group(1))
-                    score = 30000 - abs(mate_in) * 100
-                    if mate_in < 0:
-                        score = -score
-                    is_mate = True
-                if line.startswith("bestmove"):
-                    break
-            except queue.Empty:
-                continue
-
-        if score is not None:
-            # Convert STM eval to WHITE perspective
-            board = chess.Board(fen)
-            if not board.turn:  # Black to move
-                eval_white = -score
-            else:
-                eval_white = score
-            results.append(f"{fen} | {eval_white} | {game_result}")
-
-    send("quit")
     try:
-        proc.wait(timeout=2)
-    except:
-        proc.kill()
+        for fen, game_result in positions_batch:
+            score, _ = engine.score_position(fen, f"go depth {depth}", new_game=False)
+            if score is not None:
+                eval_white = score if chess.Board(fen).turn == chess.WHITE else -score
+                results.append(f"{fen} | {eval_white} | {game_result}")
+    finally:
+        engine.quit()
     return results
 
 

@@ -2,8 +2,8 @@
 """Fine-tune NNUE with pairwise legal-child ranking loss."""
 
 import argparse
+import math
 import random
-import sys
 from dataclasses import dataclass
 
 import chess
@@ -11,8 +11,10 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-sys.path.insert(0, "scripts")
-from train_nnue_improved import MAX_ACTIVE_FEATURES, SCALE, NNUE256, get_device, parse_fen_features
+if __package__:
+    from .train_nnue_improved import MAX_ACTIVE_FEATURES, SCALE, NNUE256, get_device, parse_fen_features
+else:
+    from train_nnue_improved import MAX_ACTIVE_FEATURES, SCALE, NNUE256, get_device, parse_fen_features
 
 
 @dataclass
@@ -87,6 +89,8 @@ def load_pair_file(path: str, repeat: int) -> list[Pair]:
                     weight = float(parts[2])
                 except ValueError:
                     weight = 1.0
+            if not math.isfinite(weight) or weight < 0:
+                continue
             for _ in range(repeat):
                 pairs.append(Pair(best_fen, other_fen, weight))
     return pairs
@@ -122,7 +126,7 @@ class PairDataset(Dataset):
 def train_epoch(model, loader, optimizer, device, margin_cp: float):
     model.train()
     total = 0.0
-    batches = 0
+    samples = 0
     margin = margin_cp / SCALE
     for batch in loader:
         bw, bb, bstm, ow, ob, ostm, weight = [x.to(device) for x in batch]
@@ -138,9 +142,12 @@ def train_epoch(model, loader, optimizer, device, margin_cp: float):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-        total += loss.item()
-        batches += 1
-    return total / max(batches, 1)
+        batch_size = len(weight)
+        total += loss.item() * batch_size
+        samples += batch_size
+    if not samples:
+        raise ValueError("Training requires at least one ranking pair")
+    return total / samples
 
 
 def main():
@@ -190,7 +197,7 @@ def main():
         shuffle=True,
         num_workers=0,
         pin_memory=False,
-        drop_last=True,
+        drop_last=False,
     )
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],

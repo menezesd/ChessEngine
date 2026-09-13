@@ -13,7 +13,6 @@ import argparse
 import os
 import queue
 import random
-import re
 import subprocess
 import sys
 import threading
@@ -30,94 +29,38 @@ except ImportError:
     sys.exit(1)
 
 
-class StockfishEngine:
-    """Wrapper for Stockfish UCI engine."""
+if __package__:
+    from .uci_client import UCIClient
+else:
+    from uci_client import UCIClient
+
+
+class StockfishEngine(UCIClient):
+    """Stockfish client with an explicit start/quit lifecycle."""
 
     def __init__(self, path: str = "stockfish", threads: int = 1, hash_mb: int = 128):
         self.path = path
         self.threads = threads
         self.hash_mb = hash_mb
-        self.proc: Optional[subprocess.Popen] = None
-        self.lines: queue.Queue = queue.Queue()
+        self.proc = None
 
     def start(self):
-        self.proc = subprocess.Popen(
-            [self.path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
+        self.quit()
+        super().__init__(self.path, [
+            f"Threads value {self.threads}", f"Hash value {self.hash_mb}",
+        ])
 
-        def reader():
-            for line in self.proc.stdout:
-                self.lines.put(line.strip())
+    _send = UCIClient.send
+    _wait_for = UCIClient.wait_for
 
-        threading.Thread(target=reader, daemon=True).start()
-
-        self._send("uci")
-        self._wait_for("uciok")
-        self._send(f"setoption name Threads value {self.threads}")
-        self._send(f"setoption name Hash value {self.hash_mb}")
-        self._send("isready")
-        self._wait_for("readyok")
-
-    def _send(self, cmd: str):
-        self.proc.stdin.write(cmd + "\n")
-        self.proc.stdin.flush()
-
-    def _wait_for(self, target: str, timeout: float = 10.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-                if line.startswith(target):
-                    return line
-            except queue.Empty:
-                continue
-        raise RuntimeError(f"Timeout waiting for {target}")
-
-    def evaluate(self, fen: str, depth: int = 12) -> Tuple[int, bool]:
-        """Evaluate position. Returns (score_cp, is_mate)."""
-        self._send("ucinewgame")
-        self._send(f"position fen {fen}")
-        self._send(f"go depth {depth}")
-
-        score = 0
-        is_mate = False
-
-        deadline = time.time() + 60.0
-        while time.time() < deadline:
-            try:
-                line = self.lines.get(timeout=0.1)
-                if "score cp" in line:
-                    match = re.search(r"score cp (-?\d+)", line)
-                    if match:
-                        score = int(match.group(1))
-                        is_mate = False
-                elif "score mate" in line:
-                    match = re.search(r"score mate (-?\d+)", line)
-                    if match:
-                        mate_in = int(match.group(1))
-                        score = 30000 - abs(mate_in) * 100
-                        if mate_in < 0:
-                            score = -score
-                        is_mate = True
-                elif line.startswith("bestmove"):
-                    break
-            except queue.Empty:
-                continue
-
-        return score, is_mate
+    def evaluate(self, fen: str, depth: int = 12) -> Tuple[Optional[int], bool]:
+        """Return a STM score and mate flag; None means no usable score."""
+        return self.score_position(fen, f"go depth {depth}")
 
     def quit(self):
-        if self.proc and self.proc.poll() is None:
-            self._send("quit")
-            try:
-                self.proc.wait(timeout=2.0)
-            except:
-                self.proc.kill()
+        if self.proc is not None:
+            super().quit()
+            self.proc = None
 
 
 def generate_random_position(max_moves: int = 40) -> Optional[chess.Board]:
@@ -247,6 +190,8 @@ def worker_generate_and_label(
 
             # Get Stockfish evaluation
             score, is_mate = sf.evaluate(fen, depth=depth)
+            if score is None:
+                continue
 
             # Skip extreme evaluations (likely won/lost positions)
             if abs(score) > 5000 and not is_mate:
