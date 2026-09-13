@@ -1,25 +1,20 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::board::search::smp::{smp_search, SmpConfig};
 use crate::board::search::DEFAULT_MAX_DEPTH;
-use crate::board::{search, SearchClock, SearchConfig, SearchResult};
-use crate::timer::deadline_after_ms;
+use crate::board::{search, SearchClock, SearchConfig, SearchInfoCallback, SearchResult};
+use crate::timer::{search_deadlines, spawn_stop_timer};
 
 use super::{EngineController, SearchParams};
 use crate::engine::job::SearchJob;
 
 /// Search thread stack size (32 MB)
 const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
-const HARD_STOP_MARGIN_MS: u64 = 5;
-
-/// Maximum sleep duration when polling time limits (avoids excessive CPU wake-ups)
-const MAX_POLL_SLEEP_MS: u64 = 5;
-
-/// Poll interval when waiting for ponder to complete
-const PONDER_POLL_MS: u64 = 10;
+/// Poll interval while an early result waits for ponderhit or stop.
+const SEARCH_RELEASE_POLL_MS: u64 = 10;
 
 impl EngineController {
     fn is_timed_search(params: &SearchParams) -> bool {
@@ -43,7 +38,7 @@ impl EngineController {
     }
 
     fn should_spawn_hard_stop_timer(params: &SearchParams) -> bool {
-        Self::is_timed_search(params) && params.hard_time_ms > 0
+        Self::is_timed_search(params) && !matches!(params.hard_time_ms, 0 | u64::MAX)
     }
 
     fn build_deadlines(
@@ -54,22 +49,7 @@ impl EngineController {
             return (None, None);
         }
 
-        let soft_deadline = if params.soft_time_ms > 0 {
-            deadline_after_ms(start, params.soft_time_ms)
-        } else {
-            None
-        };
-
-        let hard_deadline = if params.hard_time_ms > 0 {
-            deadline_after_ms(
-                start,
-                params.hard_time_ms.saturating_sub(HARD_STOP_MARGIN_MS),
-            )
-        } else {
-            None
-        };
-
-        (soft_deadline, hard_deadline)
+        search_deadlines(start, params.soft_time_ms, params.hard_time_ms)
     }
 
     fn build_search_config(&self, params: &SearchParams, node_limit: u64) -> SearchConfig {
@@ -79,7 +59,7 @@ impl EngineController {
             SearchConfig::default()
         };
 
-        if Self::is_timed_search(params) && params.soft_time_ms > 0 {
+        if Self::is_timed_search(params) {
             config.time_limit_ms = params.soft_time_ms;
             config.hard_time_limit_ms = params.hard_time_ms;
         }
@@ -92,53 +72,26 @@ impl EngineController {
         if params.multi_pv > 1 {
             config = config.with_multi_pv(params.multi_pv);
         }
+        config.root_moves.clone_from(&params.root_moves);
         config
     }
 
-    fn spawn_hard_stop_timer(
-        hard_deadline: Option<Instant>,
-        stop: Arc<AtomicBool>,
-    ) -> Option<JoinHandle<()>> {
-        hard_deadline.map(|deadline| {
-            thread::spawn(move || loop {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let now = Instant::now();
-                if now >= deadline {
-                    stop.store(true, Ordering::Relaxed);
-                    break;
-                }
-                let sleep_for = (deadline - now).min(Duration::from_millis(MAX_POLL_SLEEP_MS));
-                thread::sleep(sleep_for);
-            })
-        })
-    }
-
-    fn wait_for_ponder_completion(pondering: &AtomicBool, stop: &AtomicBool) {
-        while pondering.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(PONDER_POLL_MS));
+    fn wait_for_search_release(infinite: bool, pondering: &AtomicBool, stop: &AtomicBool) {
+        while (infinite || pondering.load(Ordering::Relaxed)) && !stop.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(SEARCH_RELEASE_POLL_MS));
         }
     }
 
-    fn install_current_job(
-        &mut self,
-        stop: Arc<AtomicBool>,
-        clock: Arc<SearchClock>,
-        pondering: Arc<AtomicBool>,
-        params: &SearchParams,
-        handle: JoinHandle<()>,
-        timer_handle: Option<JoinHandle<()>>,
-    ) {
-        self.current_job = Some(SearchJob::new(
-            stop,
-            clock,
-            pondering,
-            params.soft_time_ms,
-            params.hard_time_ms,
-            handle,
-            timer_handle,
-        ));
+    fn gated_info_callback(&self, publish: &Arc<AtomicBool>) -> Option<SearchInfoCallback> {
+        self.info_callback.as_ref().map(|callback| {
+            let callback = Arc::clone(callback);
+            let publish = Arc::clone(publish);
+            Arc::new(move |info: &crate::board::SearchIterationInfo| {
+                if publish.load(Ordering::Acquire) {
+                    callback(info);
+                }
+            }) as SearchInfoCallback
+        })
     }
 
     /// Start a search with the given parameters.
@@ -158,6 +111,7 @@ impl EngineController {
         };
 
         let stop = Arc::new(AtomicBool::new(false));
+        let publish = Arc::new(AtomicBool::new(true));
         let start = Instant::now();
         let (soft_deadline, hard_deadline) = Self::build_deadlines(&params, start);
 
@@ -165,7 +119,7 @@ impl EngineController {
         let pondering = Arc::new(AtomicBool::new(params.ponder));
 
         let timer_handle = if Self::should_spawn_hard_stop_timer(&params) {
-            Self::spawn_hard_stop_timer(hard_deadline, Arc::clone(&stop))
+            spawn_stop_timer(hard_deadline, Arc::clone(&stop))
         } else {
             None
         };
@@ -175,11 +129,13 @@ impl EngineController {
         let stop_clone = Arc::clone(&stop);
         let pondering_clone = Arc::clone(&pondering);
         let num_threads = self.num_threads;
-        let info_callback = self.info_callback.clone();
+        let info_callback = self.gated_info_callback(&publish);
+        let infinite = params.infinite;
 
-        // MultiPV is only implemented by the single-threaded search path;
-        // the SMP path would silently ignore it and report one line.
-        let handle = if num_threads > 1 && params.multi_pv <= 1 {
+        // Root restrictions and MultiPV currently use the single-threaded
+        // path so every published line observes the requested search domain.
+        let handle = if num_threads > 1 && params.multi_pv <= 1 && params.root_moves.is_none() {
+            let publish_clone = Arc::clone(&publish);
             let smp_config = SmpConfig {
                 num_threads,
                 max_depth: params
@@ -192,6 +148,7 @@ impl EngineController {
                 node_limit,
                 info_callback,
                 ponder: params.ponder,
+                infinite,
             };
 
             let handle = thread::Builder::new()
@@ -201,22 +158,31 @@ impl EngineController {
                     let mut guard = search_state.lock();
                     let result =
                         smp_search(&search_board, &mut guard, smp_config, stop_clone.clone());
+                    drop(guard);
 
-                    EngineController::wait_for_ponder_completion(&pondering_clone, &stop_clone);
+                    EngineController::wait_for_search_release(
+                        infinite,
+                        &pondering_clone,
+                        &stop_clone,
+                    );
                     // The hard-stop watchdog shares this flag.  Once the search
-                    // and any ponder wait are over, wake it instead of leaving
+                    // and any publication wait are over, wake it instead of leaving
                     // a completed job's timer alive until its deadline.
                     stop_clone.store(true, Ordering::Relaxed);
 
-                    on_complete(result);
+                    if publish_clone.load(Ordering::Acquire) {
+                        on_complete(result);
+                    }
                 })
                 .expect("failed to spawn search thread");
             handle
         } else {
             let mut config = self.build_search_config(&params, node_limit);
+            config.info_callback = info_callback;
             // Live clock: lets a ponderhit reset re-time the running search.
             config.clock = Some(Arc::clone(&clock));
             let mut search_board = search_board;
+            let publish_clone = Arc::clone(&publish);
 
             let handle = thread::Builder::new()
                 .name("search".to_string())
@@ -225,31 +191,46 @@ impl EngineController {
                     let mut guard = search_state.lock();
                     let result: SearchResult =
                         search(&mut search_board, &mut guard, config, &stop_clone);
+                    drop(guard);
 
-                    EngineController::wait_for_ponder_completion(&pondering_clone, &stop_clone);
-                    // See the SMP path above.  This must remain after the
-                    // ponder wait so an early-completing ponder search still
-                    // waits for `ponderhit` before publishing its result.
+                    EngineController::wait_for_search_release(
+                        infinite,
+                        &pondering_clone,
+                        &stop_clone,
+                    );
+                    // See the SMP path above. Keep this after the wait so
+                    // early ponder/infinite results await the GUI's command.
                     stop_clone.store(true, Ordering::Relaxed);
 
-                    on_complete(result);
+                    if publish_clone.load(Ordering::Acquire) {
+                        on_complete(result);
+                    }
                 })
                 .expect("failed to spawn search thread");
             handle
         };
 
-        self.install_current_job(stop, clock, pondering, &params, handle, timer_handle);
+        self.current_job = Some(SearchJob::new(
+            stop,
+            publish,
+            clock,
+            pondering,
+            (params.soft_time_ms, params.hard_time_ms),
+            handle,
+            timer_handle,
+        ));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::sync::atomic::Ordering;
+    use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
 
-    use crate::timer::deadline_after_ms;
+    use crate::timer::{deadline_after_ms, HARD_STOP_MARGIN_MS};
 
-    use super::{EngineController, SearchParams, HARD_STOP_MARGIN_MS};
+    use super::{EngineController, SearchParams};
 
     #[test]
     fn deadline_after_adds_milliseconds_to_start() {
@@ -288,6 +269,19 @@ mod tests {
     }
 
     #[test]
+    fn unlimited_hard_budget_does_not_become_a_finite_watchdog() {
+        let params = SearchParams {
+            soft_time_ms: u64::MAX,
+            hard_time_ms: u64::MAX,
+            ..SearchParams::default()
+        };
+        assert_eq!(
+            EngineController::build_deadlines(&params, Instant::now()),
+            (None, None)
+        );
+    }
+
+    #[test]
     fn build_deadlines_skips_ponder_search_until_ponderhit() {
         let start = Instant::now();
         let params = SearchParams {
@@ -313,6 +307,135 @@ mod tests {
         };
 
         assert!(EngineController::should_spawn_hard_stop_timer(&params));
+    }
+
+    #[test]
+    fn completion_callback_can_read_the_finished_search_state() {
+        for threads in [1, 2] {
+            let (sender, receiver) = mpsc::channel();
+            let mut controller = EngineController::new(1);
+            controller.set_threads(threads);
+            let state = Arc::clone(controller.search_state());
+            controller.start_search(
+                SearchParams {
+                    depth: Some(1),
+                    ..SearchParams::default()
+                },
+                move |_| {
+                    // A real callback may lock this state to read statistics.
+                    // Use try_lock here so a regression fails without hanging.
+                    sender
+                        .send(state.try_lock().map(|state| state.stats.nodes))
+                        .unwrap();
+                },
+            );
+
+            assert!(
+                receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .is_some(),
+                "completion callback ran with the search state locked ({threads} threads)"
+            );
+            controller.stop_search();
+        }
+    }
+
+    #[test]
+    fn state_setters_stop_the_search_before_waiting_for_its_lock() {
+        for load_network in [false, true] {
+            let mut controller = EngineController::new(1);
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let release = Arc::new(std::sync::Barrier::new(2));
+            let search_release = Arc::clone(&release);
+            controller.set_info_callback(Some(Arc::new(move |_| {
+                entered_tx.send(()).unwrap();
+                search_release.wait();
+            })));
+            controller.start_search(
+                SearchParams {
+                    depth: Some(1),
+                    ..SearchParams::default()
+                },
+                |_| {},
+            );
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let stop = Arc::clone(&controller.current_job.as_ref().unwrap().stop);
+            let setter = std::thread::spawn(move || {
+                if load_network {
+                    assert!(controller
+                        .load_nnue("/missing/chess-engine-network.nnue")
+                        .is_err());
+                } else {
+                    controller.set_max_nodes(123);
+                    assert_eq!(controller.search_state.lock().stats.max_nodes, 123);
+                }
+                controller.stop_search();
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let stopped = stop.load(Ordering::Relaxed);
+            release.wait();
+            setter.join().unwrap();
+            assert!(stopped, "setter blocked without stopping the active search");
+        }
+    }
+
+    #[test]
+    fn dropping_a_controller_cancels_and_joins_its_search() {
+        for threads in [1, 2] {
+            let mut controller = EngineController::new(1);
+            controller.set_threads(threads);
+            let (sender, receiver) = mpsc::channel();
+            controller.start_search(
+                SearchParams {
+                    depth: Some(1),
+                    infinite: true,
+                    ..SearchParams::default()
+                },
+                move |_| {
+                    sender.send(()).unwrap();
+                },
+            );
+            let stop = Arc::clone(&controller.current_job.as_ref().unwrap().stop);
+
+            drop(controller);
+            assert!(
+                stop.load(Ordering::Relaxed),
+                "dropping the controller did not stop its worker"
+            );
+            assert!(
+                matches!(
+                    receiver.recv_timeout(Duration::from_millis(100)),
+                    Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected)
+                ),
+                "dropping the controller published a cancelled result"
+            );
+        }
+    }
+
+    #[test]
+    fn mutating_the_board_cancels_an_active_search_without_publishing() {
+        let mut controller = EngineController::new(1);
+        let (sender, receiver) = mpsc::channel();
+        controller.start_search(
+            SearchParams {
+                infinite: true,
+                ..SearchParams::default()
+            },
+            move |_| sender.send(()).unwrap(),
+        );
+
+        controller.board_mut().make_move_uci("e2e4").unwrap();
+
+        assert!(!controller.is_searching());
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected)
+        ));
     }
 
     #[test]
@@ -362,5 +485,48 @@ mod tests {
             .stop
             .load(std::sync::atomic::Ordering::Relaxed));
         controller.stop_search();
+    }
+
+    #[test]
+    fn infinite_search_waits_for_stop_after_early_completion() {
+        // Cover both the terminal preflight and a completed tree search.
+        // The latter also exercises SMP's internal completion signal.
+        for threads in [1, 2] {
+            for fen in [
+                "7k/8/8/8/8/8/8/K7 w - - 0 1",
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            ] {
+                let (sender, receiver) = mpsc::channel();
+                let mut controller = EngineController::new(1);
+                controller.set_threads(threads);
+                controller.set_board(crate::board::Board::from_fen(fen));
+                controller.start_search(
+                    SearchParams {
+                        depth: Some(1),
+                        infinite: true,
+                        ..SearchParams::default()
+                    },
+                    move |result| sender.send(result).unwrap(),
+                );
+
+                // Even a spurious ponderhit must not release an infinite search.
+                controller.ponderhit();
+                let early_result = receiver.recv_timeout(Duration::from_millis(100));
+                controller.signal_stop();
+                let result = receiver.recv_timeout(Duration::from_secs(2));
+                controller.stop_search();
+
+                assert!(matches!(early_result, Err(mpsc::RecvTimeoutError::Timeout)));
+                let best = result
+                    .expect("stop should release the result")
+                    .best_move
+                    .unwrap();
+                assert!(controller.board_mut().is_legal_move(best));
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "published more than one result"
+                );
+            }
+        }
     }
 }

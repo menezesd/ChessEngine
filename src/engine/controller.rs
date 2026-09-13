@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 mod search_lifecycle;
 
 use super::job::SearchJob;
-use crate::board::{Board, SearchInfoCallback, SearchState};
+use crate::board::{Board, Move, SearchInfoCallback, SearchState};
 
 /// Search parameters for starting a new search
 #[derive(Default)]
@@ -24,6 +24,8 @@ pub struct SearchParams {
     pub infinite: bool,
     /// Number of principal variations to search (1 = normal, >1 = `MultiPV`)
     pub multi_pv: u32,
+    /// Optional root-move restriction. An empty list permits no moves.
+    pub root_moves: Option<Vec<Move>>,
 }
 
 /// Engine controller managing search and game state
@@ -38,6 +40,12 @@ pub struct EngineController {
     info_callback: Option<SearchInfoCallback>,
     /// Number of search threads for SMP (1 = single-threaded)
     num_threads: usize,
+}
+
+impl Drop for EngineController {
+    fn drop(&mut self) {
+        self.stop_search();
+    }
 }
 
 impl EngineController {
@@ -55,6 +63,7 @@ impl EngineController {
 
     /// Load NNUE network from file
     pub fn load_nnue<P: AsRef<std::path::Path>>(&mut self, path: P) -> std::io::Result<()> {
+        self.stop_search();
         let mut state = self.search_state.lock();
         state.load_nnue(path)
     }
@@ -78,6 +87,7 @@ impl EngineController {
 
     /// Get a mutable reference to the current board
     pub fn board_mut(&mut self) -> &mut Board {
+        self.stop_search();
         &mut self.board
     }
 
@@ -101,7 +111,7 @@ impl EngineController {
         state.new_game();
     }
 
-    /// Stop any active search
+    /// Cancel any active search without publishing its result.
     pub fn stop_search(&mut self) {
         if let Some(job) = self.current_job.take() {
             job.stop_and_wait();
@@ -190,6 +200,7 @@ impl EngineController {
 
     /// Set maximum nodes for search
     pub fn set_max_nodes(&mut self, nodes: u64) {
+        self.stop_search();
         self.with_search_state(|state| state.set_max_nodes(nodes));
     }
 

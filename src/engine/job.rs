@@ -1,23 +1,17 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::Instant;
 
 use crate::board::SearchClock;
-use crate::timer::deadline_after_ms;
-
-const PONDERHIT_TIMER_POLL_MS: u64 = 5;
-
-fn deadline_for_limit(start: Instant, limit_ms: u64) -> Option<Instant> {
-    (limit_ms > 0)
-        .then(|| deadline_after_ms(start, limit_ms))
-        .flatten()
-}
+use crate::timer::{search_deadlines, spawn_stop_timer};
 
 /// Active search job state.
 pub struct SearchJob {
     /// Stop flag for the search
     pub stop: Arc<AtomicBool>,
+    /// Whether search output may still be published.
+    pub publish: Arc<AtomicBool>,
     /// Clock for time management
     pub clock: Arc<SearchClock>,
     /// Whether we're currently pondering
@@ -37,15 +31,17 @@ pub struct SearchJob {
 impl SearchJob {
     pub(crate) fn new(
         stop: Arc<AtomicBool>,
+        publish: Arc<AtomicBool>,
         clock: Arc<SearchClock>,
         pondering: Arc<AtomicBool>,
-        planned_soft_time_ms: u64,
-        planned_hard_time_ms: u64,
+        planned_time_ms: (u64, u64),
         handle: JoinHandle<()>,
         timer_handle: Option<JoinHandle<()>>,
     ) -> Self {
+        let (planned_soft_time_ms, planned_hard_time_ms) = planned_time_ms;
         SearchJob {
             stop,
+            publish,
             clock,
             pondering,
             planned_soft_time_ms,
@@ -56,9 +52,11 @@ impl SearchJob {
         }
     }
 
-    /// Stop the search and wait for the thread to finish.
+    /// Cancel the search, discard its result, and wait for the thread to finish.
     pub fn stop_and_wait(mut self) {
+        self.publish.store(false, Ordering::Release);
         self.stop.store(true, Ordering::Relaxed);
+        self.pondering.store(false, Ordering::Relaxed);
         let _ = self.handle.join();
         Self::join_timer(self.timer_handle.take());
         Self::join_timer(self.ponderhit_timer_handle.take());
@@ -83,30 +81,14 @@ impl SearchJob {
         }
 
         let start = Instant::now();
-        let soft_deadline = deadline_for_limit(start, self.planned_soft_time_ms);
-        let hard_deadline = deadline_for_limit(start, self.planned_hard_time_ms);
+        let (soft_deadline, hard_deadline) =
+            search_deadlines(start, self.planned_soft_time_ms, self.planned_hard_time_ms);
         self.clock.reset(start, soft_deadline, hard_deadline);
 
-        // A ponder search starts without a local time limit.  Once it becomes
-        // a normal search, enforce the same soft deadline used by a regular
-        // search; fall back to the hard deadline if no soft deadline exists.
-        if let Some(stop_deadline) = soft_deadline.or(hard_deadline) {
-            let stop_timer = Arc::clone(&self.stop);
-            let handle = thread::spawn(move || loop {
-                if stop_timer.load(Ordering::Relaxed) {
-                    break;
-                }
-                let now = Instant::now();
-                if now >= stop_deadline {
-                    stop_timer.store(true, Ordering::Relaxed);
-                    break;
-                }
-                let sleep_for =
-                    (stop_deadline - now).min(Duration::from_millis(PONDERHIT_TIMER_POLL_MS));
-                thread::sleep(sleep_for);
-            });
-            self.ponderhit_timer_handle = Some(handle);
-        }
+        // Iteration management can spend beyond the soft target when needed.
+        // The watchdog enforces the hard deadline, or a soft-only limit.
+        self.ponderhit_timer_handle =
+            spawn_stop_timer(hard_deadline.or(soft_deadline), Arc::clone(&self.stop));
 
         self.pondering.store(false, Ordering::Relaxed);
     }
@@ -120,16 +102,20 @@ impl SearchJob {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+    use std::time::Duration;
+
     use super::*;
+    use crate::timer::deadline_after_ms;
 
     fn finished_job(planned_soft_time_ms: u64, planned_hard_time_ms: u64) -> SearchJob {
         let start = Instant::now();
         SearchJob::new(
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(true)),
             Arc::new(SearchClock::new(start, None, None)),
             Arc::new(AtomicBool::new(true)),
-            planned_soft_time_ms,
-            planned_hard_time_ms,
+            (planned_soft_time_ms, planned_hard_time_ms),
             thread::spawn(|| {}),
             None,
         )
@@ -180,12 +166,40 @@ mod tests {
     }
 
     #[test]
-    fn ponderhit_enforces_the_soft_deadline() {
+    fn ponderhit_watchdog_allows_soft_time_overrun() {
         let mut job = finished_job(20, 1_000);
         job.ponderhit();
 
         thread::sleep(Duration::from_millis(75));
 
+        assert!(
+            !job.stop.load(Ordering::Relaxed),
+            "watchdog stopped at the soft target instead of the hard limit"
+        );
+        job.stop_and_wait();
+    }
+
+    #[test]
+    fn ponderhit_keeps_the_normal_search_hard_stop_margin() {
+        let mut job = finished_job(20, 100);
+        job.ponderhit();
+        let (start, soft, hard) = job.clock.snapshot();
+        assert_eq!(
+            soft.unwrap().duration_since(start),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            hard.unwrap().duration_since(start),
+            Duration::from_millis(95)
+        );
+        job.stop_and_wait();
+    }
+
+    #[test]
+    fn ponderhit_watchdog_enforces_a_soft_only_limit() {
+        let mut job = finished_job(20, 0);
+        job.ponderhit();
+        thread::sleep(Duration::from_millis(75));
         assert!(job.stop.load(Ordering::Relaxed));
         job.stop_and_wait();
     }
