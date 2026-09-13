@@ -1,6 +1,7 @@
 /target
 /data
 /runs
+__pycache__/
 
 # Legacy C++ implementation
 chess.cpp
