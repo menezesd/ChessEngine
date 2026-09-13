@@ -70,35 +70,35 @@ pub fn search(
     config: SearchConfig,
     stop: &AtomicBool,
 ) -> SearchResult {
-    let max_depth = config.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
-    let info_callback = config.info_callback.clone();
-    let multi_pv = config.multi_pv.max(1);
+    let best_move = if config.multi_pv <= 1 {
+        simple::simple_search_multipv(board, state, &config, stop, &[], 1)
+    } else {
+        search_multiple_pv(board, state, &config, stop)
+    };
+    let ponder_move = if config.extract_ponder {
+        best_move.and_then(|mv| extract_ponder_move(board, state, mv))
+    } else {
+        None
+    };
 
-    if multi_pv == 1 {
-        let best_move = simple::simple_search(
-            board,
-            state,
-            max_depth,
-            config.time_limit_ms,
-            config.hard_time_limit_ms,
-            config.clock.clone(),
-            config.node_limit,
-            stop,
-            info_callback,
-        );
-
-        let ponder_move = if config.extract_ponder {
-            best_move.and_then(|mv| extract_ponder_move(board, state, mv))
-        } else {
-            None
-        };
-
-        return SearchResult {
-            best_move,
-            ponder_move,
-        };
+    SearchResult {
+        best_move,
+        ponder_move,
     }
+}
 
+fn search_multiple_pv(
+    board: &mut Board,
+    state: &mut SearchState,
+    config: &SearchConfig,
+    stop: &AtomicBool,
+) -> Option<Move> {
+    let eligible_root_moves = board
+        .generate_moves()
+        .iter()
+        .filter(|mv| config.allows_root_move(**mv))
+        .count();
+    let multi_pv = effective_multi_pv(config, eligible_root_moves);
     let mut excluded_moves: Vec<Move> = Vec::new();
     let mut first_best_move: Option<Move> = None;
     let starting_total_nodes = state.stats.total_nodes;
@@ -118,6 +118,17 @@ pub fn search(
             break;
         }
 
+        if pv_index > 1
+            && config.clock.as_ref().is_some_and(|clock| {
+                let (_, soft, hard) = clock.snapshot();
+                let now = Instant::now();
+                soft.is_some_and(|deadline| now >= deadline)
+                    || hard.is_some_and(|deadline| now >= deadline)
+            })
+        {
+            break;
+        }
+
         let node_limit = if config.node_limit == 0 {
             0
         } else {
@@ -129,8 +140,8 @@ pub fn search(
             remaining
         };
         let elapsed_ms = u64::try_from(search_start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let time_limit_ms = if config.time_limit_ms == 0 {
-            0
+        let time_limit_ms = if config.time_limit_ms == 0 || config.clock.is_some() {
+            config.time_limit_ms
         } else {
             let remaining = config.time_limit_ms.saturating_sub(elapsed_ms);
             if remaining == 0 {
@@ -138,8 +149,8 @@ pub fn search(
             }
             remaining.min(per_line_soft_ms)
         };
-        let hard_time_limit_ms = if config.hard_time_limit_ms == 0 {
-            0
+        let hard_time_limit_ms = if config.hard_time_limit_ms == 0 || config.clock.is_some() {
+            config.hard_time_limit_ms
         } else {
             let remaining = config.hard_time_limit_ms.saturating_sub(elapsed_ms);
             if remaining == 0 {
@@ -148,19 +159,21 @@ pub fn search(
             remaining
         };
 
-        // The per-line budgets above are static by design: a live clock
-        // would hand each line the full remaining budget and defeat the
-        // even split.
+        // Static budgets account for earlier PV lines here. Live clocks
+        // remain shared so resets also reach a search already in progress;
+        // each context derives its own share of the live soft deadline.
+        let line_config = SearchConfig {
+            time_limit_ms,
+            hard_time_limit_ms,
+            node_limit,
+            multi_pv,
+            ..config.clone()
+        };
         let best_move = simple::simple_search_multipv(
             board,
             state,
-            max_depth,
-            time_limit_ms,
-            hard_time_limit_ms,
-            None,
-            node_limit,
+            &line_config,
             stop,
-            info_callback.clone(),
             &excluded_moves,
             pv_index,
         );
@@ -175,16 +188,20 @@ pub fn search(
         }
     }
 
-    let ponder_move = if config.extract_ponder {
-        first_best_move.and_then(|mv| extract_ponder_move(board, state, mv))
-    } else {
-        None
-    };
+    // Stop or a tiny static budget can expire before PV1 starts. Preserve
+    // the same legal fallback that single-PV iterative deepening provides.
+    first_best_move.or_else(|| {
+        board
+            .generate_moves()
+            .iter()
+            .copied()
+            .find(|mv| config.allows_root_move(*mv))
+    })
+}
 
-    SearchResult {
-        best_move: first_best_move,
-        ponder_move,
-    }
+fn effective_multi_pv(config: &SearchConfig, eligible_root_moves: usize) -> u32 {
+    let eligible = u32::try_from(eligible_root_moves).unwrap_or(u32::MAX);
+    config.multi_pv.min(eligible).max(1)
 }
 
 /// Find best move with fixed depth limit
@@ -225,4 +242,26 @@ pub fn find_best_move_with_time_and_ponder(
 ) -> SearchResult {
     let config = SearchConfig::from_limits(limits);
     search(board, state, config, &limits.stop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_multi_pv, Board, SearchConfig};
+
+    #[test]
+    fn multipv_count_is_capped_by_eligible_root_moves() {
+        let mut board = Board::new();
+        let only = board.parse_move("e2e4").unwrap();
+        let config = SearchConfig::depth(1)
+            .with_multi_pv(256)
+            .with_root_moves(vec![only]);
+        let eligible = board
+            .generate_moves()
+            .iter()
+            .filter(|mv| config.allows_root_move(**mv))
+            .count();
+
+        assert_eq!(eligible, 1);
+        assert_eq!(effective_multi_pv(&config, eligible), 1);
+    }
 }

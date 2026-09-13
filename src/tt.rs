@@ -16,7 +16,7 @@ mod slot;
 
 pub use entry::{BoundType, TTEntry};
 
-use entry::pack_entry;
+use entry::{pack_entry, MAX_HALFMOVE_CLOCK};
 use slot::{TTBucket, BUCKET_SIZE};
 
 const BYTES_PER_MIB: usize = 1024 * 1024;
@@ -92,7 +92,8 @@ impl TranspositionTable {
         bucket.probe(hash)
     }
 
-    /// Store an entry in the table.
+    /// Store an entry for a position with a zero halfmove clock.
+    /// Use `store_with_halfmove_clock` when retaining fifty-move rule context.
     ///
     /// Uses a replacement strategy that prefers:
     /// 1. Empty slots
@@ -107,11 +108,33 @@ impl TranspositionTable {
         best_move: Option<Move>,
         generation: u16,
     ) {
+        self.store_with_halfmove_clock(hash, depth, score, bound_type, best_move, generation, 0);
+    }
+
+    /// Store a score together with its fifty-move rule context.
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_with_halfmove_clock(
+        &self,
+        hash: u64,
+        depth: u32,
+        score: i32,
+        bound_type: BoundType,
+        best_move: Option<Move>,
+        generation: u16,
+        halfmove_clock: u32,
+    ) {
         let depth_u8 = depth.min(255) as u8;
         let score_i16 = score.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         let gen_u8 = (generation & 0x3F) as u8;
 
-        let packed = pack_entry(depth_u8, score_i16, bound_type, best_move, gen_u8);
+        let packed = pack_entry(
+            depth_u8,
+            score_i16,
+            bound_type,
+            best_move,
+            gen_u8,
+            halfmove_clock.min(MAX_HALFMOVE_CLOCK) as u8,
+        );
         let bucket = &self.buckets[self.index(hash)];
         bucket.store(hash, packed, gen_u8);
     }

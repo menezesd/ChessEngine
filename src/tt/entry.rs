@@ -34,6 +34,9 @@ const SCORE_SHIFT: usize = 16;
 pub(super) const DEPTH_SHIFT: usize = 32;
 pub(super) const BOUND_GEN_SHIFT: usize = 40;
 pub(super) const BYTE_MASK: u64 = 0xFF;
+const HALFMOVE_SHIFT: usize = 48;
+const HALFMOVE_MASK: u64 = 0x7F;
+pub(super) const MAX_HALFMOVE_CLOCK: u32 = 100;
 // Keep the all-zero word reserved for an empty TT slot.  The packed payload
 // itself can otherwise legitimately be zero (depth-zero exact draw with no
 // best move and generation zero), so it needs an explicit validity marker.
@@ -47,6 +50,8 @@ pub struct TTEntry {
     pub bound_type: BoundType,
     pub best_move: Option<Move>,
     pub generation: u8,
+    /// Fifty-move counter at the searched position, capped at 100.
+    pub halfmove_clock: u8,
 }
 
 impl TTEntry {
@@ -69,6 +74,11 @@ impl TTEntry {
     pub fn best_move(&self) -> Option<Move> {
         self.best_move
     }
+
+    #[must_use]
+    pub fn matches_halfmove_clock(&self, halfmove_clock: u32) -> bool {
+        u32::from(self.halfmove_clock) == halfmove_clock.min(MAX_HALFMOVE_CLOCK)
+    }
 }
 
 /// Packed entry format (fits in 64 bits):
@@ -76,15 +86,17 @@ impl TTEntry {
 /// - bits 16-31: score (i16 as u16)
 /// - bits 32-39: depth (u8)
 /// - bits 40-47: bound (2 bits) + generation (6 bits)
+/// - bits 48-54: fifty-move counter (0-100)
 /// - bit 63: entry-valid marker (keeps the all-zero word as the empty sentinel)
 ///
-/// Total: 48 payload bits plus one validity bit; 15 bits remain spare.
+/// Total: 55 payload bits plus one validity bit; 8 bits remain spare.
 pub(super) fn pack_entry(
     depth: u8,
     score: i16,
     bound_type: BoundType,
     best_move: Option<Move>,
     generation: u8,
+    halfmove_clock: u8,
 ) -> u64 {
     let mv: u16 = best_move.map_or(0, Move::as_u16);
     let sc: u16 = score as u16;
@@ -96,6 +108,7 @@ pub(super) fn pack_entry(
         | ((sc as u64) << SCORE_SHIFT)
         | ((depth as u64) << DEPTH_SHIFT)
         | ((bound_gen as u64) << BOUND_GEN_SHIFT)
+        | ((u64::from(halfmove_clock) & HALFMOVE_MASK) << HALFMOVE_SHIFT)
 }
 
 pub(super) fn unpack_entry(data: u64) -> TTEntry {
@@ -106,6 +119,7 @@ pub(super) fn unpack_entry(data: u64) -> TTEntry {
 
     let bound_type = BoundType::from_u8(bound_gen & BOUND_MASK);
     let generation = (bound_gen >> GENERATION_SHIFT) & GENERATION_MASK;
+    let halfmove_clock = ((data >> HALFMOVE_SHIFT) & HALFMOVE_MASK) as u8;
 
     let best_move = if mv_bits == 0 {
         None
@@ -119,6 +133,7 @@ pub(super) fn unpack_entry(data: u64) -> TTEntry {
         bound_type,
         best_move,
         generation,
+        halfmove_clock,
     }
 }
 

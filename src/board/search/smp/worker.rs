@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -6,7 +7,6 @@ use crate::board::nnue::NnueNetwork;
 use crate::board::{Board, Move};
 use crate::tt::TranspositionTable;
 
-use super::super::constants::SCORE_INFINITE;
 use super::super::simple::simple_search;
 use super::super::{HceOptions, SearchInfoCallback, SearchParams, SearchState, StaticEvalOptions};
 
@@ -108,7 +108,9 @@ impl SharedSearchState {
 pub struct WorkerResult {
     pub worker_id: usize,
     pub best_move: Option<Move>,
+    /// Score of the last completed iteration, or zero for an unsearched fallback.
     pub score: i32,
+    /// Last completed depth, or zero if no iteration finished.
     pub depth: u32,
     pub nodes: u64,
 }
@@ -175,6 +177,15 @@ pub(super) fn run_worker(
     local_state.tables.counter_moves.reset();
 
     let search_depth = worker_search_depth(config.max_depth, worker_id);
+    let completed = Arc::new(Mutex::new((0, 0)));
+    let last_iteration = Arc::clone(&completed);
+    let callback = config.info_callback;
+    let record_iteration = Arc::new(move |info: &crate::board::SearchIterationInfo| {
+        *last_iteration.lock() = (info.depth, info.score);
+        if let Some(callback) = &callback {
+            callback(info);
+        }
+    });
 
     let move_result = simple_search(
         &mut board,
@@ -185,24 +196,22 @@ pub(super) fn run_worker(
         config.clock,
         config.node_limit,
         &shared.stop,
-        config.info_callback,
+        Some(record_iteration),
     );
 
     shared.add_nodes(local_state.stats.nodes);
     shared.update_seldepth(local_state.stats.seldepth);
 
     let best_move = move_result;
-    let best_score = if let Some(entry) = shared.tt.probe(board.hash) {
-        entry.score()
-    } else {
-        -SCORE_INFINITE
-    };
+    // Another worker can replace the root TT entry at any time. Its score
+    // and requested depth do not describe this worker's selected move.
+    let (depth, score) = *completed.lock();
 
     WorkerResult {
         worker_id,
         best_move,
-        score: best_score,
-        depth: search_depth,
+        score,
+        depth,
         nodes: local_state.stats.total_nodes,
     }
 }
@@ -215,7 +224,77 @@ mod tests {
 
     use crate::board::SearchState;
 
-    use super::{new_worker_state, worker_search_depth, SharedSearchState};
+    use super::{
+        new_worker_state, run_worker, worker_search_depth, SharedSearchState, WorkerSearchConfig,
+    };
+
+    #[test]
+    fn interrupted_worker_reports_only_completed_search_metadata() {
+        let board = crate::board::Board::new();
+        let state = SearchState::new(1);
+        state.tables.tt.store(
+            board.hash(),
+            8,
+            1234,
+            crate::tt::BoundType::LowerBound,
+            None,
+            0,
+        );
+        let shared = Arc::new(SharedSearchState::new(
+            &state,
+            Arc::new(AtomicBool::new(true)),
+            0,
+        ));
+        let config = WorkerSearchConfig {
+            max_depth: 20,
+            time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
+            node_limit: 0,
+            info_callback: None,
+        };
+
+        let result = run_worker(1, board, shared, config);
+
+        assert!(result.best_move.is_some());
+        assert_eq!(result.nodes, 0);
+        assert_eq!(result.depth, 0);
+        assert_eq!(result.score, 0);
+    }
+
+    #[test]
+    fn worker_result_matches_its_last_completed_iteration() {
+        let board = crate::board::Board::new();
+        let state = SearchState::new(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(SharedSearchState::new(&state, Arc::clone(&stop), 0));
+        let reported = Arc::new(parking_lot::Mutex::new(None));
+        let received = Arc::clone(&reported);
+        let config = WorkerSearchConfig {
+            max_depth: 20,
+            time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
+            node_limit: 0,
+            info_callback: Some(Arc::new(move |info| {
+                *received.lock() = Some(info.clone());
+                if info.depth == 2 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            })),
+        };
+
+        let result = run_worker(0, board, shared, config);
+
+        let reported = reported.lock();
+        let reported = reported.as_ref().unwrap();
+        assert_eq!(result.depth, 2);
+        assert_eq!(result.score, reported.score);
+        assert_eq!(
+            result.best_move.unwrap().to_string(),
+            reported.pv.split_whitespace().next().unwrap()
+        );
+    }
 
     #[test]
     fn worker_search_depth_alternates_helper_depth() {

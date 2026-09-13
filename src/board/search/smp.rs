@@ -46,6 +46,9 @@ pub struct SmpConfig {
     /// shared stop flag untouched on completion: the controller uses that
     /// flag to hold the result until `ponderhit` or `stop` arrives.
     pub ponder: bool,
+    /// An infinite search also leaves publication to the controller until
+    /// the caller explicitly stops it.
+    pub infinite: bool,
 }
 
 impl Default for SmpConfig {
@@ -59,11 +62,26 @@ impl Default for SmpConfig {
             node_limit: 0,
             info_callback: None,
             ponder: false,
+            infinite: false,
         }
     }
 }
 
 impl SmpConfig {
+    fn to_search_config(&self) -> SearchConfig {
+        SearchConfig {
+            max_depth: Some(self.max_depth),
+            time_limit_ms: self.time_limit_ms,
+            hard_time_limit_ms: self.hard_time_limit_ms,
+            clock: self.clock.clone(),
+            node_limit: self.node_limit,
+            extract_ponder: true,
+            info_callback: self.info_callback.clone(),
+            multi_pv: 1,
+            root_moves: None,
+        }
+    }
+
     /// Create config with specified thread count
     #[must_use]
     pub fn with_threads(num_threads: usize) -> Self {
@@ -146,12 +164,12 @@ const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
 fn best_worker_move(results: &[WorkerResult]) -> Option<crate::board::Move> {
     let main_result = results
         .iter()
-        .find(|r| r.worker_id == 0 && r.best_move.is_some());
+        .find(|r| r.worker_id == 0 && r.best_move.is_some() && r.depth > 0);
     let best_result = main_result.or_else(|| {
         results
             .iter()
             .filter(|r| r.best_move.is_some())
-            .max_by_key(|r| r.depth)
+            .max_by_key(|r| (r.depth, r.worker_id == 0))
     });
 
     best_result.and_then(|r| r.best_move)
@@ -193,17 +211,7 @@ pub fn smp_search(
     // For single-threaded, use the existing path
     if num_threads == 1 {
         let mut board_clone = board.clone();
-        let search_config = SearchConfig {
-            max_depth: Some(config.max_depth),
-            time_limit_ms: config.time_limit_ms,
-            hard_time_limit_ms: config.hard_time_limit_ms,
-            clock: config.clock.clone(),
-            node_limit: config.node_limit,
-            extract_ponder: true,
-            info_callback: config.info_callback,
-            multi_pv: 1, // SMP currently only supports single PV
-        };
-        return super::search(&mut board_clone, state, search_config, &stop);
+        return super::search(&mut board_clone, state, config.to_search_config(), &stop);
     }
 
     // Avoid spawning worker threads for terminal, proven-draw, and exact
@@ -211,6 +219,12 @@ pub fn smp_search(
     // internally; SMP needs it here to avoid thread setup entirely.
     let mut root_board = board.clone();
     if let RootSearchResolution::Resolved(best_move) = immediate_root_result(&mut root_board) {
+        if config.info_callback.is_some() {
+            // Share terminal score reporting and forced-move analysis with
+            // the single-thread path, without creating idle helper workers.
+            state.stats.reset_search();
+            return super::search(&mut root_board, state, config.to_search_config(), &stop);
+        }
         state.generation = state.generation.wrapping_add(1);
         state.stats.reset_search();
         return SearchResult {
@@ -258,15 +272,15 @@ pub fn smp_search(
     // search one ply deeper, so without a completion signal a fixed-depth
     // search would block here until the slowest helper finishes its deeper
     // tree. The stop flag is created fresh for each search, so setting it
-    // cannot leak into a later search. A ponder search must not set it:
-    // the controller uses this flag to hold the result until `ponderhit`.
+    // cannot leak into a later search. Ponder and infinite searches must
+    // leave it untouched: the controller waits for `ponderhit` or `stop`.
     let mut results: Vec<WorkerResult> = Vec::with_capacity(num_threads);
     let mut handles = handles.into_iter();
     if let Some(main_handle) = handles.next() {
         if let Ok(result) = main_handle.join() {
             results.push(result);
         }
-        if !config.ponder {
+        if !config.ponder && !config.infinite {
             stop.store(true, Ordering::Relaxed);
         }
     }
@@ -299,6 +313,31 @@ mod tests {
     use crate::board::{Board, SearchState};
 
     use super::{active_worker_count, smp_search, worker_node_limit, SmpConfig, DEFAULT_MAX_DEPTH};
+
+    #[test]
+    fn completed_helper_result_takes_precedence_over_an_unsearched_fallback() {
+        let mut board = Board::new();
+        let fallback = board.parse_move("a2a3").unwrap();
+        let searched = board.parse_move("e2e4").unwrap();
+        let results = [
+            super::WorkerResult {
+                worker_id: 0,
+                best_move: Some(fallback),
+                score: 0,
+                depth: 0,
+                nodes: 0,
+            },
+            super::WorkerResult {
+                worker_id: 1,
+                best_move: Some(searched),
+                score: 20,
+                depth: 2,
+                nodes: 100,
+            },
+        ];
+
+        assert_eq!(super::best_worker_move(&results), Some(searched));
+    }
 
     #[test]
     fn depth_clamps_to_default_max_depth() {

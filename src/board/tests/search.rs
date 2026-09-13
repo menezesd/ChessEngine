@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::board::search::{find_best_move, search, SearchConfig, SearchState, MATE_SCORE};
-use crate::board::{Board, Piece, EMPTY_MOVE};
+use crate::board::{Board, Piece, SearchClock, EMPTY_MOVE};
 
 // ============================================================================
 // Alpha-beta search tests
@@ -25,6 +25,133 @@ fn alphabeta_finds_mate_in_one() {
 
     let mv = best.unwrap();
     assert_eq!(mv.to_string(), "e1e8", "Should find Qe8#");
+}
+
+#[test]
+fn shallow_search_keeps_mate_attacked_by_a_pinned_pawn() {
+    for depth in 1..=3 {
+        // h7 cannot take Ng6 because the rook on h1 pins it to the king.
+        let mut board = Board::from_fen("7k/5K1p/8/4N3/8/8/8/7R w - - 0 1");
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+
+        let best = find_best_move(&mut board, &mut state, depth, &stop).unwrap();
+
+        assert_eq!(best.to_string(), "e5g6", "missed mate at depth {depth}");
+        board.make_move(best);
+        assert!(board.is_checkmate());
+    }
+}
+
+#[test]
+fn material_pruning_does_not_hide_a_shorter_forced_mate() {
+    let mut board = Board::from_fen("8/8/8/3K4/8/4kp1R/7Q/8 w - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let best = find_best_move(&mut board, &mut state, 4, &stop).unwrap();
+    assert_eq!(best.to_string(), "h2g2", "Qg2! forces mate in two");
+}
+
+#[test]
+fn root_pvs_pruning_does_not_hide_forced_mate() {
+    // Nb3! is a later root move in the normal ordering.  Its first PVS probe
+    // searches Black with a narrow, deeply negative window.  Static pruning
+    // at that root child used to report a false fail-high and suppress the
+    // full-window re-search, even though ...Nf3 Qc5 is forced mate.
+    let mut board = Board::from_fen("8/3p4/p2k1K2/8/2QN3n/8/8/8 w - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 4, &stop).unwrap();
+
+    assert_eq!(best.to_string(), "d4b3", "Nb3! forces mate");
+}
+
+#[test]
+fn preloop_pruning_does_not_skip_forced_reply_extension() {
+    // Bf6! forces ...gxf6, Kf8, ...f5, Nf7#.  Both Black moves are sole
+    // legal replies.  Node-level RFP used to return before generating the
+    // second one, so the sole-reply extension was never applied and the
+    // depth-6 search missed the mate.
+    let mut board = Board::from_fen("7k/4K1pp/7N/8/8/8/8/B7 w - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+
+    let best = find_best_move(&mut board, &mut state, 6, &stop).unwrap();
+
+    assert_eq!(best.to_string(), "a1f6", "Bf6! forces mate in three");
+}
+
+#[test]
+fn aspiration_search_resolves_a_mate_bound_before_reporting_its_distance() {
+    use crate::tt::BoundType;
+
+    let mut board = Board::from_fen("6k1/5ppp/8/8/8/8/8/4Q2K w - - 0 1");
+    let mut state = SearchState::new(1);
+    let mating_move = board.parse_move("e1e8").unwrap();
+    // Mate in five is a valid lower bound on mate in one, but it is not an
+    // exact distance. A narrow aspiration search must resolve the bound.
+    state.tables.tt.store(
+        board.hash(),
+        8,
+        MATE_SCORE - 9,
+        BoundType::LowerBound,
+        Some(mating_move),
+        0,
+    );
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let received = Arc::clone(&reports);
+    let config = SearchConfig::depth(1).with_info_callback(Arc::new(move |info| {
+        received.lock().unwrap().push((info.score, info.mate_in));
+    }));
+
+    let result = search(&mut board, &mut state, config, &AtomicBool::new(false));
+
+    assert_eq!(result.best_move, Some(mating_move));
+    assert_eq!(*reports.lock().unwrap(), vec![(MATE_SCORE - 1, Some(1))]);
+}
+
+#[test]
+fn multipv_does_not_replace_the_unrestricted_root_score() {
+    let mut board = Board::from_fen("7k/8/8/8/3q4/8/3R4/6K1 w - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let reports_clone = Arc::clone(&reports);
+    let callback = Arc::new(move |info: &crate::board::SearchIterationInfo| {
+        if info.depth == 3 {
+            reports_clone.lock().unwrap().push(info.clone());
+        }
+    });
+
+    // Repeat MultiPV on the same position, then switch back to single PV.
+    for _ in 0..2 {
+        state.new_search();
+        reports.lock().unwrap().clear();
+        let config = SearchConfig::depth(3)
+            .with_multi_pv(2)
+            .with_info_callback(callback.clone());
+        let result = search(&mut board, &mut state, config, &stop);
+        assert_eq!(result.best_move.unwrap().to_string(), "d2d4");
+
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].multipv, 1);
+        assert_eq!(reports[1].multipv, 2);
+        assert!(reports[0].score > reports[1].score);
+        assert_ne!(
+            reports[0].pv.split_whitespace().next(),
+            reports[1].pv.split_whitespace().next()
+        );
+
+        let entry = state.tables.tt.probe(board.hash()).unwrap();
+        assert_eq!(entry.best_move().unwrap().to_string(), "d2d4");
+        assert!(entry.score() > 0);
+    }
+
+    state.new_search();
+    let result = search(&mut board, &mut state, SearchConfig::depth(3), &stop);
+    assert_eq!(result.best_move.unwrap().to_string(), "d2d4");
 }
 
 #[test]
@@ -82,7 +209,7 @@ fn two_knights_endgame_prunes_when_bare_king_is_to_move() {
 
 #[test]
 fn two_knights_endgame_bare_king_avoids_mate_in_one_blunder() {
-    // ...Ka3? permits Nc2#. The other legal king moves maintain the draw.
+    // ...Ka3? permits Nc4#. The other legal king moves maintain the draw.
     let mut board = Board::from_fen("8/8/8/NK6/8/8/1k6/2N5 b - - 0 1");
     let mut state = SearchState::new(1);
     let stop = AtomicBool::new(false);
@@ -297,6 +424,70 @@ fn multipv_search_shares_one_node_budget() {
 }
 
 #[test]
+fn interrupted_first_iteration_does_not_report_an_unsearched_score() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
+    let config = SearchConfig::depth(6)
+        .with_nodes(1)
+        .with_info_callback(Arc::new(move |info| {
+            callback_reports.lock().unwrap().push(info.clone());
+        }));
+
+    let result = search(&mut board, &mut state, config, &stop);
+
+    assert!(result.best_move.is_some_and(|mv| board.is_legal_move(mv)));
+    assert!(reports.lock().unwrap().is_empty());
+}
+
+#[test]
+fn multipv_respects_an_expired_live_clock() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let now = Instant::now();
+    let mut config = SearchConfig::depth(6).with_multi_pv(3);
+    config.clock = Some(Arc::new(SearchClock::new(now, Some(now), Some(now))));
+
+    let result = search(&mut board, &mut state, config, &stop);
+
+    assert!(result.best_move.is_some_and(|mv| board.is_legal_move(mv)));
+    assert_eq!(state.stats.total_nodes, 0, "expired clock still searched");
+}
+
+#[test]
+fn multipv_observes_deadlines_installed_during_search() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let clock = Arc::new(SearchClock::new(Instant::now(), None, None));
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_clock = Arc::clone(&clock);
+    let callback_reports = Arc::clone(&reports);
+    let callback = Arc::new(move |info: &crate::board::SearchIterationInfo| {
+        let mut reports = callback_reports.lock().unwrap();
+        if reports.is_empty() {
+            let now = Instant::now();
+            callback_clock.reset(now, Some(now), Some(now));
+        }
+        reports.push(info.clone());
+    });
+    let mut config = SearchConfig::depth(6)
+        .with_multi_pv(3)
+        .with_info_callback(callback);
+    config.clock = Some(clock);
+
+    let result = search(&mut board, &mut state, config, &stop);
+
+    assert!(result.best_move.is_some_and(|mv| board.is_legal_move(mv)));
+    let reports = reports.lock().unwrap();
+    assert!(state.stats.total_nodes <= reports[0].nodes + 1024);
+    assert!(reports.iter().all(|info| info.multipv == 1));
+}
+
+#[test]
 fn multipv_info_callback_reports_each_requested_line() {
     let mut board = Board::new();
     let mut state = SearchState::new(1);
@@ -322,6 +513,79 @@ fn multipv_info_callback_reports_each_requested_line() {
     let reported = reported.lock().expect("callback mutex poisoned");
     assert!(reported.contains(&1), "first PV line was not reported");
     assert!(reported.contains(&2), "second PV line was not reported");
+}
+
+#[test]
+fn multipv_keeps_a_legal_fallback_when_stopped_before_the_first_line() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(true);
+
+    let result = search(
+        &mut board,
+        &mut state,
+        SearchConfig::depth(5).with_multi_pv(3),
+        &stop,
+    );
+
+    assert!(result.best_move.is_some_and(|mv| board.is_legal_move(mv)));
+    assert_eq!(state.stats.total_nodes, 0);
+}
+
+#[test]
+fn root_move_restrictions_apply_to_interrupted_and_empty_searches() {
+    for multipv in [1, 3] {
+        let mut board = Board::new();
+        let allowed = board.parse_move("a2a3").unwrap();
+        for roots in [Vec::new(), vec![EMPTY_MOVE], vec![allowed, allowed]] {
+            let mut state = SearchState::new(1);
+            let config = SearchConfig::depth(3)
+                .with_multi_pv(multipv)
+                .with_root_moves(roots.clone());
+            let result = search(&mut board, &mut state, config, &AtomicBool::new(true));
+            assert_eq!(
+                result.best_move,
+                roots.contains(&allowed).then_some(allowed)
+            );
+            assert_eq!(state.stats.total_nodes, 0);
+        }
+    }
+}
+
+#[test]
+fn restricted_search_preserves_the_unrestricted_transposition_score() {
+    let mut board = Board::from_fen("7k/8/8/8/3q4/8/3R4/6K1 w - - 0 1");
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let capture = board.parse_move("d2d4").unwrap();
+    assert_eq!(
+        find_best_move(&mut board, &mut state, 3, &stop),
+        Some(capture)
+    );
+    let original = state.tables.tt.probe(board.hash()).unwrap();
+    let allowed = vec![
+        board.parse_move("g1h1").unwrap(),
+        board.parse_move("g1f1").unwrap(),
+    ];
+
+    let result = search(
+        &mut board,
+        &mut state,
+        SearchConfig::depth(2)
+            .with_multi_pv(3)
+            .with_root_moves(allowed.clone()),
+        &stop,
+    );
+
+    assert!(result.best_move.is_some_and(|mv| allowed.contains(&mv)));
+    let retained = state.tables.tt.probe(board.hash()).unwrap();
+    assert_eq!(retained.score(), original.score());
+    assert_eq!(retained.depth(), original.depth());
+    assert_eq!(retained.best_move(), original.best_move());
+    assert_eq!(
+        find_best_move(&mut board, &mut state, 3, &stop),
+        Some(capture)
+    );
 }
 
 #[test]
@@ -686,6 +950,43 @@ fn search_state_generation_wraps() {
     state.new_search();
 
     assert_eq!(state.generation, 0, "Generation should wrap around");
+}
+
+#[test]
+fn loading_either_network_invalidates_cached_evaluations_only_on_success() {
+    use crate::board::Color;
+    use crate::tt::BoundType;
+
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/board/nnue/embedded.nnue");
+    for static_network in [false, true] {
+        let mut state = SearchState::new(1);
+        state
+            .tables
+            .tt
+            .store(123, 10, 1234, BoundType::Exact, None, 0);
+        state
+            .tables
+            .correction_history
+            .update(123, Color::White, 0, 400, 8);
+        let invalid_path = path.join("missing");
+        let error = if static_network {
+            state.load_static_nnue(&invalid_path)
+        } else {
+            state.load_nnue(&invalid_path)
+        };
+        assert!(error.is_err());
+        assert!(state.tables.tt.probe(123).is_some());
+        assert_ne!(state.tables.correction_history.get(123, Color::White), 0);
+
+        if static_network {
+            state.load_static_nnue(&path).unwrap();
+        } else {
+            state.load_nnue(&path).unwrap();
+        }
+        assert!(state.tables.tt.probe(123).is_none());
+        assert_eq!(state.tables.correction_history.get(123, Color::White), 0);
+    }
 }
 
 #[test]

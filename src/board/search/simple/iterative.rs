@@ -4,7 +4,7 @@ use super::{
     effective_futility_margin, exact_two_knights_root_move, SimpleSearchContext, MATE_SCORE,
     MATE_THRESHOLD, SCORE_INFINITE,
 };
-use crate::board::search::{SearchInfoCallback, DEFAULT_MAX_DEPTH};
+use crate::board::search::{SearchConfig, SearchInfoCallback, DEFAULT_MAX_DEPTH};
 use crate::board::{Move, SearchIterationInfo, SearchState, EMPTY_MOVE, MAX_PLY};
 use std::sync::atomic::AtomicBool;
 
@@ -111,6 +111,8 @@ impl SimpleSearchContext<'_> {
             }
 
             self.initial_depth = depth;
+            self.root_best_move = None;
+            let previous_iteration_score = score;
 
             // Aspiration window - fixed delta, stability adjustments removed
             let mut delta = if depth <= 5 {
@@ -127,12 +129,6 @@ impl SimpleSearchContext<'_> {
                     self.alphabeta(depth, alpha, beta, true, 0, crate::board::EMPTY_MOVE);
 
                 if self.should_stop() {
-                    break;
-                }
-
-                // If we found a mate score, accept it immediately
-                if new_score.abs() >= MATE_THRESHOLD {
-                    score = new_score;
                     break;
                 }
 
@@ -156,16 +152,17 @@ impl SimpleSearchContext<'_> {
                 }
             }
 
-            // Get best move from TT
-            if let Some(entry) = self.state.tables.tt.probe(self.board.hash) {
-                if let Some(mv) = entry.best_move() {
-                    if mv != EMPTY_MOVE {
-                        // Verify move is in our root_moves (already filtered for MultiPV)
-                        if self.root_moves.contains(&mv) {
-                            best_move = Some(mv);
-                        }
-                    }
-                }
+            // Interrupted work has neither a completed score nor a complete
+            // root result. Retain the last finished iteration (or the legal
+            // fallback) and do not publish misleading depth/score info.
+            if self.should_stop() {
+                break;
+            }
+
+            // Restricted PV results are deliberately not stored at the
+            // root in the shared TT. Keep their selected move locally.
+            if let Some(mv) = self.root_best_move {
+                best_move = Some(mv);
             }
 
             // Update stability tracking for time management
@@ -175,7 +172,7 @@ impl SimpleSearchContext<'_> {
                 stability_count = 0;
             }
             previous_best_move = best_move;
-            previous_score = score;
+            previous_score = previous_iteration_score;
 
             // Track nodes for this iteration (for node-based time scaling)
             prev_iter_nodes = self.nodes.saturating_sub(iter_start_nodes);
@@ -233,6 +230,29 @@ fn record_zero_node_root_result(state: &mut SearchState) {
     state.stats.tt_hits = 0;
 }
 
+fn report_resolved_root(config: &SearchConfig, multipv: u32, best_move: Option<Move>, score: i32) {
+    if let Some(callback) = &config.info_callback {
+        callback(&SearchIterationInfo {
+            depth: 0,
+            nodes: 0,
+            nps: 0,
+            time_ms: 0,
+            score,
+            mate_in: if score.abs() < MATE_THRESHOLD {
+                None
+            } else if score > 0 {
+                Some((MATE_SCORE - score + 1) / 2)
+            } else {
+                Some(-(MATE_SCORE + score + 1) / 2)
+            },
+            pv: best_move.map_or_else(String::new, |mv| mv.to_string()),
+            seldepth: 0,
+            tt_hits: 0,
+            multipv,
+        });
+    }
+}
+
 /// Run the main search algorithm
 #[allow(clippy::too_many_arguments)]
 pub fn simple_search(
@@ -246,40 +266,31 @@ pub fn simple_search(
     stop: &AtomicBool,
     info_callback: Option<SearchInfoCallback>,
 ) -> Option<Move> {
-    simple_search_multipv(
-        board,
-        state,
-        max_depth,
+    let config = SearchConfig {
+        max_depth: Some(max_depth),
         time_limit_ms,
         hard_time_limit_ms,
         clock,
         node_limit,
-        stop,
         info_callback,
-        &[],
-        1,
-    )
+        ..SearchConfig::default()
+    };
+    simple_search_multipv(board, state, &config, stop, &[], 1)
 }
 
 /// Run the main search algorithm with `MultiPV` support
-#[allow(clippy::too_many_arguments)]
 pub fn simple_search_multipv(
     board: &mut crate::board::Board,
     state: &mut SearchState,
-    max_depth: u32,
-    time_limit_ms: u64,
-    hard_time_limit_ms: u64,
-    clock: Option<std::sync::Arc<crate::board::search::SearchClock>>,
-    node_limit: u64,
+    config: &SearchConfig,
     stop: &AtomicBool,
-    info_callback: Option<SearchInfoCallback>,
     excluded_moves: &[Move],
     multipv_index: u32,
 ) -> Option<Move> {
     // `SearchConfig` and `SmpConfig` already cap their public depth settings.
     // Keep the direct `simple_search` API equally bounded so an unchecked
     // caller cannot request billions of iterative-deepening iterations.
-    let max_depth = clamp_search_depth(max_depth);
+    let max_depth = clamp_search_depth(config.max_depth.unwrap_or(DEFAULT_MAX_DEPTH));
 
     // Increment generation for TT aging (only on first PV line)
     if multipv_index == 1 {
@@ -292,15 +303,24 @@ pub fn simple_search_multipv(
     // Filter out excluded moves (for MultiPV)
     let available_moves: Vec<Move> = moves
         .iter()
-        .filter(|m| !excluded_moves.contains(m))
+        .filter(|m| !excluded_moves.contains(m) && config.allows_root_move(**m))
         .copied()
         .collect();
 
     if available_moves.is_empty() {
         record_zero_node_root_result(state);
+        // An empty restricted domain is not a terminal chess position.
+        if moves.is_empty() {
+            let score = if board.is_in_check(board.side_to_move()) {
+                -MATE_SCORE
+            } else {
+                0
+            };
+            report_resolved_root(config, multipv_index, None, score);
+        }
         return None;
     }
-    if available_moves.len() == 1 {
+    if available_moves.len() == 1 && config.root_moves.is_none() && config.info_callback.is_none() {
         record_zero_node_root_result(state);
         return Some(available_moves[0]);
     }
@@ -310,33 +330,52 @@ pub fn simple_search_multipv(
     // dead position because a mate in one can still exist after a blunder.
     if board.is_theoretical_draw() {
         record_zero_node_root_result(state);
+        report_resolved_root(config, multipv_index, Some(available_moves[0]), 0);
         return Some(available_moves[0]);
     }
 
     if let Some(best_move) = exact_two_knights_root_move(board, &available_moves) {
         record_zero_node_root_result(state);
+        if config.info_callback.is_some() {
+            let info = board.make_move(best_move);
+            let score = if board.is_checkmate() {
+                MATE_SCORE - 1
+            } else if !board.is_theoretical_draw() && super::has_mate_in_one(board) {
+                // A restricted bare-king root may permit only losing moves.
+                -MATE_SCORE + 2
+            } else {
+                0
+            };
+            board.unmake_move(best_move, info);
+            report_resolved_root(config, multipv_index, Some(best_move), score);
+        }
         return Some(best_move);
     }
 
-    let futility_margin = effective_futility_margin(time_limit_ms, state.params.futility_margin);
+    let futility_margin =
+        effective_futility_margin(config.time_limit_ms, state.params.futility_margin);
 
     let mut ctx = SimpleSearchContext {
         board,
         state,
         stop,
         start_time: Instant::now(),
-        time_limit_ms,
-        hard_time_limit_ms,
-        clock,
-        node_limit,
+        time_limit_ms: config.time_limit_ms,
+        hard_time_limit_ms: config.hard_time_limit_ms,
+        clock: config.clock.clone(),
+        time_share: config.multi_pv.max(1),
+        node_limit: config.node_limit,
         nodes: 0,
         futility_margin,
         initial_depth: 1,
         static_eval: [0; MAX_PLY],
         previous_move: [EMPTY_MOVE; MAX_PLY],
         previous_piece: [None; MAX_PLY],
-        info_callback,
+        line_hashes: [0; MAX_PLY],
+        info_callback: config.info_callback.clone(),
         root_moves: available_moves,
+        root_moves_restricted: !excluded_moves.is_empty() || config.root_moves.is_some(),
+        root_best_move: None,
         acc_stack: vec![crate::board::nnue::NnueAccumulator::default(); MAX_PLY + 16]
             .into_boxed_slice(),
         static_acc_stack: vec![crate::board::nnue::NnueAccumulator::default(); MAX_PLY + 16]

@@ -30,9 +30,14 @@ pub struct SearchLimits {
 
 /// Clock for tracking search time limits
 pub struct SearchClock {
-    start_time: Mutex<Instant>,
-    soft_deadline: Mutex<Option<Instant>>,
-    hard_deadline: Mutex<Option<Instant>>,
+    state: Mutex<ClockState>,
+}
+
+#[derive(Clone, Copy)]
+struct ClockState {
+    start_time: Instant,
+    soft_deadline: Option<Instant>,
+    hard_deadline: Option<Instant>,
 }
 
 impl SearchClock {
@@ -43,9 +48,11 @@ impl SearchClock {
         hard_deadline: Option<Instant>,
     ) -> Self {
         SearchClock {
-            start_time: Mutex::new(start_time),
-            soft_deadline: Mutex::new(soft_deadline),
-            hard_deadline: Mutex::new(hard_deadline),
+            state: Mutex::new(ClockState {
+                start_time,
+                soft_deadline,
+                hard_deadline,
+            }),
         }
     }
 
@@ -55,19 +62,16 @@ impl SearchClock {
         soft_deadline: Option<Instant>,
         hard_deadline: Option<Instant>,
     ) {
-        let mut start = self.start_time.lock();
-        *start = start_time;
-        let mut soft = self.soft_deadline.lock();
-        *soft = soft_deadline;
-        let mut hard = self.hard_deadline.lock();
-        *hard = hard_deadline;
+        *self.state.lock() = ClockState {
+            start_time,
+            soft_deadline,
+            hard_deadline,
+        };
     }
 
     pub fn snapshot(&self) -> (Instant, Option<Instant>, Option<Instant>) {
-        let start_time = *self.start_time.lock();
-        let soft_deadline = *self.soft_deadline.lock();
-        let hard_deadline = *self.hard_deadline.lock();
-        (start_time, soft_deadline, hard_deadline)
+        let state = *self.state.lock();
+        (state.start_time, state.soft_deadline, state.hard_deadline)
     }
 }
 
@@ -98,6 +102,9 @@ pub struct SearchConfig {
     pub info_callback: Option<SearchInfoCallback>,
     /// Number of principal variations to search (1 = normal, >1 = `MultiPV`)
     pub multi_pv: u32,
+    /// Optional root-move restriction. `None` searches every legal move;
+    /// `Some` with an empty list permits no moves.
+    pub root_moves: Option<Vec<crate::board::Move>>,
 }
 
 impl Default for SearchConfig {
@@ -111,11 +118,25 @@ impl Default for SearchConfig {
             extract_ponder: true,
             info_callback: None,
             multi_pv: 1,
+            root_moves: None,
         }
     }
 }
 
 impl SearchConfig {
+    pub(super) fn allows_root_move(&self, mv: crate::board::Move) -> bool {
+        self.root_moves
+            .as_ref()
+            .is_none_or(|moves| moves.contains(&mv))
+    }
+
+    /// Restrict the root search to the supplied legal moves.
+    #[must_use]
+    pub fn with_root_moves(mut self, moves: Vec<crate::board::Move>) -> Self {
+        self.root_moves = Some(moves);
+        self
+    }
+
     /// Create a depth-limited search config
     #[must_use]
     pub fn depth(max_depth: u32) -> Self {
@@ -139,7 +160,8 @@ impl SearchConfig {
     pub fn from_limits(limits: &SearchLimits) -> Self {
         let (_, soft_deadline, hard_deadline) = limits.clock.snapshot();
         let now = Instant::now();
-        let time_limit_ms = soft_deadline.map_or(0, |deadline| deadline_remaining_ms(deadline, now));
+        let time_limit_ms =
+            soft_deadline.map_or(0, |deadline| deadline_remaining_ms(deadline, now));
         let hard_time_limit_ms =
             hard_deadline.map_or(0, |deadline| deadline_remaining_ms(deadline, now));
         SearchConfig {
@@ -208,6 +230,38 @@ mod tests {
         deadline_remaining_ms, duration_millis_saturating, SearchClock, SearchConfig, SearchLimits,
     };
     use crate::board::search::DEFAULT_MAX_DEPTH;
+
+    #[test]
+    fn clock_snapshot_does_not_mix_concurrent_resets() {
+        let start = Instant::now();
+        let first = (
+            start,
+            Some(start + Duration::from_secs(1)),
+            Some(start + Duration::from_secs(2)),
+        );
+        let later = start + Duration::from_secs(10);
+        let second = (later, None, Some(later + Duration::from_secs(3)));
+        let clock = SearchClock::new(first.0, first.1, first.2);
+        let barrier = std::sync::Barrier::new(2);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                for _ in 0..20_000 {
+                    clock.reset(second.0, second.1, second.2);
+                    clock.reset(first.0, first.1, first.2);
+                }
+            });
+            barrier.wait();
+            for _ in 0..20_000 {
+                let snapshot = clock.snapshot();
+                assert!(
+                    snapshot == first || snapshot == second,
+                    "mixed clock snapshot: {snapshot:?}"
+                );
+            }
+        });
+    }
 
     #[test]
     fn duration_millis_saturates_large_duration() {

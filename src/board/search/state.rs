@@ -122,6 +122,7 @@ impl SearchState {
     pub fn load_nnue<P: AsRef<std::path::Path>>(&mut self, path: P) -> std::io::Result<()> {
         let network = NnueNetwork::load(path)?;
         self.tables.nnue = Some(Arc::new(network));
+        self.clear_evaluation_cache();
         Ok(())
     }
 
@@ -129,7 +130,15 @@ impl SearchState {
     pub fn load_static_nnue<P: AsRef<std::path::Path>>(&mut self, path: P) -> std::io::Result<()> {
         let network = NnueNetwork::load(path)?;
         self.tables.static_nnue = Some(Arc::new(network));
+        self.clear_evaluation_cache();
         Ok(())
+    }
+
+    /// Discard scores learned with the previous evaluation configuration.
+    /// Call this after changing evaluation settings directly.
+    pub fn clear_evaluation_cache(&mut self) {
+        self.tables.tt.clear();
+        self.tables.correction_history.reset();
     }
 
     /// Get a clone of the shared NNUE network Arc for use by SMP workers

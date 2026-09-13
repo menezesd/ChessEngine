@@ -9,12 +9,10 @@ fn bucket_count_uses_default_for_zero_size() {
 }
 
 #[test]
-fn bucket_count_matches_existing_rounding_for_normal_size() {
+fn bucket_count_uses_the_full_requested_hash_size() {
     let bucket_size = std::mem::size_of::<TTBucket>();
     let requested_buckets = BYTES_PER_MIB / bucket_size;
-    let expected = requested_buckets.next_power_of_two() / 2;
-
-    assert_eq!(tt_bucket_count(1, bucket_size), expected);
+    assert_eq!(tt_bucket_count(1, bucket_size), requested_buckets);
 }
 
 #[test]
@@ -184,12 +182,32 @@ fn test_entry_accessors() {
         bound_type: BoundType::Exact,
         best_move: Some(Move::from_u16(0x1234)),
         generation: 5,
+        halfmove_clock: 42,
     };
 
     assert_eq!(entry.depth(), 10);
     assert_eq!(entry.score(), 500);
     assert_eq!(entry.bound_type(), BoundType::Exact);
     assert!(entry.best_move().is_some());
+    assert!(entry.matches_halfmove_clock(42));
+    assert!(!entry.matches_halfmove_clock(0));
+}
+
+#[test]
+fn fifty_move_context_preserves_scores_moves_and_generation() {
+    let tt = TranspositionTable::new(1);
+    let mv = Some(Move::from_u16(0x1234));
+    for halfmove_clock in [0, 49, 98, 99, 100, u32::MAX] {
+        tt.store_with_halfmove_clock(123, 8, -1234, BoundType::LowerBound, mv, 63, halfmove_clock);
+        let entry = tt.probe(123).unwrap();
+        assert_eq!(entry.depth(), 8);
+        assert_eq!(entry.score(), -1234);
+        assert_eq!(entry.best_move(), mv);
+        assert_eq!(entry.bound_type(), BoundType::LowerBound);
+        assert_eq!(entry.generation, 63);
+        assert!(entry.matches_halfmove_clock(halfmove_clock));
+        assert!(!entry.matches_halfmove_clock((halfmove_clock.min(100) + 1) % 101));
+    }
 }
 
 #[test]

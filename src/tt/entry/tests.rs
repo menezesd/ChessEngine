@@ -21,7 +21,7 @@ fn pack_unpack_roundtrip() {
     ];
 
     for (depth, score, bound, mv, gen) in test_cases {
-        let packed = pack_entry(depth, score, bound, mv, gen);
+        let packed = pack_entry(depth, score, bound, mv, gen, 0);
         let unpacked = unpack_entry(packed);
 
         assert_eq!(unpacked.depth, depth);
@@ -34,11 +34,11 @@ fn pack_unpack_roundtrip() {
 
 #[test]
 fn pack_unpack_extreme_values() {
-    let packed = pack_entry(100, i16::MAX, BoundType::Exact, None, 30);
+    let packed = pack_entry(100, i16::MAX, BoundType::Exact, None, 30, 0);
     let unpacked = unpack_entry(packed);
     assert_eq!(unpacked.score, i16::MAX);
 
-    let packed = pack_entry(100, i16::MIN, BoundType::Exact, None, 30);
+    let packed = pack_entry(100, i16::MIN, BoundType::Exact, None, 30, 0);
     let unpacked = unpack_entry(packed);
     assert_eq!(unpacked.score, i16::MIN);
 }

@@ -19,8 +19,9 @@ pub const MATE_THRESHOLD: i32 = 28000;
 /// Maximum score bound for alpha-beta window
 pub const SCORE_INFINITE: i32 = 30000;
 
-/// Safe score limit (for correction history clamping)
-pub const SCORE_SAFE_MAX: i32 = 29000;
+/// Maximum static evaluation, including learned corrections. Mate scores
+/// are reserved for positions whose terminal result was established by search.
+pub const SCORE_SAFE_MAX: i32 = MATE_THRESHOLD - 1;
 
 /// Threshold for considering a score "near mate" (skip certain pruning)
 pub const SCORE_NEAR_MATE: i32 = 20000;

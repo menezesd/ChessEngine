@@ -101,7 +101,10 @@ mod tests {
         for _ in 0..1_000 {
             apply_gravity(&mut entry, -history_penalty(20));
         }
-        assert!(entry >= -MAX_HISTORY, "entry {entry} fell below -MAX_HISTORY");
+        assert!(
+            entry >= -MAX_HISTORY,
+            "entry {entry} fell below -MAX_HISTORY"
+        );
     }
 
     #[test]

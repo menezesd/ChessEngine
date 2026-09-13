@@ -119,7 +119,11 @@ impl SimpleSearchContext<'_> {
         beta: i32,
         eval: i32,
     ) -> Option<i32> {
-        if depth >= 8 {
+        // Very shallow static evals are too noisy for a hard cutoff. In
+        // particular, they can hide short forcing mates in a null-window
+        // search and prevent the later root move from receiving its PVS
+        // re-search.
+        if !(4..8).contains(&depth) {
             return None;
         }
 
@@ -141,7 +145,25 @@ impl SimpleSearchContext<'_> {
         node: &NodeContext,
         allow_null: bool,
     ) -> Option<i32> {
-        if node.is_pv || node.in_check || node.excluded_move != crate::board::EMPTY_MOVE {
+        if node.is_pv
+            || node.in_check
+            || node.excluded_move != crate::board::EMPTY_MOVE
+            || node.ply == 1
+            || !self.board.has_multiple_legal_moves()
+            || beta.abs() >= SCORE_NEAR_MATE
+            || self.board.halfmove_clock().saturating_add(depth) >= 100
+        {
+            // A null-window search directly below the root decides whether a
+            // later root move gets a full-window PVS re-search.  A speculative
+            // fail-high here can therefore hide the best root move entirely.
+            // Likewise, pre-loop pruning must not bypass the sole-reply
+            // extension at a position with only one legal move.
+            // Search those nodes normally; the deeper tree still gets the
+            // usual RFP/null-move/ProbCut pruning.
+            // Material estimates cannot prove a mate or an escape from it.
+            // Once the horizon reaches the fifty-move limit, static and
+            // null-move estimates can hide a forced draw. Search real moves
+            // so captures/pawn moves and mating exceptions are considered.
             return None;
         }
 

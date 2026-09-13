@@ -4,7 +4,7 @@ use super::*;
 fn test_score_bounds() {
     // SCORE_INFINITE should be the highest
     assert!(SCORE_INFINITE > SCORE_SAFE_MAX);
-    assert!(SCORE_SAFE_MAX > MATE_THRESHOLD);
+    assert!(SCORE_SAFE_MAX < MATE_THRESHOLD);
     // MATE_THRESHOLD is for detecting checkmate scores
     assert!(MATE_THRESHOLD > SCORE_NEAR_MATE);
 }

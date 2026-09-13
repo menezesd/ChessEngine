@@ -72,11 +72,15 @@ impl SimpleSearchContext<'_> {
             return 0;
         }
 
+        if ply < crate::board::MAX_PLY {
+            self.line_hashes[ply] = self.board.hash;
+        }
+
         // Quiescence is also entered directly at alpha-beta leaves, so it
         // must honor draw rules independently of the full-width search.
         // In particular, a TT entry cannot safely stand in for this check:
         // repetition history and the halfmove clock are not in its key.
-        if self.board.is_theoretical_draw() {
+        if self.is_repetition(ply) || self.board.is_theoretical_draw() {
             return 0;
         }
 
@@ -86,25 +90,12 @@ impl SimpleSearchContext<'_> {
 
         // Alpha-beta can arrive here after a long extension sequence.  Do
         // not let quiescence recurse beyond the fixed search-state stacks.
-        if ply >= crate::board::MAX_PLY {
-            return self.evaluate_simple(ply);
+        if ply >= crate::board::MAX_PLY || qdepth >= MAX_QSEARCH_DEPTH {
+            return self.score_at_search_limit(ply);
         }
 
         let stand_pat = self.evaluate_simple(ply);
         let in_check = self.board.is_in_check(self.board.side_to_move());
-
-        // At the depth limit we still need to recognize checkmate. A stand-pat
-        // score is invalid when the side to move is in check.
-        if qdepth >= MAX_QSEARCH_DEPTH {
-            if !self.board.has_legal_move() {
-                return if in_check {
-                    -MATE_SCORE + ply as i32
-                } else {
-                    0
-                };
-            }
-            return stand_pat;
-        }
 
         let mut best_score = if in_check { -SCORE_INFINITE } else { stand_pat };
 
@@ -118,7 +109,11 @@ impl SimpleSearchContext<'_> {
         } else {
             // Stand pat
             if stand_pat >= beta {
-                return stand_pat;
+                return if self.board.has_legal_move() {
+                    stand_pat
+                } else {
+                    0
+                };
             }
             if alpha < stand_pat {
                 alpha = stand_pat;
@@ -169,13 +164,8 @@ impl SimpleSearchContext<'_> {
                 continue;
             }
 
-            if !in_check && self.should_prune_quiescence_capture(m, stand_pat, alpha, qdepth) {
-                continue;
-            }
-
-            if !self.try_visit_node() {
-                return 0;
-            }
+            let prune_capture =
+                !in_check && self.should_prune_quiescence_capture(m, stand_pat, alpha, qdepth);
 
             // Update NNUE accumulator before make_move
             if let Some((_, piece)) = self.board.piece_at(m.from()) {
@@ -183,6 +173,16 @@ impl SimpleSearchContext<'_> {
             }
 
             let info = self.board.make_move(m);
+            // Exchange and material estimates cannot reject a checking
+            // sacrifice, including mate protected by an absolute pin.
+            if prune_capture && !self.board.is_in_check(self.board.side_to_move()) {
+                self.board.unmake_move(m, info);
+                continue;
+            }
+            if !self.try_visit_node() {
+                self.board.unmake_move(m, info);
+                return 0;
+            }
             // Prefetch TT for child position
             self.state.tables.tt.prefetch(self.board.hash);
             let score = -self.quiesce(-beta, -alpha, ply + 1, qdepth + 1);
@@ -214,6 +214,24 @@ mod tests {
     use super::{SimpleSearchContext, MATE_SCORE, MAX_QSEARCH_DEPTH, SCORE_INFINITE};
 
     #[test]
+    fn quiescence_keeps_checkmating_capture_despite_delta_pruning() {
+        for (alpha, beta) in [(-SCORE_INFINITE, SCORE_INFINITE), (3000, 3001)] {
+            let mut board = Board::from_fen("7k/5K1p/6p1/4N3/8/8/8/7R w - - 0 1");
+            let mut state = SearchState::new(1);
+            let stop = AtomicBool::new(false);
+            let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
+
+            let score = ctx.quiesce(alpha, beta, 1, 0);
+
+            assert_eq!(
+                score,
+                MATE_SCORE - 2,
+                "pruned Nxg6# with window {alpha}..{beta}"
+            );
+        }
+    }
+
+    #[test]
     fn quiescence_recognizes_checkmate_at_depth_limit() {
         let mut board = Board::from_fen("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1");
         let mut state = SearchState::new(1);
@@ -226,6 +244,7 @@ mod tests {
             time_limit_ms: 0,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin: 0,
@@ -233,8 +252,11 @@ mod tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };
@@ -258,6 +280,7 @@ mod tests {
             time_limit_ms: 0,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin: 0,
@@ -265,13 +288,35 @@ mod tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };
 
         assert_eq!(ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 0, 0), 0);
+    }
+
+    #[test]
+    fn quiescence_respects_search_line_twofold_repetition() {
+        let mut board = Board::from_fen("7k/8/8/8/8/8/4Q3/6K1 w - - 0 1");
+        let repeated_hash = board.hash();
+        for mv in ["e2e3", "h8g8", "e3e2", "g8h8"] {
+            let mv = board.parse_move(mv).unwrap();
+            board.make_move(mv);
+        }
+        assert_eq!(board.hash(), repeated_hash);
+        assert_eq!(board.repetition_counts.get(repeated_hash), 2);
+
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
+        ctx.line_hashes[0] = repeated_hash;
+
+        assert_eq!(ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 4, 0), 0);
     }
 
     #[test]
@@ -287,6 +332,7 @@ mod tests {
             time_limit_ms: 0,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin: 0,
@@ -294,8 +340,11 @@ mod tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };
@@ -324,6 +373,7 @@ mod tests {
             time_limit_ms: 0,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin: 0,
@@ -331,8 +381,11 @@ mod tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };

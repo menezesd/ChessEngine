@@ -187,6 +187,8 @@ pub struct SimpleSearchContext<'a> {
     /// deadlines override the static millisecond limits above, so a
     /// `ponderhit` reset re-times the running search.
     pub clock: Option<std::sync::Arc<crate::board::search::SearchClock>>,
+    /// Number of PV lines sharing a live soft budget.
+    pub time_share: u32,
     pub node_limit: u64,
     pub nodes: u64,
     pub futility_margin: i32,
@@ -197,20 +199,61 @@ pub struct SimpleSearchContext<'a> {
     pub previous_move: [Move; MAX_PLY],
     /// Previous piece type at each ply for continuation history
     pub previous_piece: [Option<Piece>; MAX_PLY],
+    /// Position hashes on the current search line, indexed by ply.
+    pub line_hashes: [u64; MAX_PLY],
     /// Optional callback for reporting iteration info
     pub info_callback: Option<SearchInfoCallback>,
     /// Root moves to consider (for `MultiPV` support - empty means all moves)
     pub root_moves: Vec<Move>,
+    /// Whether this PV excludes otherwise legal root moves.
+    pub root_moves_restricted: bool,
+    /// Root result kept independently of the shared transposition table.
+    pub root_best_move: Option<Move>,
     /// NNUE accumulator stack indexed by ply (heap-allocated)
     pub acc_stack: Box<[NnueAccumulator]>,
     /// Optional static-eval NNUE accumulator stack indexed by ply.
     pub static_acc_stack: Box<[NnueAccumulator]>,
 }
 
+#[cfg(test)]
+fn test_context<'a>(
+    board: &'a mut Board,
+    state: &'a mut SearchState,
+    stop: &'a AtomicBool,
+) -> SimpleSearchContext<'a> {
+    let futility_margin = state.params.futility_margin;
+    SimpleSearchContext {
+        board,
+        state,
+        stop,
+        start_time: Instant::now(),
+        time_limit_ms: 0,
+        hard_time_limit_ms: 0,
+        clock: None,
+        time_share: 1,
+        node_limit: 0,
+        nodes: 0,
+        futility_margin,
+        initial_depth: 1,
+        static_eval: [0; MAX_PLY],
+        previous_move: [EMPTY_MOVE; MAX_PLY],
+        previous_piece: [None; MAX_PLY],
+        line_hashes: [0; MAX_PLY],
+        info_callback: None,
+        root_moves: Vec::new(),
+        root_moves_restricted: false,
+        root_best_move: None,
+        acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+        static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+    }
+}
+
 #[derive(Clone, Copy)]
 #[allow(clippy::struct_excessive_bools)]
 struct NodeContext {
     ply: usize,
+    /// Evaluation before correction history, retained across child updates.
+    raw_eval: i32,
     is_pv: bool,
     in_check: bool,
     improving: bool,
@@ -355,7 +398,13 @@ impl SimpleSearchContext<'_> {
         moves_tried: usize,
         alpha: i32,
     ) -> bool {
-        if !ctx.is_quiet || node.in_check || ctx.gives_check || node.is_pv {
+        if !ctx.is_quiet
+            || node.ply == 0
+            || node.in_check
+            || ctx.gives_check
+            || node.is_pv
+            || alpha.abs() >= SCORE_NEAR_MATE
+        {
             return false;
         }
 
@@ -367,7 +416,11 @@ impl SimpleSearchContext<'_> {
                 0
             };
             let futility_margin = self.futility_margin * depth as i32;
-            if static_eval + futility_margin <= alpha {
+            // If the search bound says this side can at least draw while the
+            // static evaluator says it is losing, the position is often being
+            // held by tactics. Do not discard quiet tactical resources merely
+            // from that contradictory static estimate.
+            if !(alpha >= 0 && static_eval < 0) && static_eval + futility_margin <= alpha {
                 return true;
             }
         }
@@ -548,16 +601,17 @@ impl SimpleSearchContext<'_> {
             // Track if this is a quiet move
             let is_quiet = !m.is_capture() && !m.is_promotion();
 
-            // SEE pruning for quiet moves at shallow depths
-            // Skip moves that lose material by moving to an attacked square
-            if is_quiet
+            // SEE is only a pruning heuristic: it does not account for
+            // pinned attackers. Protect root/PV moves and the first move,
+            // and wait until after make_move to rule out checking moves.
+            let prune_unsafe_quiet = is_quiet
                 && depth <= 3
+                && ply > 0
+                && !node.is_pv
                 && !in_check
-                && move_count > 1
-                && !self.board.see_quiet_safe(m.from(), m.to())
-            {
-                continue;
-            }
+                && moves_tried > 0
+                && alpha.abs() < SCORE_NEAR_MATE
+                && !self.board.see_quiet_safe(m.from(), m.to());
 
             // Get the piece that's moving for continuation history (before make_move)
             let moving_piece = self.board.piece_at(m.from()).map(|(_, p)| p);
@@ -576,6 +630,11 @@ impl SimpleSearchContext<'_> {
 
             // Check if move gives check
             let gives_check = self.board.is_in_check(self.board.side_to_move());
+
+            if prune_unsafe_quiet && !gives_check {
+                self.board.unmake_move(m, info);
+                continue;
+            }
 
             if ply < MAX_PLY {
                 self.previous_move[ply] = m;
@@ -608,14 +667,20 @@ impl SimpleSearchContext<'_> {
             }
 
             // LMR reduction
-            let reduction = self.compute_lmr_reduction(
-                i - 1,
-                move_count,
-                depth,
-                node,
-                &move_ctx,
-                tt_tactical || gives_check || m.is_capture(),
-            );
+            let reduction = if alpha.abs() >= SCORE_NEAR_MATE {
+                // A reduced search can miss a shorter mating line without
+                // ever raising a mate-valued alpha enough to be re-searched.
+                0
+            } else {
+                self.compute_lmr_reduction(
+                    i - 1,
+                    move_count,
+                    depth,
+                    node,
+                    &move_ctx,
+                    tt_tactical || gives_check || m.is_capture(),
+                )
+            };
 
             // Compute extensions
             let extension = Self::compute_extensions(&move_ctx, node);
@@ -666,14 +731,17 @@ impl SimpleSearchContext<'_> {
 
                 if score > alpha {
                     if score >= beta {
-                        // Penalize quiet moves that didn't cause the cutoff (negative history)
-                        // Don't penalize the cutoff move itself
-                        for quiet_mv in quiets_tried.iter().take(quiets_count) {
-                            if *quiet_mv != m && *quiet_mv != EMPTY_MOVE {
-                                self.state.tables.history.penalize(quiet_mv, depth);
+                        // Singular-extension verification excludes a legal
+                        // move. Its result must not replace the unrestricted
+                        // TT entry or train ordinary move-ordering history.
+                        if node.excluded_move == EMPTY_MOVE {
+                            for quiet_mv in quiets_tried.iter().take(quiets_count) {
+                                if *quiet_mv != m && *quiet_mv != EMPTY_MOVE {
+                                    self.state.tables.history.penalize(quiet_mv, depth);
+                                }
                             }
+                            self.handle_beta_cutoff(m, ply, depth, score, best_move);
                         }
-                        self.handle_beta_cutoff(m, ply, depth, score, best_move);
                         return score;
                     }
                     alpha = score;
@@ -692,6 +760,11 @@ impl SimpleSearchContext<'_> {
 
         // Check for checkmate/stalemate
         if moves_tried == 0 {
+            if node.excluded_move != EMPTY_MOVE {
+                // No alternative to the excluded move is a failed
+                // verification search, not an actual terminal position.
+                return alpha;
+            }
             return if in_check {
                 -MATE_SCORE + ply as i32
             } else {
@@ -699,24 +772,50 @@ impl SimpleSearchContext<'_> {
             };
         }
 
-        self.store_tt(depth, best_score, raised_alpha, best_move, ply);
+        if node.excluded_move == EMPTY_MOVE {
+            self.store_tt(depth, best_score, raised_alpha, best_move, ply);
+        }
 
         // Update correction history for exact bounds (when we have reliable score vs static eval)
-        if raised_alpha && ply < MAX_PLY && !in_check && best_score.abs() < SCORE_NEAR_MATE {
+        if raised_alpha
+            && ply < MAX_PLY
+            && !in_check
+            && node.excluded_move == EMPTY_MOVE
+            && !(ply == 0 && self.root_moves_restricted)
+            && best_score.abs() < SCORE_NEAR_MATE
+        {
             let pawn_hash = self.board.pawn_hash();
-            let raw_eval = self.static_eval[ply];
-            // Remove the previously applied correction to get raw eval
-            let old_correction = self.state.tables.correction_history.get(pawn_hash);
-            let static_eval_raw = raw_eval.saturating_sub(old_correction);
             self.state.tables.correction_history.update(
                 pawn_hash,
-                static_eval_raw,
+                self.board.side_to_move(),
+                node.raw_eval,
                 best_score,
                 depth,
             );
         }
 
         best_score
+    }
+
+    /// Derive this PV line's deadlines from one consistent live snapshot.
+    fn live_deadlines(&self) -> Option<(Instant, Option<Instant>, Option<Instant>)> {
+        self.clock.as_ref().map(|clock| {
+            let (start, soft, hard) = clock.snapshot();
+            if self.time_share <= 1 {
+                return (start, soft, hard);
+            }
+
+            // A later PV starts its own allocation. A ponderhit occurring
+            // during this line starts a fresh allocation at the hit instead.
+            let line_start = self.start_time.max(start);
+            let line_soft = soft.map(|deadline| {
+                let share = deadline.saturating_duration_since(start) / self.time_share;
+                line_start
+                    .checked_add(share)
+                    .map_or(deadline, |line_deadline| line_deadline.min(deadline))
+            });
+            (line_start, line_soft, hard)
+        })
     }
 
     /// Current `(elapsed, soft, hard)` time budget in milliseconds.
@@ -727,13 +826,10 @@ impl SimpleSearchContext<'_> {
     /// means untimed.
     pub(super) fn time_budget_ms(&self) -> (u64, u64, u64) {
         let to_ms = |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
-        if let Some(clock) = &self.clock {
-            let (start, soft_deadline, hard_deadline) = clock.snapshot();
+        if let Some((start, soft_deadline, hard_deadline)) = self.live_deadlines() {
             let elapsed = to_ms(Instant::now().saturating_duration_since(start));
-            let soft =
-                soft_deadline.map_or(0, |d| to_ms(d.saturating_duration_since(start)));
-            let hard =
-                hard_deadline.map_or(0, |d| to_ms(d.saturating_duration_since(start)));
+            let soft = soft_deadline.map_or(0, |d| to_ms(d.saturating_duration_since(start)));
+            let hard = hard_deadline.map_or(0, |d| to_ms(d.saturating_duration_since(start)));
             (elapsed, soft, hard)
         } else {
             let elapsed = to_ms(self.start_time.elapsed());
@@ -750,10 +846,39 @@ impl SimpleSearchContext<'_> {
     /// lets an unstable position actually receive extra time.
     #[inline]
     fn in_tree_time_cap_ms(soft_ms: u64, hard_ms: u64) -> u64 {
-        if hard_ms > 0 {
+        if soft_ms == 0 {
+            hard_ms
+        } else if hard_ms > 0 {
             soft_ms.saturating_mul(SOFT_OVERRUN_FACTOR).min(hard_ms)
         } else {
             soft_ms
+        }
+    }
+
+    fn time_limit_reached(&self) -> bool {
+        if let Some((start, soft_deadline, hard_deadline)) = self.live_deadlines() {
+            let now = Instant::now();
+            if hard_deadline.is_some_and(|deadline| now >= deadline) {
+                return true;
+            }
+            let Some(soft_deadline) = soft_deadline else {
+                return false;
+            };
+            if hard_deadline.is_none() {
+                return now >= soft_deadline;
+            }
+
+            // Compare absolute deadlines so an expired or sub-millisecond
+            // budget cannot round down to the zero/unlimited sentinel.
+            let overrun = soft_deadline
+                .saturating_duration_since(start)
+                .saturating_mul(SOFT_OVERRUN_FACTOR as u32);
+            start
+                .checked_add(overrun)
+                .is_some_and(|deadline| now >= deadline)
+        } else {
+            let cap = Self::in_tree_time_cap_ms(self.time_limit_ms, self.hard_time_limit_ms);
+            cap > 0 && self.start_time.elapsed().as_millis() >= u128::from(cap)
         }
     }
 
@@ -773,11 +898,11 @@ impl SimpleSearchContext<'_> {
         if self.node_limit > 0 && self.nodes >= self.node_limit {
             return true;
         }
-        if (self.time_limit_ms > 0 || self.clock.is_some()) && self.nodes.trailing_zeros() >= 10 {
-            let (elapsed, soft_ms, hard_ms) = self.time_budget_ms();
-            if soft_ms > 0 && elapsed >= Self::in_tree_time_cap_ms(soft_ms, hard_ms) {
-                return true;
-            }
+        if (self.time_limit_ms > 0 || self.hard_time_limit_ms > 0 || self.clock.is_some())
+            && self.nodes.trailing_zeros() >= 10
+            && self.time_limit_reached()
+        {
+            return true;
         }
 
         false
@@ -809,7 +934,7 @@ impl SimpleSearchContext<'_> {
                 self.board.evaluate_simple()
             }
         };
-        if let Some(ref nnue) = self.state.tables.nnue {
+        let score = if let Some(ref nnue) = self.state.tables.nnue {
             let nnue_score = if nnue.supports_tactical_features() {
                 let mut acc = self.acc_stack[ply].clone();
                 self.board.add_nnue_dynamic_features(&mut acc, nnue);
@@ -825,7 +950,8 @@ impl SimpleSearchContext<'_> {
             }
         } else {
             hce_eval()
-        }
+        };
+        score.clamp(-SCORE_SAFE_MAX, SCORE_SAFE_MAX)
     }
 
     /// Evaluation for pruning and qsearch (main workhorse).
@@ -853,7 +979,8 @@ impl SimpleSearchContext<'_> {
             }
         };
 
-        if self.state.nnue_static_blend <= 0 && self.state.tables.static_nnue.is_some() {
+        let score = if self.state.nnue_static_blend <= 0 && self.state.tables.static_nnue.is_some()
+        {
             hce_eval()
         } else if let Some(nnue_eval) = self.evaluate_static_nnue(ply) {
             if self.state.nnue_static_blend >= 100 {
@@ -872,7 +999,8 @@ impl SimpleSearchContext<'_> {
             }
         } else {
             self.board.evaluate_simple()
-        }
+        };
+        score.clamp(-SCORE_SAFE_MAX, SCORE_SAFE_MAX)
     }
 
     /// Initialize the accumulator at the given ply from the current board state.
@@ -933,10 +1061,23 @@ impl SimpleSearchContext<'_> {
         }
     }
 
-    /// Check for repetition (returns true if position repeated)
+    /// Check for a repeated position created on the current search line.
+    /// Historical twofold repetitions are not yet claimable draws.
     #[inline]
-    fn is_repetition(&self) -> bool {
+    fn is_repetition(&self, ply: usize) -> bool {
         self.board.repetition_counts.get(self.board.hash) > 1
+            && self.line_hashes[..ply.min(MAX_PLY)].contains(&self.board.hash)
+    }
+
+    /// Resolve terminal positions before evaluating at a search limit.
+    fn score_at_search_limit(&mut self, ply: usize) -> i32 {
+        if self.board.has_legal_move() {
+            self.evaluate_simple(ply)
+        } else if self.board.is_in_check(self.board.side_to_move()) {
+            -MATE_SCORE + ply as i32
+        } else {
+            0
+        }
     }
 
     /// Score the exact K+NN versus K material class without expanding a
@@ -1112,13 +1253,20 @@ impl SimpleSearchContext<'_> {
 
         // Store in TT (allow mate scores too)
         if !self.should_stop() {
-            self.state.tables.tt.store(
+            if ply == 0 {
+                self.root_best_move = Some(best_move);
+                if self.root_moves_restricted {
+                    return;
+                }
+            }
+            self.state.tables.tt.store_with_halfmove_clock(
                 self.board.hash,
                 depth,
                 score_to_tt(score, ply),
                 BoundType::LowerBound,
                 Some(best_move),
                 self.state.generation,
+                self.board.halfmove_clock(),
             );
         }
     }
@@ -1135,18 +1283,27 @@ impl SimpleSearchContext<'_> {
         if self.should_stop() || best_move == EMPTY_MOVE {
             return;
         }
+        if ply == 0 {
+            self.root_best_move = Some(best_move);
+            // A score obtained with root moves excluded is not the value
+            // of the unrestricted position stored under this board hash.
+            if self.root_moves_restricted {
+                return;
+            }
+        }
         let bound = if raised_alpha {
             BoundType::Exact
         } else {
             BoundType::UpperBound
         };
-        self.state.tables.tt.store(
+        self.state.tables.tt.store_with_halfmove_clock(
             self.board.hash,
             depth,
             score_to_tt(score, ply),
             bound,
             Some(best_move),
             self.state.generation,
+            self.board.halfmove_clock(),
         );
     }
 
@@ -1166,12 +1323,18 @@ impl SimpleSearchContext<'_> {
         };
 
         let tt_move = entry.best_move().unwrap_or(EMPTY_MOVE);
+        if !entry.matches_halfmove_clock(self.board.halfmove_clock()) {
+            // Piece placement still gives a useful move-ordering hint, but
+            // a different fifty-move counter invalidates the score and depth
+            // for both cutoffs and singular-extension verification.
+            return (tt_move, 0, BoundType::Exact, 0, None);
+        }
         let tt_score = score_from_tt(entry.score(), ply);
         let tt_bound = entry.bound_type();
         let tt_depth = entry.depth();
 
         // Check for cutoff
-        if !excluded_move_active && entry.depth() >= depth && !self.is_repetition() {
+        if !excluded_move_active && entry.depth() >= depth && !self.is_repetition(ply) {
             let score = tt_score;
             let cutoff = match entry.bound_type() {
                 BoundType::Exact => {
@@ -1263,8 +1426,12 @@ impl SimpleSearchContext<'_> {
         let is_root = ply == 0;
         let is_pv = beta > alpha + 1;
         let excluded_move_active = excluded_move != EMPTY_MOVE;
+        if ply < MAX_PLY {
+            self.line_hashes[ply] = self.board.hash;
+        }
         let mut node = NodeContext {
             ply,
+            raw_eval: 0,
             is_pv,
             in_check: false,
             improving: false,
@@ -1278,8 +1445,8 @@ impl SimpleSearchContext<'_> {
         // A repeated position on the current line can be claimed as a draw.
         // The board-level rules also cover the fifty-move rule and positions
         // with insufficient mating material. Do this before probing the TT: a
-        // transposition entry does not encode the halfmove clock or history.
-        if !is_root && (self.is_repetition() || self.board.is_theoretical_draw()) {
+        // transposition entry does not encode repetition history.
+        if !is_root && (self.is_repetition(ply) || self.board.is_theoretical_draw()) {
             return 0;
         }
 
@@ -1297,7 +1464,7 @@ impl SimpleSearchContext<'_> {
         // than risking an out-of-bounds continuation/NNUE access in an
         // unusually long checking sequence.
         if ply >= MAX_PLY {
-            return self.evaluate_simple(ply);
+            return self.score_at_search_limit(ply);
         }
 
         // Quiescence at leaf
@@ -1332,15 +1499,21 @@ impl SimpleSearchContext<'_> {
         node.tt_score = tt_score;
         node.tt_bound = tt_bound;
 
-        // At root with restricted moves (MultiPV), only use TT cutoff if TT move is in root_moves
-        let use_tt_cutoff = if is_root && !self.root_moves.is_empty() {
-            tt_move != EMPTY_MOVE && self.root_moves.contains(&tt_move)
+        // Restricted MultiPV roots have different search domains. Use the
+        // shared TT for ordering there, but never for a root score cutoff.
+        let use_tt_cutoff = if is_root {
+            !self.root_moves_restricted
+                && tt_move != EMPTY_MOVE
+                && (self.root_moves.is_empty() || self.root_moves.contains(&tt_move))
         } else {
             true
         };
 
         if use_tt_cutoff {
             if let Some(cutoff_score) = tt_cutoff {
+                if is_root {
+                    self.root_best_move = Some(tt_move);
+                }
                 self.state.stats.tt_hits = self.state.stats.tt_hits.saturating_add(1);
                 return cutoff_score;
             }
@@ -1352,13 +1525,18 @@ impl SimpleSearchContext<'_> {
         } else {
             self.evaluate_simple(ply)
         };
+        node.raw_eval = raw_eval;
 
         // Apply correction history to improve static eval accuracy
         let eval = if in_check {
             raw_eval
         } else {
             let pawn_hash = self.board.pawn_hash();
-            let correction = self.state.tables.correction_history.get(pawn_hash);
+            let correction = self
+                .state
+                .tables
+                .correction_history
+                .get(pawn_hash, self.board.side_to_move());
             (raw_eval + correction).clamp(-SCORE_SAFE_MAX, SCORE_SAFE_MAX)
         };
 
@@ -1378,7 +1556,13 @@ impl SimpleSearchContext<'_> {
             if let Some(score) =
                 self.prune_before_move_loop(depth, alpha, beta, eval, &node, allow_null)
             {
-                return score;
+                // Static/null-move pruning assumes the side can move.
+                // A stalemate may have a large material advantage anyway.
+                return if self.board.has_legal_move() {
+                    score
+                } else {
+                    0
+                };
             }
         }
 
@@ -1470,6 +1654,8 @@ impl SimpleSearchContext<'_> {
         let search_depth = if tt_move == EMPTY_MOVE
             && depth >= self.state.params.iir_min_depth
             && !excluded_move_active
+            && alpha.abs() < SCORE_NEAR_MATE
+            && beta.abs() < SCORE_NEAR_MATE
         {
             depth - 1
         } else {
@@ -1500,6 +1686,7 @@ impl SimpleSearchContext<'_> {
             return None;
         }
 
+        let forced = !self.board.has_legal_move_except(tt_move);
         let ply = node.ply;
 
         // Get the piece that's moving for continuation history
@@ -1534,8 +1721,9 @@ impl SimpleSearchContext<'_> {
             moving_piece,
         };
         let extension = Self::compute_extensions(&move_ctx, node);
-        // Standard depth reduction when descending into child node
-        let new_depth = depth.saturating_sub(1) + extension;
+        // Match the sole-reply extension in the ordinary move loop.
+        // A cached ordering hint must not make a forced line shallower.
+        let new_depth = depth.saturating_sub(u32::from(!forced)) + extension;
 
         // Full window search for TT move (it's the first move)
         let score = -self.alphabeta(new_depth, -beta, -alpha, true, ply + 1, EMPTY_MOVE);
@@ -1576,6 +1764,471 @@ mod evaluation_tests {
     use crate::tt::BoundType;
 
     #[test]
+    fn inherited_twofold_is_not_an_immediate_search_draw() {
+        let mut board = Board::from_fen("7k/8/8/8/8/8/4Q3/6K1 w - - 0 1");
+        for mv in ["e2e3", "h8g8", "e3e2", "g8h8"] {
+            let mv = board.parse_move(mv).unwrap();
+            board.make_move(mv);
+        }
+        let search_root_hash = board.hash();
+        let mv = board.parse_move("e2e3").unwrap();
+        board.make_move(mv);
+        assert_eq!(board.repetition_counts.get(board.hash()), 2);
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::test_context(&mut board, &mut state, &stop);
+        ctx.line_hashes[0] = search_root_hash;
+
+        let score = ctx.alphabeta(1, -SCORE_INFINITE, SCORE_INFINITE, true, 1, EMPTY_MOVE);
+
+        assert!(score < 0, "a historical twofold was scored as a draw");
+    }
+
+    #[test]
+    fn search_line_twofold_is_still_scored_as_a_draw() {
+        let mut board = Board::from_fen("7k/8/8/8/8/8/4Q3/6K1 w - - 0 1");
+        let repeated_hash = board.hash();
+        for mv in ["e2e3", "h8g8", "e3e2", "g8h8"] {
+            let mv = board.parse_move(mv).unwrap();
+            board.make_move(mv);
+        }
+        assert_eq!(board.hash(), repeated_hash);
+        assert_eq!(board.repetition_counts.get(repeated_hash), 2);
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::test_context(&mut board, &mut state, &stop);
+        ctx.line_hashes[0] = repeated_hash;
+
+        let score = ctx.alphabeta(1, -SCORE_INFINITE, SCORE_INFINITE, true, 4, EMPTY_MOVE);
+
+        assert_eq!(score, 0);
+    }
+
+    #[test]
+    fn cached_forced_moves_keep_the_single_reply_extension() {
+        for cached in [false, true] {
+            // Black must play Kh7, after which Rh1 is mate. At depth one,
+            // the sole-reply extension must expose that quiet mating move.
+            let mut board = Board::from_fen("7k/5K2/8/8/8/8/8/R7 b - - 0 1");
+            let forced = board.parse_move("h8h7").unwrap();
+            assert_eq!(board.generate_moves().len(), 1);
+            assert!(!board.is_in_check(board.side_to_move()));
+            let mut state = SearchState::new(1);
+            if cached {
+                state.tables.tt.store_with_halfmove_clock(
+                    board.hash(),
+                    0,
+                    0,
+                    BoundType::UpperBound,
+                    Some(forced),
+                    state.generation,
+                    board.halfmove_clock(),
+                );
+            }
+            let stop = AtomicBool::new(false);
+            let mut ctx = super::test_context(&mut board, &mut state, &stop);
+            let score = ctx.alphabeta(1, -SCORE_INFINITE, SCORE_INFINITE, true, 1, EMPTY_MOVE);
+
+            assert_eq!(score, -MATE_SCORE + 3, "cached={cached}");
+        }
+    }
+
+    #[test]
+    fn incremental_neural_accumulators_match_refresh_for_special_moves() {
+        use crate::board::nnue::network::BASE_INPUT_SIZE;
+        use crate::board::nnue::{NnueNetwork, HIDDEN_SIZE};
+        use std::sync::Arc;
+
+        let network = Arc::new(NnueNetwork {
+            input_size: BASE_INPUT_SIZE,
+            feature_weights: (0..BASE_INPUT_SIZE)
+                .map(|feature| {
+                    std::array::from_fn(|lane| ((feature * 131 + lane * 179) % 65536) as i16)
+                })
+                .collect(),
+            feature_bias: [32000; HIDDEN_SIZE],
+            output_weights_white: [0; HIDDEN_SIZE],
+            output_weights_black: [0; HIDDEN_SIZE],
+            output_bias: 0,
+        });
+        for fen in [
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            "r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1",
+            "7k/8/8/3pP3/8/8/8/K7 w - d6 0 1",
+            "7k/8/8/8/3Pp3/8/8/K7 b - d3 0 1",
+            "r6k/1P6/8/8/8/8/8/7K w - - 0 1",
+            "7k/8/8/8/8/8/1p6/R6K b - - 0 1",
+        ] {
+            let mut board = Board::from_fen(fen);
+            let moves = board.generate_moves();
+            let mut state = SearchState::new(1);
+            state.tables.nnue = Some(Arc::clone(&network));
+            state.tables.static_nnue = Some(Arc::clone(&network));
+            let stop = AtomicBool::new(false);
+            let mut ctx = super::test_context(&mut board, &mut state, &stop);
+            ctx.init_accumulator(0);
+
+            for &mv in &moves {
+                let (color, piece) = ctx.board.piece_at(mv.from()).unwrap();
+                ctx.update_accumulator_for_move(0, mv, piece, color);
+                let undo = ctx.board.make_move(mv);
+                let (white, black) = ctx.board.compute_nnue_features();
+                let mut refreshed = NnueAccumulator::default();
+                refreshed.refresh(&white, &black, &network);
+                for stack in [&ctx.acc_stack, &ctx.static_acc_stack] {
+                    assert_eq!(stack[1].white, refreshed.white, "{fen}: {mv}");
+                    assert_eq!(stack[1].black, refreshed.black, "{fen}: {mv}");
+                }
+                ctx.board.unmake_move(mv, undo);
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_futility_cannot_claim_to_escape_a_forced_mate() {
+        let mut board = Board::from_fen("8/8/8/3K4/8/4kp1R/6Q1/8 b - - 1 1");
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::test_context(&mut board, &mut state, &stop);
+        let alpha = -MATE_SCORE + 3;
+        let score = ctx.alphabeta(2, alpha, alpha + 1, true, 1, EMPTY_MOVE);
+        assert!(
+            score <= alpha,
+            "material pruning invented an escape: {score}"
+        );
+    }
+
+    #[test]
+    fn neural_evaluations_cannot_enter_the_mate_score_range() {
+        use crate::board::nnue::network::BASE_INPUT_SIZE;
+        use crate::board::nnue::{NnueNetwork, HIDDEN_SIZE, QA, QB};
+        use crate::board::search::constants::MATE_THRESHOLD;
+
+        for sign in [-1, 1] {
+            let network = std::sync::Arc::new(NnueNetwork {
+                input_size: BASE_INPUT_SIZE,
+                feature_weights: vec![[0; HIDDEN_SIZE]; BASE_INPUT_SIZE],
+                feature_bias: [QA as i16; HIDDEN_SIZE],
+                output_weights_white: [(sign * QB) as i16; HIDDEN_SIZE],
+                output_weights_black: [(sign * QB) as i16; HIDDEN_SIZE],
+                output_bias: 0,
+            });
+            for static_network in [false, true] {
+                let mut board = Board::new();
+                let mut state = SearchState::new(1);
+                if static_network {
+                    state.tables.static_nnue = Some(std::sync::Arc::clone(&network));
+                } else {
+                    state.tables.nnue = Some(std::sync::Arc::clone(&network));
+                }
+                state.static_eval_options.nnue_pure = true;
+                state.nnue_eval_scale = 400;
+                state.nnue_static_eval_scale = 400;
+                let stop = AtomicBool::new(false);
+                let mut ctx = super::test_context(&mut board, &mut state, &stop);
+                ctx.init_accumulator(0);
+
+                assert!(ctx.evaluate(0).abs() < MATE_THRESHOLD);
+                assert!(ctx.evaluate_simple(0).abs() < MATE_THRESHOLD);
+                assert!(ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 0, 0).abs() < MATE_THRESHOLD);
+            }
+        }
+    }
+
+    #[test]
+    fn white_correction_does_not_bias_black_with_the_same_pawns() {
+        let mut board = Board::new();
+        let pawn_hash = board.pawn_hash();
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        state
+            .tables
+            .correction_history
+            .update(pawn_hash, crate::board::Color::White, 0, 400, 8);
+        board.flip_side_to_move();
+        assert_eq!(board.pawn_hash(), pawn_hash);
+        let mut ctx = super::test_context(&mut board, &mut state, &stop);
+        let raw_eval = ctx.evaluate_simple(1);
+
+        ctx.alphabeta(1, -SCORE_INFINITE, SCORE_INFINITE, true, 1, EMPTY_MOVE);
+
+        assert_eq!(ctx.static_eval[1], raw_eval);
+    }
+
+    #[test]
+    fn transpositions_do_not_reuse_scores_across_fifty_move_clocks() {
+        let stop = AtomicBool::new(false);
+        for clocks in [[0, 99], [99, 0]] {
+            let mut state = SearchState::new(1);
+            for clock in clocks {
+                let mut board = Board::from_fen(&format!("7k/8/8/8/8/8/4Q3/K7 w - - {clock} 1"));
+                let mut ctx = super::test_context(&mut board, &mut state, &stop);
+                let score = ctx.alphabeta(2, -SCORE_INFINITE, SCORE_INFINITE, false, 1, EMPTY_MOVE);
+                if clock == 99 {
+                    assert_eq!(score, 0, "reused winning score at fifty-move boundary");
+                } else {
+                    assert!(score > 500, "reused a fifty-move draw score: {score}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn static_pruning_does_not_skip_an_imminent_fifty_move_draw() {
+        let stop = AtomicBool::new(false);
+        for (clock, depth) in [(99, 1), (98, 2)] {
+            let mut board = Board::from_fen(&format!("7k/8/8/8/8/8/4Q3/K7 w - - {clock} 1"));
+            let mut state = SearchState::new(1);
+            let mut ctx = super::test_context(&mut board, &mut state, &stop);
+            let score = ctx.alphabeta(depth, 0, 1, false, 1, EMPTY_MOVE);
+
+            assert_eq!(score, 0, "static pruning ignored draw at clock {clock}");
+        }
+    }
+
+    #[test]
+    fn hard_only_time_limits_stop_search() {
+        let mut board = Board::new();
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::test_context(&mut board, &mut state, &stop);
+        ctx.start_time = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(100))
+            .unwrap();
+        ctx.hard_time_limit_ms = 20;
+
+        assert!(
+            ctx.should_stop(),
+            "a hard limit must work without a soft limit"
+        );
+        ctx.hard_time_limit_ms = 10_000;
+        assert!(!ctx.should_stop());
+    }
+
+    #[test]
+    fn expired_live_deadlines_stop_even_when_their_millisecond_budget_is_zero() {
+        for (has_soft, has_hard) in [(true, false), (false, true), (true, true)] {
+            for nanos in [0, 1] {
+                let mut board = Board::new();
+                let mut state = SearchState::new(1);
+                let stop = AtomicBool::new(false);
+                let mut ctx = super::test_context(&mut board, &mut state, &stop);
+                let start = Instant::now()
+                    .checked_sub(std::time::Duration::from_millis(1))
+                    .unwrap();
+                let deadline = start + std::time::Duration::from_nanos(nanos);
+                ctx.clock = Some(std::sync::Arc::new(crate::board::SearchClock::new(
+                    start,
+                    has_soft.then_some(deadline),
+                    has_hard.then_some(deadline),
+                )));
+
+                assert!(
+                    ctx.should_stop(),
+                    "soft={has_soft} hard={has_hard} nanos={nanos}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_hard_only_clock_enforces_deadline_updates() {
+        let mut board = Board::new();
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::test_context(&mut board, &mut state, &stop);
+        let start = Instant::now();
+        let clock = std::sync::Arc::new(crate::board::SearchClock::new(
+            start,
+            None,
+            Some(start + std::time::Duration::from_secs(10)),
+        ));
+        ctx.clock = Some(clock.clone());
+        assert!(!ctx.should_stop());
+        clock.reset(start, None, Some(start));
+        assert!(ctx.should_stop());
+    }
+
+    #[test]
+    fn live_multipv_clock_shares_soft_time_and_preserves_resets() {
+        use std::time::Duration;
+
+        let mut board = Board::new();
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::test_context(&mut board, &mut state, &stop);
+        let start = Instant::now();
+        let soft = start + Duration::from_secs(12);
+        let hard = start + Duration::from_secs(24);
+        let clock = std::sync::Arc::new(crate::board::SearchClock::new(
+            start,
+            Some(soft),
+            Some(hard),
+        ));
+        ctx.clock = Some(clock.clone());
+        ctx.time_share = 3;
+
+        ctx.start_time = start + Duration::from_secs(4);
+        assert_eq!(
+            ctx.live_deadlines(),
+            Some((
+                ctx.start_time,
+                Some(start + Duration::from_secs(8)),
+                Some(hard)
+            ))
+        );
+
+        // A late line receives only what remains of the global soft budget.
+        ctx.start_time = start + Duration::from_secs(10);
+        assert_eq!(
+            ctx.live_deadlines(),
+            Some((ctx.start_time, Some(soft), Some(hard)))
+        );
+
+        // A clock reset during this line starts its allocation at the hit.
+        let hit = start + Duration::from_secs(20);
+        let hit_hard = hit + Duration::from_secs(24);
+        clock.reset(hit, Some(hit + Duration::from_secs(12)), Some(hit_hard));
+        assert_eq!(
+            ctx.live_deadlines(),
+            Some((hit, Some(hit + Duration::from_secs(4)), Some(hit_hard)))
+        );
+
+        // Removing deadlines also removes stale static limits.
+        clock.reset(start, None, None);
+        ctx.start_time = start.checked_sub(Duration::from_secs(1)).unwrap();
+        ctx.time_limit_ms = 1;
+        ctx.hard_time_limit_ms = 1;
+        assert!(!ctx.time_limit_reached());
+    }
+
+    #[test]
+    fn stalemate_takes_precedence_over_static_pruning() {
+        // White is materially ahead but every pawn is blocked and Ka1
+        // has no legal move. A positive evaluation cannot justify a cutoff.
+        for depth in 0..=8 {
+            let mut board = Board::from_fen("b7/P7/P7/P7/P7/P7/P1k5/K7 w - - 0 1");
+            assert!(board.is_stalemate());
+            let mut state = SearchState::new(1);
+            let stop = AtomicBool::new(false);
+            let mut ctx = super::test_context(&mut board, &mut state, &stop);
+            assert!(ctx.evaluate_simple(1) > 0);
+            assert_eq!(
+                ctx.alphabeta(depth, 0, 1, true, 1, EMPTY_MOVE),
+                0,
+                "depth {depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_positions_are_recognized_at_the_ply_limit() {
+        for (fen, expected) in [
+            ("b7/P7/P7/P7/P7/P7/P1k5/K7 w - - 0 1", 0),
+            (
+                "7k/6Q1/6K1/8/8/8/8/8 b - - 0 1",
+                -MATE_SCORE + MAX_PLY as i32,
+            ),
+        ] {
+            let mut board = Board::from_fen(fen);
+            let mut state = SearchState::new(1);
+            let stop = AtomicBool::new(false);
+            let mut ctx = super::test_context(&mut board, &mut state, &stop);
+            assert_eq!(
+                ctx.alphabeta(
+                    1,
+                    -SCORE_INFINITE,
+                    SCORE_INFINITE,
+                    true,
+                    MAX_PLY,
+                    EMPTY_MOVE
+                ),
+                expected
+            );
+            assert_eq!(
+                ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, MAX_PLY, 0),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn excluded_move_search_preserves_the_unrestricted_tt_entry() {
+        for (alpha, beta) in [
+            (-SCORE_INFINITE, SCORE_INFINITE),
+            (-10_000, -9_999),
+            (10_000, 10_001),
+        ] {
+            let mut board = Board::from_fen("7k/8/8/8/3q4/8/3R4/6K1 w - - 0 1");
+            let excluded = board.parse_move("d2d4").unwrap();
+            let mut state = SearchState::new(1);
+            let stop = AtomicBool::new(false);
+            state
+                .tables
+                .tt
+                .store(board.hash(), 6, 900, BoundType::Exact, Some(excluded), 0);
+            let mut ctx = super::test_context(&mut board, &mut state, &stop);
+
+            ctx.alphabeta(2, alpha, beta, false, 1, excluded);
+
+            let entry = ctx.state.tables.tt.probe(ctx.board.hash()).unwrap();
+            assert_eq!(entry.depth(), 6, "window {alpha}..{beta}");
+            assert_eq!(entry.score(), 900);
+            assert_eq!(entry.bound_type(), BoundType::Exact);
+            assert_eq!(entry.best_move(), Some(excluded));
+        }
+    }
+
+    #[test]
+    fn excluding_the_only_legal_move_fails_low_without_claiming_a_draw() {
+        let mut board = Board::from_fen("7k/5K2/8/6Q1/8/8/8/8 b - - 0 1");
+        let moves = board.generate_moves();
+        assert_eq!(moves.len(), 1);
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::test_context(&mut board, &mut state, &stop);
+
+        let score = ctx.alphabeta(2, -100, -99, false, 1, moves[0]);
+        assert!(score < -99, "no alternatives must fail low, got {score}");
+    }
+
+    #[test]
+    fn null_window_search_keeps_a_checking_move_attacked_by_a_pinned_pawn() {
+        let mut board = Board::from_fen("7k/5K1p/8/4N3/8/8/8/7R w - - 0 1");
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = SimpleSearchContext {
+            board: &mut board,
+            state: &mut state,
+            stop: &stop,
+            start_time: Instant::now(),
+            time_limit_ms: 0,
+            hard_time_limit_ms: 0,
+            clock: None,
+            time_share: 1,
+            node_limit: 0,
+            nodes: 0,
+            futility_margin: 0,
+            initial_depth: 1,
+            static_eval: [0; MAX_PLY],
+            previous_move: [EMPTY_MOVE; MAX_PLY],
+            previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
+            info_callback: None,
+            root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
+            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
+        };
+
+        // At an interior non-PV node, SEE pruning is active. Rh7+ is
+        // searched before Ng6#, so the first-move safeguard is not enough.
+        let score = ctx.alphabeta(1, MATE_SCORE - 3, MATE_SCORE - 2, true, 1, EMPTY_MOVE);
+        assert_eq!(score, MATE_SCORE - 2);
+    }
+
+    #[test]
     fn static_full_hce_uses_tuned_evaluation_when_enabled() {
         let mut board =
             Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
@@ -1598,6 +2251,7 @@ mod evaluation_tests {
             time_limit_ms: 0,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin,
@@ -1605,8 +2259,11 @@ mod evaluation_tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };
@@ -1628,6 +2285,7 @@ mod evaluation_tests {
             time_limit_ms: 0,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin,
@@ -1635,14 +2293,18 @@ mod evaluation_tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };
         let moves = ctx.board.generate_moves();
         let node = NodeContext {
             ply: 0,
+            raw_eval: 0,
             is_pv: false,
             in_check: false,
             improving: false,
@@ -1701,6 +2363,7 @@ mod evaluation_tests {
             time_limit_ms: 0,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin,
@@ -1708,8 +2371,11 @@ mod evaluation_tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };
@@ -1738,6 +2404,7 @@ mod evaluation_tests {
             time_limit_ms: 40,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin,
@@ -1745,8 +2412,11 @@ mod evaluation_tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };
@@ -1781,6 +2451,7 @@ mod evaluation_tests {
             time_limit_ms: 0,
             hard_time_limit_ms: 0,
             clock: None,
+            time_share: 1,
             node_limit: 0,
             nodes: 0,
             futility_margin,
@@ -1788,8 +2459,11 @@ mod evaluation_tests {
             static_eval: [0; MAX_PLY],
             previous_move: [EMPTY_MOVE; MAX_PLY],
             previous_piece: [None; MAX_PLY],
+            line_hashes: [0; MAX_PLY],
             info_callback: None,
             root_moves: Vec::new(),
+            root_moves_restricted: false,
+            root_best_move: None,
             acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
             static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
         };

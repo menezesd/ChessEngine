@@ -1,9 +1,10 @@
 use super::super::super::constants::SCORE_NEAR_MATE;
+use crate::board::Color;
 
 /// Correction history - tracks how wrong static eval is for similar pawn structures.
 /// When search finds a more accurate score than static eval, we store the correction
-/// indexed by pawn hash. Future positions with similar pawn structures get this
-/// correction applied to their static eval.
+/// indexed by pawn hash and side to move. Scores are side-relative, so each
+/// side learns its own correction for a given pawn structure.
 const CORRECTION_HISTORY_SIZE: usize = 16384;
 const MIN_CORRECTION_DEPTH: u32 = 2;
 const MAX_CORRECTION_DEPTH: u32 = 8;
@@ -13,8 +14,8 @@ const CORRECTION_DELTA_LIMIT: i32 = 500;
 const CORRECTION_VALUE_LIMIT: i32 = 1000;
 
 pub struct CorrectionHistory {
-    /// Indexed by `pawn_hash` % size, stores weighted average correction
-    corrections: Box<[i16; CORRECTION_HISTORY_SIZE]>,
+    /// Indexed by side to move, then `pawn_hash` % size.
+    corrections: [Box<[i16; CORRECTION_HISTORY_SIZE]>; 2],
 }
 
 impl Default for CorrectionHistory {
@@ -27,7 +28,7 @@ impl CorrectionHistory {
     #[must_use]
     pub fn new() -> Self {
         CorrectionHistory {
-            corrections: Box::new([0; CORRECTION_HISTORY_SIZE]),
+            corrections: std::array::from_fn(|_| Box::new([0; CORRECTION_HISTORY_SIZE])),
         }
     }
 
@@ -37,13 +38,20 @@ impl CorrectionHistory {
 
     /// Get correction for a position based on pawn structure
     #[must_use]
-    pub fn get(&self, pawn_hash: u64) -> i32 {
-        self.corrections[Self::index(pawn_hash)] as i32
+    pub fn get(&self, pawn_hash: u64, side: Color) -> i32 {
+        self.corrections[side.index()][Self::index(pawn_hash)] as i32
     }
 
     /// Update correction when we find search score differs from static eval
     /// Uses exponential moving average: new = old * (1-weight) + correction * weight
-    pub fn update(&mut self, pawn_hash: u64, static_eval: i32, search_score: i32, depth: u32) {
+    pub fn update(
+        &mut self,
+        pawn_hash: u64,
+        side: Color,
+        static_eval: i32,
+        search_score: i32,
+        depth: u32,
+    ) {
         if depth < MIN_CORRECTION_DEPTH || search_score.abs() > SCORE_NEAR_MATE {
             return;
         }
@@ -52,18 +60,20 @@ impl CorrectionHistory {
             .saturating_sub(static_eval)
             .clamp(-CORRECTION_DELTA_LIMIT, CORRECTION_DELTA_LIMIT);
         let idx = Self::index(pawn_hash);
-        let old = self.corrections[idx] as i32;
+        let entry = &mut self.corrections[side.index()][idx];
+        let old = i32::from(*entry);
         let weight = correction_weight(depth);
         let new_val = (old * (CORRECTION_WEIGHT_SCALE - weight) + correction * weight)
             / CORRECTION_WEIGHT_SCALE;
 
-        self.corrections[idx] =
-            new_val.clamp(-CORRECTION_VALUE_LIMIT, CORRECTION_VALUE_LIMIT) as i16;
+        *entry = new_val.clamp(-CORRECTION_VALUE_LIMIT, CORRECTION_VALUE_LIMIT) as i16;
     }
 
     /// Reset all corrections
     pub fn reset(&mut self) {
-        self.corrections.fill(0);
+        for side in &mut self.corrections {
+            side.fill(0);
+        }
     }
 }
 
@@ -79,18 +89,18 @@ mod tests {
     fn correction_history_ignores_shallow_updates() {
         let mut history = CorrectionHistory::new();
 
-        history.update(123, 0, 400, 1);
+        history.update(123, Color::White, 0, 400, 1);
 
-        assert_eq!(history.get(123), 0);
+        assert_eq!(history.get(123, Color::White), 0);
     }
 
     #[test]
     fn correction_history_applies_weighted_delta() {
         let mut history = CorrectionHistory::new();
 
-        history.update(123, 100, 356, 4);
+        history.update(123, Color::White, 100, 356, 4);
 
-        assert_eq!(history.get(123), 32);
+        assert_eq!(history.get(123, Color::White), 32);
     }
 
     #[test]
@@ -102,8 +112,22 @@ mod tests {
     fn correction_history_saturates_extreme_eval_delta() {
         let mut history = CorrectionHistory::new();
 
-        history.update(123, i32::MIN, 0, 4);
+        history.update(123, Color::White, i32::MIN, 0, 4);
 
-        assert_eq!(history.get(123), 62);
+        assert_eq!(history.get(123, Color::White), 62);
+    }
+
+    #[test]
+    fn corrections_for_opposite_sides_do_not_cancel_each_other() {
+        let mut history = CorrectionHistory::new();
+        history.update(123, Color::White, 0, 400, 8);
+        history.update(123, Color::Black, 0, -400, 8);
+
+        assert_eq!(history.get(123, Color::White), 100);
+        assert_eq!(history.get(123, Color::Black), -100);
+
+        history.reset();
+        assert_eq!(history.get(123, Color::White), 0);
+        assert_eq!(history.get(123, Color::Black), 0);
     }
 }

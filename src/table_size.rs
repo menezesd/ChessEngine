@@ -11,15 +11,9 @@ pub(crate) fn rounded_bucket_count(
         return default_buckets;
     }
 
-    let rounded_buckets = requested_buckets
-        .checked_next_power_of_two()
-        .map_or(usize::MAX / 2 + 1, |count| count / 2);
-
-    if rounded_buckets == 0 {
-        default_buckets
-    } else {
-        rounded_buckets
-    }
+    // Round down, retaining exact powers of two. Halving next_power_of_two
+    // also halves every ordinary power-of-two Hash setting.
+    1usize << (usize::BITS - 1 - requested_buckets.leading_zeros())
 }
 
 #[cfg(test)]
@@ -47,14 +41,29 @@ mod tests {
     }
 
     #[test]
-    fn matches_existing_rounding_for_normal_size() {
+    fn exact_power_of_two_uses_the_requested_capacity() {
         let requested_buckets = UNIT_BYTES / BUCKET_SIZE;
-        let expected = requested_buckets.next_power_of_two() / 2;
 
         assert_eq!(
             rounded_bucket_count(1, UNIT_BYTES, BUCKET_SIZE, DEFAULT_BUCKETS),
-            expected
+            requested_buckets
         );
+    }
+
+    #[test]
+    fn rounds_down_only_when_the_bucket_count_is_not_a_power_of_two() {
+        for requested in 1..=1024 {
+            let count = rounded_bucket_count(requested, 1, 1, DEFAULT_BUCKETS);
+            assert!(count.is_power_of_two());
+            assert!(
+                count <= requested,
+                "{count} buckets exceed requested {requested}"
+            );
+            assert!(
+                count * 2 > requested,
+                "{count} wastes half of requested {requested}"
+            );
+        }
     }
 
     #[test]
