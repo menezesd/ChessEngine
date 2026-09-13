@@ -21,9 +21,9 @@ pub enum XBoardCommand {
     Go,
     /// Enter force mode (make moves without thinking)
     Force,
-    /// Play the color to move
+    /// Leave force mode and play the opponent of the side to move
     PlayOther,
-    /// Set computer's color
+    /// Set the side to move and make the computer play its opponent
     White,
     Black,
     /// Time remaining for engine (centiseconds)
@@ -62,7 +62,7 @@ pub enum XBoardCommand {
     ClearBoard,
     /// Place piece in edit mode (e.g., "Pa2")
     EditPiece(String),
-    /// Toggle the side to move in edit mode (CECP `c`; sent bare, no argument)
+    /// Toggle the color of placed pieces in edit mode (CECP `c`)
     EditColor,
     /// Computer plays itself
     Computer,

@@ -37,8 +37,12 @@ impl XBoardHandler {
             XBoardCommand::New => {
                 self.stop_ponder();
                 self.board = Board::new();
-                self.force_mode = false;
+                self.force_mode = self.analyze_mode;
                 self.engine_color = Some(Color::Black);
+                self.max_depth = DEFAULT_MAX_DEPTH;
+                self.level_start_fullmove = 0;
+                self.opponent_time_cs = seconds_to_centiseconds(self.base_time_sec);
+                self.engine_time_cs = Some(self.opponent_time_cs);
                 self.move_history.clear();
                 self.state.lock().new_game();
                 None
@@ -46,35 +50,47 @@ impl XBoardHandler {
             XBoardCommand::SetBoard(fen) => {
                 self.stop_ponder();
                 match Board::try_from_fen(fen) {
-                    Ok(board) => {
-                        self.board = board;
-                        self.move_history.clear();
-                        None
-                    }
-                    Err(e) => Some(format_error(fen, &e.to_string())),
+                    Ok(board) => match board.validate_king_counts() {
+                        Ok(()) => {
+                            self.board = board;
+                            self.move_history.clear();
+                            None
+                        }
+                        Err(error) => Some(format_error(fen, &error.to_string())),
+                    },
+                    Err(error) => Some(format_error(fen, &error.to_string())),
                 }
             }
             XBoardCommand::UserMove(mv_str) => self.handle_user_move(mv_str),
             XBoardCommand::Go => {
+                self.analyze_mode = false;
                 self.force_mode = false;
                 self.engine_color = Some(self.board.side_to_move());
                 None
             }
             XBoardCommand::Force => {
+                self.analyze_mode = false;
                 self.force_mode = true;
                 self.engine_color = None;
                 None
             }
             XBoardCommand::PlayOther => {
+                self.analyze_mode = false;
+                self.force_mode = false;
                 self.engine_color = Some(self.board.side_to_move().opponent());
                 None
             }
-            XBoardCommand::White => {
-                self.engine_color = Some(Color::White);
-                None
-            }
-            XBoardCommand::Black => {
-                self.engine_color = Some(Color::Black);
+            XBoardCommand::White | XBoardCommand::Black => {
+                let side = if matches!(cmd, XBoardCommand::White) {
+                    Color::White
+                } else {
+                    Color::Black
+                };
+                if self.board.side_to_move() != side {
+                    self.board.flip_side_to_move();
+                    self.move_history.clear();
+                }
+                self.engine_color = Some(side.opponent());
                 None
             }
             XBoardCommand::Undo => {
@@ -86,6 +102,7 @@ impl XBoardHandler {
                 None
             }
             XBoardCommand::Result(_) => {
+                self.analyze_mode = false;
                 self.force_mode = true;
                 None
             }
@@ -99,7 +116,7 @@ impl XBoardHandler {
     pub(super) fn handle_time_setting_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
         match cmd {
             XBoardCommand::Time(cs) => {
-                self.engine_time_cs = *cs;
+                self.engine_time_cs = Some(*cs);
                 None
             }
             XBoardCommand::OTime(cs) => {
@@ -112,10 +129,11 @@ impl XBoardHandler {
                 increment_seconds,
             } => {
                 self.moves_per_session = *moves_per_session;
+                self.level_start_fullmove = self.board.fullmove_number().saturating_sub(1);
                 self.base_time_sec = *base_seconds;
                 self.increment_sec = *increment_seconds;
-                self.engine_time_cs = seconds_to_centiseconds(*base_seconds);
-                self.opponent_time_cs = self.engine_time_cs;
+                self.opponent_time_cs = seconds_to_centiseconds(*base_seconds);
+                self.engine_time_cs = Some(self.opponent_time_cs);
                 self.time_per_move_sec = None;
                 None
             }
@@ -135,14 +153,14 @@ impl XBoardHandler {
             }
             XBoardCommand::MoveNow => {
                 self.stop_flag.store(true, Ordering::SeqCst);
-                None
+                self.finish_thinking()
             }
             XBoardCommand::Post => {
-                self.post_thinking = true;
+                self.post_thinking.store(true, Ordering::Relaxed);
                 None
             }
             XBoardCommand::NoPost => {
-                self.post_thinking = false;
+                self.post_thinking.store(false, Ordering::Relaxed);
                 None
             }
             XBoardCommand::Hard => {
@@ -151,6 +169,7 @@ impl XBoardHandler {
             }
             XBoardCommand::Easy => {
                 self.pondering_enabled = false;
+                self.stop_ponder();
                 None
             }
             XBoardCommand::Memory(mb) => {
@@ -193,7 +212,7 @@ impl XBoardHandler {
             XBoardCommand::Quit => {
                 self.stop_ponder();
                 self.stop_analyze();
-                std::process::exit(0);
+                None
             }
             XBoardCommand::Unknown(s) => Some(format_error(s, "unknown command")),
             _ => None,
@@ -242,7 +261,7 @@ impl XBoardHandler {
 
     /// Check if the engine should think now.
     pub(super) fn should_think(&self) -> bool {
-        if self.force_mode || self.paused || self.analyze_mode {
+        if self.force_mode || self.paused || self.analyze_mode || self.edit_mode {
             return false;
         }
         match self.engine_color {

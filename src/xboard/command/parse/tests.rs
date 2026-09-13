@@ -41,6 +41,18 @@ fn test_time() {
 }
 
 #[test]
+fn test_negative_clocks_are_clamped_to_zero() {
+    assert!(matches!(
+        parse_xboard_command("time -25"),
+        Some(XBoardCommand::Time(0))
+    ));
+    assert!(matches!(
+        parse_xboard_command("otim -1"),
+        Some(XBoardCommand::OTime(0))
+    ));
+}
+
+#[test]
 fn test_usermove() {
     match parse_xboard_command("usermove e2e4") {
         Some(XBoardCommand::UserMove(m)) => assert_eq!(m, "e2e4"),
@@ -61,6 +73,11 @@ fn test_san_move() {
     match parse_xboard_command("Nf3") {
         Some(XBoardCommand::UserMove(m)) => assert_eq!(m, "Nf3"),
         _ => panic!("Expected UserMove from SAN"),
+    }
+
+    match parse_xboard_command("Pe4") {
+        Some(XBoardCommand::UserMove(m)) => assert_eq!(m, "Pe4"),
+        _ => panic!("Expected UserMove from Crafty-style pawn SAN"),
     }
 }
 
@@ -156,8 +173,22 @@ fn test_parse_time_control() {
     assert_eq!(parse_time_control("5:30"), Some(330));
     assert_eq!(parse_time_control("0:30"), Some(30));
     assert_eq!(parse_time_control("1:00"), Some(60));
+    assert_eq!(parse_time_control("25+5"), Some(1500));
+    assert_eq!(parse_time_control("0:30+5"), Some(30));
 
     assert_eq!(parse_time_control("abc"), None);
     assert_eq!(parse_time_control("5:abc"), None);
     assert_eq!(parse_time_control("999999999999"), None);
+}
+
+#[test]
+fn test_level_ignores_base_time_suffix() {
+    assert!(matches!(
+        parse_xboard_command("level 40 25+5 0"),
+        Some(XBoardCommand::Level {
+            moves_per_session: 40,
+            base_seconds: 1500,
+            increment_seconds: 0,
+        })
+    ));
 }

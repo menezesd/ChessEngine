@@ -1,6 +1,7 @@
 use crate::board::{Color, Piece, Square};
 
 use super::command::XBoardCommand;
+use super::output::format_error;
 use super::state::XBoardHandler;
 
 const EDIT_COMMAND_LEN: usize = 3;
@@ -42,53 +43,46 @@ fn parse_edit_piece_command(piece_str: &str) -> Option<EditPieceCommand> {
 }
 
 impl XBoardHandler {
-    pub(super) fn handle_edit_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
+    /// Return whether the command was consumed and any protocol response.
+    pub(super) fn handle_edit_command(&mut self, cmd: &XBoardCommand) -> (bool, Option<String>) {
         match cmd {
             XBoardCommand::Edit => {
                 self.edit_mode = true;
-                self.board.clear();
                 self.move_history.clear();
-                self.edit_white_to_move = true;
-                None
+                self.edit_white_pieces = true;
             }
-            XBoardCommand::EditDone => {
+            XBoardCommand::EditDone if self.edit_mode => {
+                if let Err(error) = self.board.validate_king_counts() {
+                    return (true, Some(format_error(".", &error.to_string())));
+                }
                 self.edit_mode = false;
-                if !self.edit_white_to_move {
+                self.board.reset_repetition_history();
+            }
+            XBoardCommand::ClearBoard if self.edit_mode => {
+                let was_black_to_move = !self.board.white_to_move();
+                self.board.clear();
+                if was_black_to_move {
                     self.board.flip_side_to_move();
                 }
-                self.board.reset_repetition_history();
-                None
             }
-            XBoardCommand::ClearBoard => {
-                if self.edit_mode {
-                    self.board.clear();
-                }
-                None
-            }
-            XBoardCommand::EditColor => {
+            XBoardCommand::EditColor if self.edit_mode => {
                 // CECP's edit-mode "c" is a bare toggle, not a color select:
                 // it flips which side subsequent piece-placement commands
                 // add to, starting from White.
-                if self.edit_mode {
-                    self.edit_white_to_move = !self.edit_white_to_move;
-                }
-                None
+                self.edit_white_pieces = !self.edit_white_pieces;
             }
-            XBoardCommand::EditPiece(piece_str) => {
-                if self.edit_mode {
-                    self.place_piece(piece_str);
-                }
-                None
+            XBoardCommand::EditPiece(piece_str) if self.edit_mode => {
+                self.place_piece(piece_str);
             }
             // The protocol parser is intentionally context-free, so SAN-like
             // edit tokens such as `Ke1` arrive as `UserMove`. In edit mode
             // they unambiguously mean piece placement.
             XBoardCommand::UserMove(piece_str) if self.edit_mode => {
                 self.place_piece(piece_str);
-                None
             }
-            _ => None,
+            _ => return (false, None),
         }
+        (true, None)
     }
 
     /// Place a piece on the board in edit mode (e.g., "Pa2", "Ke1", "x" to remove).
@@ -97,7 +91,7 @@ impl XBoardHandler {
             return;
         };
 
-        let color = if self.edit_white_to_move {
+        let color = if self.edit_white_pieces {
             Color::White
         } else {
             Color::Black
@@ -164,13 +158,32 @@ mod tests {
     fn edit_color_command_toggles_placement_side() {
         let mut handler = XBoardHandler::new();
         handler.handle_edit_command(&XBoardCommand::Edit);
-        assert!(handler.edit_white_to_move, "edit mode starts on White");
+        assert!(handler.edit_white_pieces, "edit mode starts on White");
 
         handler.handle_edit_command(&XBoardCommand::EditColor);
-        assert!(!handler.edit_white_to_move, "c toggles to Black");
+        assert!(!handler.edit_white_pieces, "c toggles to Black");
 
         handler.handle_edit_command(&XBoardCommand::EditColor);
-        assert!(handler.edit_white_to_move, "c toggles back to White");
+        assert!(handler.edit_white_pieces, "c toggles back to White");
+    }
+
+    #[test]
+    fn edit_done_rejects_invalid_king_counts() {
+        let mut handler = XBoardHandler::new();
+        handler.handle_edit_command(&XBoardCommand::Edit);
+        handler.handle_edit_command(&XBoardCommand::ClearBoard);
+        handler.handle_edit_command(&XBoardCommand::UserMove("Ke1".to_string()));
+
+        let (consumed, response) = handler.handle_edit_command(&XBoardCommand::EditDone);
+        assert!(consumed);
+        assert!(response.is_some());
+        assert!(handler.edit_mode);
+
+        handler.handle_edit_command(&XBoardCommand::EditColor);
+        handler.handle_edit_command(&XBoardCommand::UserMove("Ke8".to_string()));
+        let (_, response) = handler.handle_edit_command(&XBoardCommand::EditDone);
+        assert!(response.is_none());
+        assert!(!handler.edit_mode);
     }
 
     #[test]

@@ -1,34 +1,63 @@
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::board::{
-    find_best_move, find_best_move_with_ponder, find_best_move_with_time_and_ponder, Move,
-    SearchClock, SearchLimits, SearchResult,
+    find_best_move, search, Board, Move, SearchClock, SearchConfig, SearchLimits, SearchResult,
 };
 use crate::engine::time::{TimeConfig, TimeControl};
 use crate::timer::deadline_after_ms;
 
+use super::output::format_search_info;
 use super::state::{PonderState, XBoardHandler};
 
-const CENTISECOND_MS: u64 = 10;
 const XBOARD_MOVE_OVERHEAD_MS: u64 = 0;
 const XBOARD_SOFT_TIME_PERCENT: u64 = 5;
 const XBOARD_HARD_TIME_PERCENT: u64 = 15;
 const XBOARD_DEFAULT_MAX_NODES: u64 = 0;
 const HINT_DEPTH: u32 = 4;
-
-fn duration_centiseconds_saturating(duration: Duration) -> u64 {
-    let centiseconds = duration.as_millis() / u128::from(CENTISECOND_MS);
-    u64::try_from(centiseconds).unwrap_or(u64::MAX)
-}
-
-fn elapsed_centiseconds_since(start: Instant) -> u64 {
-    duration_centiseconds_saturating(start.elapsed())
-}
+const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 impl XBoardHandler {
+    /// Use the same search, stack size, and live output switch in every mode.
+    fn spawn_search(
+        &self,
+        mut board: Board,
+        mut config: SearchConfig,
+        stop: Arc<AtomicBool>,
+        name: &str,
+    ) -> thread::JoinHandle<SearchResult> {
+        let root = board.clone();
+        let post = Arc::clone(&self.post_thinking);
+        config.info_callback = Some(Arc::new(move |info| {
+            if post.load(Ordering::Relaxed) {
+                let mut stdout = io::stdout().lock();
+                writeln!(stdout, "{}", format_search_info(&root, info)).ok();
+                stdout.flush().ok();
+            }
+        }));
+        let state = Arc::clone(&self.state);
+        thread::Builder::new()
+            .name(name.to_string())
+            .stack_size(SEARCH_STACK_SIZE)
+            .spawn(move || {
+                let mut state = state.lock();
+                state.new_search();
+                search(&mut board, &mut state, config, &stop)
+            })
+            .expect("failed to spawn XBoard search thread")
+    }
+
+    /// Cancel a move search and discard the result before changing position.
+    pub(super) fn stop_thinking(&mut self) {
+        if let Some(handle) = self.thinking.take() {
+            self.stop_flag.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+
     /// Stop any active ponder search.
     pub(super) fn stop_ponder(&mut self) {
         if let Some(ponder) = self.ponder.take() {
@@ -49,46 +78,17 @@ impl XBoardHandler {
     pub(super) fn start_analyze(&mut self) {
         self.stop_analyze();
 
-        if self.paused {
+        if self.paused || self.edit_mode {
             return;
         }
 
-        let board = self.board.clone();
-        let state = Arc::clone(&self.state);
-        let max_depth = self.max_depth;
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = Arc::clone(&stop);
-        let post_thinking = self.post_thinking;
-
-        let handle = thread::spawn(move || {
-            let mut board = board;
-            let mut guard = state.lock();
-            guard.new_search();
-
-            for depth in 1..=max_depth {
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let start_time = Instant::now();
-                let result = find_best_move(&mut board, &mut guard, depth, &stop_clone);
-
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                if let Some(mv) = result {
-                    let elapsed_cs = elapsed_centiseconds_since(start_time);
-                    let nodes = guard.stats.nodes;
-                    let score = 0;
-
-                    if post_thinking {
-                        let san = board.move_to_san(&mv);
-                        println!("{depth} {score} {elapsed_cs} {nodes} {san}");
-                    }
-                }
-            }
-        });
+        let handle = self.spawn_search(
+            self.board.clone(),
+            SearchConfig::depth(self.max_depth).with_ponder(false),
+            Arc::clone(&stop),
+            "xboard-analysis",
+        );
 
         self.analyze_handle = Some((stop, handle));
     }
@@ -101,49 +101,56 @@ impl XBoardHandler {
         ponder_board.make_move(ponder_move);
 
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = Arc::clone(&stop);
-        let state_clone = Arc::clone(&self.state);
-        let max_depth = self.max_depth;
-
-        let handle = thread::spawn(move || {
-            let mut guard = state_clone.lock();
-            let result =
-                find_best_move_with_ponder(&mut ponder_board, &mut guard, max_depth, &stop_clone);
-            Some(result)
-        });
+        let handle = self.spawn_search(
+            ponder_board,
+            SearchConfig::depth(self.max_depth),
+            Arc::clone(&stop),
+            "xboard-ponder",
+        );
 
         self.ponder = Some(PonderState { stop, handle });
     }
 
-    /// Think and return the search result with best move and ponder move.
-    pub(super) fn think(&mut self) -> SearchResult {
-        self.stop_ponder();
-        self.stop_flag.store(false, Ordering::SeqCst);
-
-        let mut state = self.state.lock();
-        let time_control = self.time_control();
-
-        if time_control.is_unlimited() {
-            find_best_move_with_ponder(&mut self.board, &mut state, self.max_depth, &self.stop_flag)
-        } else {
-            let limits = self.search_limits(time_control);
-            find_best_move_with_time_and_ponder(&mut self.board, &mut state, &limits)
+    /// Start a move search without blocking command processing.
+    pub(super) fn start_thinking(&mut self) {
+        if self.thinking.is_some() || !self.should_think() {
+            return;
         }
+        self.stop_ponder();
+        self.stop_analyze();
+        self.stop_flag = Arc::new(AtomicBool::new(false));
+
+        let time_control = self.time_control();
+        let mut config = if time_control.is_unlimited() {
+            SearchConfig::depth(self.max_depth)
+        } else {
+            SearchConfig::from_limits(&self.search_limits(time_control))
+        };
+        // CECP depth and clock limits apply simultaneously.
+        config.max_depth = Some(self.max_depth);
+        self.thinking = Some(self.spawn_search(
+            self.board.clone(),
+            config,
+            Arc::clone(&self.stop_flag),
+            "xboard-search",
+        ));
     }
 
     pub(super) fn time_control(&self) -> TimeControl {
         if let Some(seconds) = self.time_per_move_sec {
             TimeControl::from_xboard_st(seconds)
-        } else if self.engine_time_cs > 0 {
-            TimeControl::from_xboard_time(
-                self.engine_time_cs,
-                self.increment_sec,
-                if self.moves_per_session > 0 {
-                    Some(self.moves_per_session)
-                } else {
-                    None
-                },
-            )
+        } else if let Some(time_cs) = self.engine_time_cs {
+            let moves_to_go = if self.moves_per_session == 0 {
+                None
+            } else {
+                let played = self
+                    .board
+                    .fullmove_number()
+                    .saturating_sub(1)
+                    .saturating_sub(self.level_start_fullmove);
+                Some(self.moves_per_session - played % self.moves_per_session)
+            };
+            TimeControl::from_xboard_time(time_cs, self.increment_sec, moves_to_go)
         } else {
             TimeControl::Depth
         }
@@ -172,29 +179,21 @@ impl XBoardHandler {
 
     /// Get a hint (quick search).
     pub(super) fn get_hint(&mut self) -> Option<Move> {
-        let mut state = self.state.lock();
-        find_best_move(&mut self.board, &mut state, HINT_DEPTH, &self.stop_flag)
+        // A running move, ponder, or analysis search owns the state lock.
+        let mut state = self.state.try_lock()?;
+        find_best_move(
+            &mut self.board,
+            &mut state,
+            HINT_DEPTH,
+            &AtomicBool::new(false),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::duration_centiseconds_saturating;
     use crate::timer::deadline_after_ms;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn duration_centiseconds_saturates_large_duration() {
-        assert_eq!(duration_centiseconds_saturating(Duration::MAX), u64::MAX);
-    }
-
-    #[test]
-    fn duration_centiseconds_converts_duration() {
-        assert_eq!(
-            duration_centiseconds_saturating(Duration::from_millis(1250)),
-            125
-        );
-    }
+    use std::time::Instant;
 
     #[test]
     fn deadline_after_returns_none_when_duration_overflows_instant() {

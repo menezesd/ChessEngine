@@ -23,39 +23,61 @@ use command::{parse_xboard_command, XBoardCommand};
 use output::format_move;
 pub use state::XBoardHandler;
 use std::io::{self, BufRead, Write};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 impl XBoardHandler {
     /// Run the `XBoard` protocol main loop.
     pub fn run(&mut self) {
-        let stdin = io::stdin();
         let mut stdout = io::stdout();
-
-        for line in stdin.lock().lines() {
-            let Ok(line) = line else { break };
-
-            if let Some(cmd) = parse_xboard_command(&line) {
-                let response = self.handle_command(&cmd);
-                if let Some(resp) = response {
-                    for line in resp.lines() {
-                        writeln!(stdout, "{line}").ok();
-                    }
-                    stdout.flush().ok();
+        let (sender, commands) = mpsc::channel();
+        thread::spawn(move || {
+            for line in io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if sender.send(line).is_err() {
+                    break;
                 }
+            }
+        });
 
-                if let Some(output) = self.play_engine_turn() {
+        loop {
+            match commands.recv_timeout(Duration::from_millis(5)) {
+                Ok(line) => {
+                    if let Some(cmd) = parse_xboard_command(&line) {
+                        if let Some(response) = self.handle_command(&cmd) {
+                            writeln!(stdout, "{response}").ok();
+                            stdout.flush().ok();
+                        }
+                        if matches!(cmd, XBoardCommand::Quit) {
+                            break;
+                        }
+                        self.start_thinking();
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+
+            if self
+                .thinking
+                .as_ref()
+                .is_some_and(thread::JoinHandle::is_finished)
+            {
+                if let Some(output) = self.finish_thinking() {
                     writeln!(stdout, "{output}").ok();
                     stdout.flush().ok();
                 }
             }
         }
+        self.stop_thinking();
+        self.stop_ponder();
+        self.stop_analyze();
     }
 
-    fn play_engine_turn(&mut self) -> Option<String> {
-        if !self.should_think() {
-            return None;
-        }
-
-        let result = self.think();
+    /// Join a completed (or explicitly stopped) move search and play its move.
+    fn finish_thinking(&mut self) -> Option<String> {
+        let result = self.thinking.take()?.join().ok()?;
         let mv = result.best_move?;
         let output = format_move(&self.board, &mv);
         let info = self.board.make_move(mv);
@@ -70,11 +92,52 @@ impl XBoardHandler {
 
     /// Handle a single `XBoard` command.
     pub fn handle_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
+        // Position and mode changes invalidate a running result. Join before
+        // touching the board or locking search state so no stale move can
+        // be published and no command waits for an uninterruptible search.
+        if matches!(
+            cmd,
+            XBoardCommand::New
+                | XBoardCommand::SetBoard(_)
+                | XBoardCommand::UserMove(_)
+                | XBoardCommand::Go
+                | XBoardCommand::Force
+                | XBoardCommand::PlayOther
+                | XBoardCommand::White
+                | XBoardCommand::Black
+                | XBoardCommand::Undo
+                | XBoardCommand::Remove
+                | XBoardCommand::Result(_)
+                | XBoardCommand::Edit
+                | XBoardCommand::Analyze
+                | XBoardCommand::Pause
+                | XBoardCommand::Quit
+                | XBoardCommand::Memory(_)
+        ) {
+            self.stop_thinking();
+            self.stop_ponder();
+            self.stop_analyze();
+        }
+
+        let response = self.dispatch_command(cmd);
+        if self.analyze_mode
+            && !self.paused
+            && !self.edit_mode
+            && self.analyze_handle.is_none()
+            && !matches!(cmd, XBoardCommand::Quit)
+        {
+            self.start_analyze();
+        }
+        response
+    }
+
+    fn dispatch_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
         // Edit commands must win over the normal move handler. Several valid
         // edit tokens (for example `Ke1`) are also valid-looking SAN moves,
         // but inside edit mode they place pieces rather than play a move.
-        if let Some(response) = self.handle_edit_command(cmd) {
-            return Some(response);
+        let (edit_consumed, edit_response) = self.handle_edit_command(cmd);
+        if edit_consumed {
+            return edit_response;
         }
 
         if let Some(response) = self.handle_game_management_command(cmd) {

@@ -10,7 +10,28 @@
 //! - nodes: nodes searched
 //! - pv: principal variation in SAN
 
-use crate::board::{Board, Move};
+use crate::board::{Board, Move, SearchIterationInfo};
+
+/// Convert a completed search's coordinate PV into CECP thinking output.
+pub(super) fn format_search_info(board: &Board, info: &SearchIterationInfo) -> String {
+    let mut position = board.clone();
+    let mut pv = Vec::new();
+    for text in info.pv.split_whitespace() {
+        let Ok(mv) = position.parse_move(text) else {
+            break;
+        };
+        position.make_move(mv);
+        pv.push(mv);
+    }
+    format_thinking(
+        board,
+        info.depth,
+        info.score,
+        info.time_ms / 10,
+        info.nodes,
+        &pv,
+    )
+}
 
 /// Format a principal variation line for `XBoard` output.
 ///

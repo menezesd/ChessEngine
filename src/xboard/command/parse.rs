@@ -27,6 +27,11 @@ impl<'a> CommandParts<'a> {
         self.get(index).and_then(|value| value.parse().ok())
     }
 
+    fn clock_centiseconds(&self, index: usize) -> Option<u64> {
+        let value: i128 = self.parsed(index)?;
+        u64::try_from(value.max(0)).ok()
+    }
+
     fn string(&self, index: usize) -> Option<String> {
         self.get(index).map(str::to_string)
     }
@@ -75,8 +80,8 @@ fn parse_arg_command(parts: &CommandParts<'_>) -> Option<XBoardCommand> {
         "protover" => parts.parsed(1).map(XBoardCommand::Protover),
         "accepted" => parts.string(1).map(XBoardCommand::Accepted),
         "rejected" => parts.string(1).map(XBoardCommand::Rejected),
-        "time" => parts.parsed(1).map(XBoardCommand::Time),
-        "otim" => parts.parsed(1).map(XBoardCommand::OTime),
+        "time" => parts.clock_centiseconds(1).map(XBoardCommand::Time),
+        "otim" => parts.clock_centiseconds(1).map(XBoardCommand::OTime),
         "st" => parts.parsed(1).map(XBoardCommand::St),
         "sd" => parts.parsed(1).map(XBoardCommand::Sd),
         "ping" => parts.parsed(1).map(XBoardCommand::Ping),
@@ -179,22 +184,51 @@ fn is_likely_move(s: &str) -> bool {
         return true;
     }
 
-    s.chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_lowercase() || "NBRQK".contains(first))
+    s.chars().next().is_some_and(|first| {
+        first.is_ascii_lowercase()
+            || "NBRQK".contains(first)
+            || first == 'P'
+                && s[1..].bytes().all(|byte| {
+                    matches!(
+                        byte,
+                        b'a'..=b'h'
+                            | b'1'..=b'8'
+                            | b'x'
+                            | b'-'
+                            | b'='
+                            | b'N'
+                            | b'B'
+                            | b'R'
+                            | b'Q'
+                            | b'+'
+                            | b'#'
+                            | b'!'
+                            | b'?'
+                    )
+                })
+    })
 }
 
 /// Parse time control string (supports "5" or "5:30" format).
 /// Returns total seconds.
 fn parse_time_control(s: &str) -> Option<u32> {
-    if let Some((mins, secs)) = s.split_once(':') {
-        let mins: u32 = mins.parse().ok()?;
-        let secs: u32 = secs.parse().ok()?;
-        mins.checked_mul(60)?.checked_add(secs)
+    let (mins, rest) = parse_decimal_prefix(s)?;
+    let secs = if let Some(rest) = rest.strip_prefix(':') {
+        parse_decimal_prefix(rest)?.0
     } else {
-        let mins: u32 = s.parse().ok()?;
-        mins.checked_mul(60)
+        0
+    };
+
+    mins.checked_mul(60)?.checked_add(secs)
+}
+
+fn parse_decimal_prefix(s: &str) -> Option<(u32, &str)> {
+    let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
     }
+
+    Some((s[..digits].parse().ok()?, &s[digits..]))
 }
 
 #[cfg(test)]
