@@ -31,6 +31,8 @@ pub enum FenError {
     TooManyFiles { rank: usize, files: usize },
     /// Too few files in a rank
     TooFewFiles { rank: usize, files: usize },
+    /// A usable chess position must contain exactly one king of each color
+    InvalidKingCount { white: u32, black: u32 },
 }
 
 impl fmt::Display for FenError {
@@ -74,6 +76,12 @@ impl fmt::Display for FenError {
             }
             FenError::TooFewFiles { rank, files } => {
                 write!(f, "Too few files ({files}) in rank {rank}")
+            }
+            FenError::InvalidKingCount { white, black } => {
+                write!(
+                    f,
+                    "FEN must contain exactly one king of each color, found {white} white and {black} black"
+                )
             }
         }
     }

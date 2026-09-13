@@ -129,9 +129,10 @@ impl Board {
 
     /// Flip the side to move (for edit mode)
     pub fn flip_side_to_move(&mut self) {
-        use crate::zobrist::ZOBRIST;
         self.white_to_move = !self.white_to_move;
-        self.hash ^= ZOBRIST.black_to_move_key;
+        // An en-passant opportunity belongs only to the original side.
+        self.en_passant_target = None;
+        self.hash = self.calculate_initial_hash();
         // This operation is used by position editors rather than normal move
         // play. The edited position must not inherit repetition counts from
         // the opposite side-to-move state.
@@ -173,33 +174,30 @@ impl Board {
     /// Place a piece on the board (for edit mode)
     /// This updates bitboards, hash, and incremental eval
     pub fn place_piece(&mut self, sq: Square, color: Color, piece: Piece) {
-        use crate::zobrist::ZOBRIST;
-
         // First remove any existing piece at this square
         if let Some((old_color, old_piece)) = self.piece_at(sq) {
             self.remove_piece(sq, old_color, old_piece);
-            self.hash ^= ZOBRIST.piece_keys[old_piece.index()][old_color.index()][sq.index()];
             self.remove_piece_from_eval(sq, old_color, old_piece);
             self.sync_king_square_after_removal(old_color, old_piece);
         }
 
         // Now add the new piece
         self.set_piece(sq, color, piece);
-        self.hash ^= ZOBRIST.piece_keys[piece.index()][color.index()][sq.index()];
         self.add_piece_to_eval(sq, color, piece);
+        // Editing can enable or disable en passant, including by pinning
+        // its capturer. Recompute the whole hash on this non-search path.
+        self.hash = self.calculate_initial_hash();
         self.reset_repetition_history();
     }
 
     /// Remove a piece from the board by square (for edit mode)
     /// This updates bitboards, hash, and incremental eval
     pub fn remove_piece_at(&mut self, sq: Square) {
-        use crate::zobrist::ZOBRIST;
-
         if let Some((color, piece)) = self.piece_at(sq) {
             self.remove_piece(sq, color, piece);
-            self.hash ^= ZOBRIST.piece_keys[piece.index()][color.index()][sq.index()];
             self.remove_piece_from_eval(sq, color, piece);
             self.sync_king_square_after_removal(color, piece);
+            self.hash = self.calculate_initial_hash();
             self.reset_repetition_history();
         }
     }
@@ -320,6 +318,52 @@ impl Board {
 #[cfg(test)]
 mod tests {
     use super::{Board, Color, Piece, Square};
+
+    fn assert_hash_matches_fen(board: &Board) {
+        let restored = Board::from_fen(&board.to_fen());
+        assert_eq!(board.hash(), restored.hash(), "{}", board.to_fen());
+    }
+
+    #[test]
+    fn editing_en_passant_capturer_keeps_hash_consistent() {
+        let mut board = Board::from_fen("7k/8/8/3pP3/8/8/8/K7 w - d6 0 1");
+        board.remove_piece_at(Square::new(4, 4));
+        assert_hash_matches_fen(&board);
+        let mut removed = board.clone();
+        removed.make_move_uci("a1b1").unwrap();
+        assert_hash_matches_fen(&removed);
+
+        board.place_piece(Square::new(4, 4), Color::White, Piece::Pawn);
+        assert_hash_matches_fen(&board);
+        board.make_move_uci("e5d6").unwrap();
+        assert_hash_matches_fen(&board);
+    }
+
+    #[test]
+    fn editing_an_en_passant_pin_keeps_hash_consistent() {
+        let mut board = Board::from_fen("7k/8/8/3pP3/8/8/8/4K3 w - d6 0 1");
+        board.place_piece(Square::new(7, 4), Color::Black, Piece::Rook);
+        assert_hash_matches_fen(&board);
+        assert!(board.parse_move("e5d6").is_err());
+
+        // Replacing the rook removes the pin and enables en passant.
+        board.place_piece(Square::new(7, 4), Color::Black, Piece::Knight);
+        assert_hash_matches_fen(&board);
+        assert!(board.parse_move("e5d6").is_ok());
+
+        board.place_piece(Square::new(7, 4), Color::Black, Piece::Rook);
+        board.remove_piece_at(Square::new(7, 4));
+        assert_hash_matches_fen(&board);
+        assert!(board.parse_move("e5d6").is_ok());
+    }
+
+    #[test]
+    fn flipping_side_clears_the_old_en_passant_opportunity() {
+        let mut board = Board::from_fen("7k/8/8/3pP3/8/8/8/K7 w - d6 0 1");
+        board.flip_side_to_move();
+        assert_eq!(board.en_passant_target, None);
+        assert_hash_matches_fen(&board);
+    }
 
     #[test]
     fn removing_a_relocated_king_does_not_leave_a_stale_square() {

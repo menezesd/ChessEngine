@@ -261,8 +261,7 @@ fn generate_moves_handles_the_known_maximum_mobility_position() {
     // against the ~218-move ceiling of positions reachable in real play;
     // MoveList::push previously wrote past a 256-slot backing array here
     // and panicked on out-of-bounds access.
-    let mut board =
-        Board::from_fen("QQQQQQBk/Q5RB/Q6Q/Q6Q/Q6Q/Q6Q/Q6Q/KQQQQQQQ w - - 0 1");
+    let mut board = Board::from_fen("QQQQQQBk/Q5RB/Q6Q/Q6Q/Q6Q/Q6Q/Q6Q/KQQQQQQQ w - - 0 1");
     assert_eq!(board.generate_moves().len(), 271);
 }
 

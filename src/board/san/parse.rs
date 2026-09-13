@@ -6,7 +6,7 @@ struct SanMoveParts {
     disambig_rank: Option<usize>,
     dest_notation: String,
     promotion: Option<Piece>,
-    is_capture: bool,
+    capture_marker: bool,
 }
 
 impl Board {
@@ -20,7 +20,7 @@ impl Board {
             return Err(SanError::Empty);
         }
 
-        let san = san.trim_end_matches(['+', '#']);
+        let san = san.trim_end_matches(['+', '#', '!', '?']);
 
         if san == "O-O" || san == "0-0" {
             return self.find_castling_move(true);
@@ -56,60 +56,58 @@ impl Board {
 
     /// Parse SAN components after the piece letter.
     fn parse_san_move_str(san: &str) -> Result<SanMoveParts, SanError> {
-        let mut chars = san.chars().peekable();
-        let mut disambig_file = None;
-        let mut disambig_rank = None;
-        let mut dest = String::new();
-        let mut promotion = None;
-        let mut is_capture = false;
-
-        while let Some(c) = chars.next() {
-            if c == 'x' {
-                is_capture = true;
-            } else if c == '=' {
-                if let Some(promo_char) = chars.next() {
-                    promotion = Some(
-                        Piece::from_char(promo_char)
-                            .ok_or(SanError::InvalidPromotion { char: promo_char })?,
-                    );
-                }
-            } else if c.is_ascii_lowercase() {
-                if let Some(next) = chars.peek().copied() {
-                    if next.is_ascii_digit() {
-                        dest.push(c);
-                        dest.push(next);
-                        chars.next();
-                    } else if next == 'x' || next.is_ascii_lowercase() {
-                        if !matches!(c, 'a'..='h') {
-                            return Err(SanError::InvalidSquare {
-                                notation: san.to_string(),
-                            });
-                        }
-                        disambig_file = Some(c as usize - 'a' as usize);
-                    } else {
-                        dest.push(c);
-                    }
-                } else {
-                    dest.push(c);
-                }
-            } else if c.is_ascii_digit() && dest.is_empty() {
-                if !matches!(c, '1'..='8') {
-                    return Err(SanError::InvalidSquare {
-                        notation: san.to_string(),
-                    });
-                }
-                disambig_rank = Some(c as usize - '1' as usize);
-            } else if c.is_ascii_digit() {
-                dest.push(c);
+        let invalid_square = || SanError::InvalidSquare {
+            notation: san.to_string(),
+        };
+        let (move_text, promotion) = if let Some((move_text, suffix)) = san.split_once('=') {
+            let mut chars = suffix.chars();
+            let promo_char = chars.next().ok_or_else(invalid_square)?;
+            let piece = Piece::from_char(promo_char)
+                .filter(|piece| {
+                    matches!(
+                        piece,
+                        Piece::Knight | Piece::Bishop | Piece::Rook | Piece::Queen
+                    )
+                })
+                .ok_or(SanError::InvalidPromotion { char: promo_char })?;
+            if chars.next().is_some() {
+                return Err(SanError::InvalidPromotion { char: promo_char });
             }
+            (move_text, Some(piece))
+        } else {
+            (san, None)
+        };
+
+        if !move_text.is_ascii() || move_text.len() < 2 {
+            return Err(invalid_square());
         }
+        // The destination is always the final square. Earlier file/rank
+        // characters identify the origin, including full disambiguation
+        // such as Qb1c2 when neither the file nor the rank alone is enough.
+        let (prefix, dest) = move_text.split_at(move_text.len() - 2);
+        // Crafty-style extended algebraic also permits e2-e4 / Ng1-f3.
+        let prefix = prefix.strip_suffix('-').unwrap_or(prefix);
+        let (origin, capture_marker) = prefix
+            .strip_suffix('x')
+            .map_or((prefix, false), |origin| (origin, true));
+
+        let (disambig_file, disambig_rank) = match origin.as_bytes() {
+            [] => (None, None),
+            [file @ b'a'..=b'h'] => (Some(usize::from(file - b'a')), None),
+            [rank @ b'1'..=b'8'] => (None, Some(usize::from(rank - b'1'))),
+            [file @ b'a'..=b'h', rank @ b'1'..=b'8'] => (
+                Some(usize::from(file - b'a')),
+                Some(usize::from(rank - b'1')),
+            ),
+            _ => return Err(invalid_square()),
+        };
 
         Ok(SanMoveParts {
             disambig_file,
             disambig_rank,
-            dest_notation: dest,
+            dest_notation: dest.to_string(),
             promotion,
-            is_capture,
+            capture_marker,
         })
     }
 
@@ -155,7 +153,10 @@ impl Board {
                 continue;
             }
 
-            if mv.is_capture() != parts.is_capture {
+            // A written 'x' must describe a capture.  Its omission is
+            // tolerated, matching Crafty's relaxed algebraic parser (for
+            // example exd5, ed5, and xd5 can name the same unique move).
+            if parts.capture_marker && !mv.is_capture() {
                 continue;
             }
 

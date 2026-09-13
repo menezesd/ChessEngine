@@ -9,6 +9,19 @@ mod format;
 mod uci_move;
 
 impl Board {
+    pub(crate) fn validate_king_counts(&self) -> Result<(), FenError> {
+        let white_kings = self.piece_count(Color::White, Piece::King);
+        let black_kings = self.piece_count(Color::Black, Piece::King);
+        if white_kings == 1 && black_kings == 1 {
+            Ok(())
+        } else {
+            Err(FenError::InvalidKingCount {
+                white: white_kings,
+                black: black_kings,
+            })
+        }
+    }
+
     /// Parse a board position from FEN notation.
     ///
     /// Returns an error if the FEN string is invalid.

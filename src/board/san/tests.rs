@@ -49,19 +49,33 @@ fn test_captures() {
 }
 
 #[test]
-fn test_capture_marker_must_match_move_type() {
+fn test_capture_marker_may_be_omitted_but_cannot_be_spurious() {
     let mut capture_position =
         Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2");
-    assert!(matches!(
-        capture_position.parse_san("ed5"),
-        Err(SanError::NoMatchingMove { .. })
-    ));
+    let expected = capture_position.parse_san("exd5").unwrap();
+    for san in ["ed5", "xd5", "e4d5", "e4xd5"] {
+        assert_eq!(capture_position.parse_san(san), Ok(expected), "{san}");
+    }
 
     let mut quiet_position = Board::new();
     assert!(matches!(
         quiet_position.parse_san("Nxf3"),
         Err(SanError::NoMatchingMove { .. })
     ));
+}
+
+#[test]
+fn test_crafty_style_extended_algebraic() {
+    let mut board = Board::new();
+    let expected = board.parse_move("e2e4").unwrap();
+    for san in ["Pe4", "e2e4", "e2-e4"] {
+        assert_eq!(board.parse_san(san), Ok(expected), "{san}");
+    }
+
+    let expected = board.parse_move("g1f3").unwrap();
+    for san in ["Ng1f3", "Ng1-f3"] {
+        assert_eq!(board.parse_san(san), Ok(expected), "{san}");
+    }
 }
 
 #[test]
@@ -72,6 +86,31 @@ fn test_promotion() {
     let mv = board.parse_san("a8=Q").unwrap();
     assert_eq!(mv.promotion(), Some(Piece::Queen));
     assert_eq!(board.move_to_san(&mv), "a8=Q");
+}
+
+#[test]
+fn full_origin_disambiguation_round_trips_for_quiet_moves_and_captures() {
+    for (fen, coordinate, expected) in [
+        ("7k/8/8/8/8/1Q6/8/1Q1Q3K w - - 0 1", "b1c2", "Qb1c2"),
+        ("7k/8/8/8/8/1Q6/2p5/1Q1Q3K w - - 0 1", "b1c2", "Qb1xc2"),
+        ("7k/8/8/8/8/1N6/8/1N2KN2 w - - 0 1", "b1d2", "Nb1d2"),
+        ("7k/8/8/8/8/1N6/3p4/1N2KN2 w - - 0 1", "b1d2", "Nb1xd2"),
+    ] {
+        let mut board = Board::from_fen(fen);
+        let mv = board.parse_move(coordinate).unwrap();
+        let san = board.move_to_san(&mv);
+        assert_eq!(san, expected);
+        assert_eq!(board.parse_san(&san), Ok(mv), "{fen}: {san}");
+    }
+}
+
+#[test]
+fn malformed_san_does_not_silently_become_a_legal_move() {
+    let mut board = Board::new();
+    for san in ["e4=", "Nf3=", "NNf3", "N!f3", "Nλf3"] {
+        assert!(board.parse_san(san).is_err(), "accepted {san}");
+    }
+    assert!(board.parse_san("Nf3!?").is_ok());
 }
 
 #[test]

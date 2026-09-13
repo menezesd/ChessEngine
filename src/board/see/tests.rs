@@ -87,11 +87,43 @@ fn test_see_multiple_attackers() {
 
 #[test]
 fn test_see_king_cannot_recapture_defended() {
-    let board = make_board("4k3/8/4p3/3P4/8/8/8/4R3 w - - 0 1");
-    let from = Square::new(4, 3);
-    let to = Square::new(5, 4);
+    // Rxe4 wins a pawn. The adjacent king cannot recapture because Bb1
+    // protects e4; the rook capture itself gives no check.
+    let board = make_board("8/8/8/3k4/4p3/8/8/1B2R2K w - - 0 1");
+    let from = Square::new(0, 4);
+    let to = Square::new(3, 4);
     let see = board.see(from, to);
     assert_eq!(see, 100);
+}
+
+#[test]
+fn see_ignores_recapture_that_exposes_own_king() {
+    // f5xe6 opens the f-file, so Black is in check from Rf1. Although the
+    // queen on e8 attacks e6 geometrically, ...Qxe6 is not a legal reply
+    // because it does not answer that check.
+    let board = make_board("4qk2/N7/p3p3/5Pn1/1r6/8/3Kb3/5R2 w - - 8 64");
+    assert_eq!(board.see(Square::new(4, 5), Square::new(5, 4)), 100);
+}
+
+#[test]
+fn see_includes_later_recaptures_when_an_exchange_is_already_losing() {
+    // ...Bxc3 bxc3 bxc3 Nxc3 loses bishop + pawn for two pawns.
+    let board =
+        make_board("rnbqk2r/p2pp1b1/7p/2p2p1P/1p3Bn1/P1PP1P2/QP2P1P1/RN2KBNR b KQkq - 3 12");
+    assert_eq!(board.see(Square::new(6, 6), Square::new(2, 2)), -230);
+}
+
+#[test]
+fn see_accounts_for_a_pawn_promoting_during_a_recapture() {
+    // ...Rxc8 bxc8=Q loses a rook and gives White a promotion, gaining only a bishop.
+    let board = make_board("r1B5/1P6/8/8/8/8/3R2pk/3K4 b - - 3 107");
+    assert_eq!(board.see(Square::new(7, 0), Square::new(7, 2)), -970);
+}
+
+#[test]
+fn see_counts_the_initial_queen_promotion_gain() {
+    let board = make_board("r1B5/1P6/8/8/8/8/3R2pk/3K4 w - - 3 107");
+    assert_eq!(board.see(Square::new(6, 1), Square::new(7, 0)), 1300);
 }
 
 #[test]

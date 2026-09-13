@@ -68,6 +68,26 @@ fn test_fen_error_too_few_files() {
 }
 
 #[test]
+fn test_validate_king_counts_requires_exactly_one_king_per_color() {
+    for (fen, white, black) in [
+        ("8/8/8/8/8/8/8/8 w - - 0 1", 0, 0),
+        ("8/8/8/8/8/8/8/K7 w - - 0 1", 1, 0),
+        ("8/8/8/8/8/8/8/k7 w - - 0 1", 0, 1),
+        ("7k/8/8/8/8/8/8/KK6 w - - 0 1", 2, 1),
+        ("kk6/8/8/8/8/8/8/K7 w - - 0 1", 1, 2),
+    ] {
+        let board = Board::try_from_fen(fen).unwrap();
+        assert!(matches!(
+            board.validate_king_counts(),
+            Err(FenError::InvalidKingCount {
+                white: found_white,
+                black: found_black,
+            }) if found_white == white && found_black == black
+        ));
+    }
+}
+
+#[test]
 fn test_fen_error_invalid_side_to_move() {
     let result = Board::try_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR x KQkq - 0 1");
     assert!(matches!(result, Err(FenError::InvalidSideToMove { .. })));

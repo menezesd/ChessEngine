@@ -46,29 +46,4 @@ impl Board {
     pub(super) fn straight_sliders(&self) -> Bitboard {
         Bitboard(self.all_pieces_of_type(Piece::Rook).0 | self.all_pieces_of_type(Piece::Queen).0)
     }
-
-    /// Find the least valuable attacker from a set of attackers.
-    /// Returns the piece type and a bitboard with just that piece.
-    pub(super) fn find_least_valuable_attacker(
-        &self,
-        attackers: Bitboard,
-        color: Color,
-    ) -> (Piece, Bitboard) {
-        for piece_type in [
-            Piece::Pawn,
-            Piece::Knight,
-            Piece::Bishop,
-            Piece::Rook,
-            Piece::Queen,
-            Piece::King,
-        ] {
-            let piece_attackers = Bitboard(attackers.0 & self.pieces_of(color, piece_type).0);
-            if !piece_attackers.is_empty() {
-                let single = Bitboard(piece_attackers.0 & piece_attackers.0.wrapping_neg());
-                return (piece_type, single);
-            }
-        }
-
-        (Piece::Pawn, Bitboard(0))
-    }
 }

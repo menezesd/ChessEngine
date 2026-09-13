@@ -82,11 +82,50 @@ impl Board {
     /// This avoids materializing a complete legal move list for terminal-node
     /// checks, which is especially useful in quiescence search.
     pub(crate) fn has_legal_move(&mut self) -> bool {
+        self.has_legal_move_except(super::EMPTY_MOVE)
+    }
+
+    /// Return whether the side to move has at least two legal moves.
+    ///
+    /// Search uses this before speculative node-level pruning so a forced
+    /// reply is not skipped before the sole-reply extension can be applied.
+    pub(crate) fn has_multiple_legal_moves(&mut self) -> bool {
         let current_color = self.side_to_move();
         let opponent_color = current_color.opponent();
-        self.generate_pseudo_moves()
-            .iter()
-            .any(|m| self.is_legal_pseudo_move(*m, current_color, opponent_color))
+        let mut found_one = false;
+
+        for piece in Piece::ALL {
+            for from in self.pieces_of(current_color, piece).iter() {
+                for m in &self.generate_piece_moves(from, piece) {
+                    if self.is_legal_pseudo_move(*m, current_color, opponent_color) {
+                        if found_one {
+                            return true;
+                        }
+                        found_one = true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check for an alternative to a known move, stopping at the first one.
+    pub(crate) fn has_legal_move_except(&mut self, excluded: Move) -> bool {
+        let current_color = self.side_to_move();
+        let opponent_color = current_color.opponent();
+        for piece in Piece::ALL {
+            for from in self.pieces_of(current_color, piece).iter() {
+                for m in &self.generate_piece_moves(from, piece) {
+                    if *m != excluded
+                        && self.is_legal_pseudo_move(*m, current_color, opponent_color)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn is_legal_pseudo_move(
