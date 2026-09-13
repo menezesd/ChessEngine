@@ -2,7 +2,7 @@
 //!
 //! Provides neural network based position evaluation with:
 //! - Incremental accumulator updates for efficiency
-//! - SIMD-optimized inference (AVX2/NEON)
+//! - Vectorizable inference with exact 32-bit accumulators
 //! - `SCReLU` activation function
 //!
 //! Architecture: (768 -> 256) x 2 perspectives -> 1

@@ -53,9 +53,9 @@ const fn raw_network_bytes(input_size: usize) -> usize {
 #[derive(Clone)]
 pub struct NnueAccumulator {
     /// White's perspective accumulator
-    pub white: [i16; HIDDEN_SIZE],
+    pub white: [i32; HIDDEN_SIZE],
     /// Black's perspective accumulator
-    pub black: [i16; HIDDEN_SIZE],
+    pub black: [i32; HIDDEN_SIZE],
 }
 
 impl Default for NnueAccumulator {
@@ -72,8 +72,8 @@ impl NnueAccumulator {
     #[must_use]
     pub fn new(biases: &[i16; HIDDEN_SIZE]) -> Self {
         Self {
-            white: *biases,
-            black: *biases,
+            white: biases.map(i32::from),
+            black: biases.map(i32::from),
         }
     }
 
@@ -85,8 +85,8 @@ impl NnueAccumulator {
         network: &NnueNetwork,
     ) {
         // Start with biases
-        self.white = network.feature_bias;
-        self.black = network.feature_bias;
+        self.white = network.feature_bias.map(i32::from);
+        self.black = network.feature_bias.map(i32::from);
 
         // Add active feature weights
         for &feat in white_features {
@@ -120,9 +120,10 @@ pub struct NnueNetwork {
     pub feature_weights: Vec<[i16; HIDDEN_SIZE]>,
     /// Feature transformer biases `[HIDDEN_SIZE]`
     pub feature_bias: [i16; HIDDEN_SIZE],
-    /// Output weights for white perspective `[HIDDEN_SIZE]`
+    /// Output weights for the side-to-move accumulator `[HIDDEN_SIZE]`.
+    /// The historical field name is retained for the on-disk layout.
     pub output_weights_white: [i16; HIDDEN_SIZE],
-    /// Output weights for black perspective `[HIDDEN_SIZE]`
+    /// Output weights for the opponent accumulator `[HIDDEN_SIZE]`.
     pub output_weights_black: [i16; HIDDEN_SIZE],
     /// Output bias
     pub output_bias: i16,
@@ -157,7 +158,9 @@ impl NnueNetwork {
                 ));
             }
             let input_size = input_size as usize;
-            if input_size < BASE_INPUT_SIZE || hidden_size as usize != HIDDEN_SIZE {
+            if !matches!(input_size, BASE_INPUT_SIZE | TACTICAL_INPUT_SIZE)
+                || hidden_size as usize != HIDDEN_SIZE
+            {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     "NNUE architecture does not match engine",
@@ -244,25 +247,16 @@ impl NnueNetwork {
     #[inline]
     #[must_use]
     pub fn evaluate(&self, acc: &NnueAccumulator, white_to_move: bool) -> i32 {
-        let (us_acc, them_acc, us_weights, them_weights) = if white_to_move {
-            (
-                &acc.white,
-                &acc.black,
-                &self.output_weights_white,
-                &self.output_weights_black,
-            )
+        let (us_acc, them_acc) = if white_to_move {
+            (&acc.white, &acc.black)
         } else {
-            (
-                &acc.black,
-                &acc.white,
-                &self.output_weights_black,
-                &self.output_weights_white,
-            )
+            (&acc.black, &acc.white)
         };
 
         // SCReLU activation and dot product (returns i64 to avoid overflow)
-        let us_output = simd::screlu_dot(us_acc, us_weights);
-        let them_output = simd::screlu_dot(them_acc, them_weights);
+        // Swapping the weights too would cancel the side-to-move selection.
+        let us_output = simd::screlu_dot(us_acc, &self.output_weights_white);
+        let them_output = simd::screlu_dot(them_acc, &self.output_weights_black);
 
         // Combine outputs and scale
         let output = us_output + them_output + i64::from(self.output_bias) * QA as i64;
@@ -391,6 +385,37 @@ mod tests {
     }
 
     #[test]
+    fn output_weights_follow_us_and_them_when_black_moves() {
+        let data = vec![0; raw_network_bytes(BASE_INPUT_SIZE)];
+        let mut network = NnueNetwork::from_bytes(&data).unwrap();
+        network.output_weights_white[0] = crate::board::nnue::QB as i16;
+        network.output_weights_black[0] = -crate::board::nnue::QB as i16;
+        let mut acc = super::NnueAccumulator::default();
+        acc.white[0] = crate::board::nnue::QA;
+
+        assert_eq!(network.evaluate(&acc, true), crate::board::nnue::SCALE);
+        assert_eq!(network.evaluate(&acc, false), -crate::board::nnue::SCALE);
+    }
+
+    #[test]
+    fn accumulator_sums_do_not_depend_on_feature_order() {
+        let data = vec![0; raw_network_bytes(BASE_INPUT_SIZE)];
+        let mut network = NnueNetwork::from_bytes(&data).unwrap();
+        for (feature, weight) in [32000, 32000, -32000, -31900].into_iter().enumerate() {
+            network.feature_weights[feature][0] = weight;
+        }
+        let mut accumulator = super::NnueAccumulator::default();
+        accumulator.refresh(&[0, 1, 2, 3], &[0, 2, 1, 3], &network);
+
+        assert_eq!(accumulator.white[0], 100);
+        assert_eq!(accumulator.black[0], 100);
+        accumulator.sub_feature(3, 3, &network);
+        accumulator.add_feature(3, 3, &network);
+        assert_eq!(accumulator.white[0], 100);
+        assert_eq!(accumulator.black[0], 100);
+    }
+
+    #[test]
     fn feature_index_uses_white_perspective_layout() {
         assert_eq!(feature_index(2, 1, 10, 0), 384 + 2 * 64 + 10);
     }
@@ -423,14 +448,19 @@ mod tests {
 
     #[test]
     fn headered_network_rejects_wrong_architecture() {
-        let mut data = Vec::new();
-        data.extend_from_slice(NETWORK_MAGIC);
-        data.extend_from_slice(&NETWORK_VERSION.to_le_bytes());
-        data.extend_from_slice(&((INPUT_SIZE - 1) as u32).to_le_bytes());
-        data.extend_from_slice(&(HIDDEN_SIZE as u32).to_le_bytes());
-        data.resize(data.len() + raw_network_bytes(INPUT_SIZE - 1), 0);
+        for input_size in [INPUT_SIZE - 1, INPUT_SIZE + 1, TACTICAL_INPUT_SIZE + 1] {
+            let mut data = Vec::new();
+            data.extend_from_slice(NETWORK_MAGIC);
+            data.extend_from_slice(&NETWORK_VERSION.to_le_bytes());
+            data.extend_from_slice(&(input_size as u32).to_le_bytes());
+            data.extend_from_slice(&(HIDDEN_SIZE as u32).to_le_bytes());
+            data.resize(data.len() + raw_network_bytes(input_size), 0);
 
-        assert!(NnueNetwork::from_bytes(&data).is_err());
+            assert!(
+                NnueNetwork::from_bytes(&data).is_err(),
+                "accepted unknown layout: {input_size}"
+            );
+        }
     }
 
     #[test]

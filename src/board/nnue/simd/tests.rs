@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_add_weights() {
-    let mut acc = [100i16; HIDDEN_SIZE];
+    let mut acc = [100i32; HIDDEN_SIZE];
     let weights = [50i16; HIDDEN_SIZE];
 
     add_weights(&mut acc, &weights);
@@ -14,7 +14,7 @@ fn test_add_weights() {
 
 #[test]
 fn test_sub_weights() {
-    let mut acc = [100i16; HIDDEN_SIZE];
+    let mut acc = [100i32; HIDDEN_SIZE];
     let weights = [30i16; HIDDEN_SIZE];
 
     sub_weights(&mut acc, &weights);
@@ -25,27 +25,31 @@ fn test_sub_weights() {
 }
 
 #[test]
-fn test_add_weights_saturating() {
-    let mut acc = [i16::MAX - 10; HIDDEN_SIZE];
+fn updates_cross_i16_limits_without_losing_information() {
+    let original = i32::from(i16::MAX) - 10;
+    let mut acc = [original; HIDDEN_SIZE];
     let weights = [20i16; HIDDEN_SIZE];
 
     add_weights(&mut acc, &weights);
 
     for &v in &acc {
-        assert_eq!(v, i16::MAX);
+        assert_eq!(v, original + 20);
     }
+    sub_weights(&mut acc, &weights);
+    assert_eq!(acc, [original; HIDDEN_SIZE]);
 }
 
 #[test]
-fn test_screlu_dot_matches_scalar() {
-    let acc: [i16; HIDDEN_SIZE] = std::array::from_fn(|i| (i as i16 % 300) - 50);
-    let weights: [i16; HIDDEN_SIZE] = std::array::from_fn(|i| ((i as i16) % 200) - 100);
-
-    let scalar_result = scalar::screlu_dot(&acc, &weights);
-    let simd_result = screlu_dot(&acc, &weights);
-
+fn activation_clamps_wide_values_and_reduces_without_overflow() {
+    let weights = [i16::MAX; HIDDEN_SIZE];
+    assert_eq!(screlu_dot(&[i32::MIN; HIDDEN_SIZE], &weights), 0);
     assert_eq!(
-        scalar_result, simd_result,
-        "SIMD result {simd_result} doesn't match scalar {scalar_result}"
+        screlu_dot(&[i32::MAX; HIDDEN_SIZE], &weights),
+        HIDDEN_SIZE as i64 * i64::from(QA).pow(2) * i64::from(i16::MAX)
+    );
+    let alternating = std::array::from_fn(|i| if i % 2 == 0 { i16::MAX } else { i16::MIN });
+    assert_eq!(
+        screlu_dot(&[QA; HIDDEN_SIZE], &alternating),
+        -(HIDDEN_SIZE as i64 / 2) * i64::from(QA).pow(2)
     );
 }
