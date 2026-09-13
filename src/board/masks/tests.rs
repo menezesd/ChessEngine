@@ -24,7 +24,7 @@ fn test_king_zone() {
 #[test]
 fn test_king_attack_table() {
     // Low attack units = low score
-    assert!(KING_ATTACK_TABLE[0] == 0);
+    assert_eq!(KING_ATTACK_TABLE[0], 0);
     assert!(KING_ATTACK_TABLE[5] < 50);
     // Formula: 480 * i² / (i² + 4200)
     // i=50: 480*2500/6700 ≈ 179
@@ -46,7 +46,7 @@ fn test_passed_pawn_mask_white() {
     // Should include f5 (37)
     assert!((mask.0 & (1u64 << 37)) != 0, "f5 should be in mask");
     // Should NOT include e4 itself
-    assert!((mask.0 & (1u64 << 28)) == 0, "e4 should not be in mask");
+    assert_eq!((mask.0 & (1u64 << 28)), 0, "e4 should not be in mask");
 }
 
 #[test]

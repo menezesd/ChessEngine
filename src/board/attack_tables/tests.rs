@@ -24,7 +24,7 @@ fn test_bishop_attacks_empty_board() {
     assert!(attacks & (1u64 << 7) != 0); // h1 - on anti-diagonal
     assert!(attacks & (1u64 << 56) != 0); // a8 - on anti-diagonal
                                           // e4 itself should not be in attacks
-    assert!(attacks & (1u64 << 28) == 0);
+    assert_eq!(attacks & (1u64 << 28), 0);
 }
 
 #[test]
@@ -34,9 +34,9 @@ fn test_rook_attacks_with_blockers() {
     let attacks = rook_attacks(28, blockers);
     // Should not attack beyond blockers
     assert!(attacks & (1u64 << 44) != 0); // e6 - can capture
-    assert!(attacks & (1u64 << 52) == 0); // e7 - blocked
+    assert_eq!(attacks & (1u64 << 52), 0); // e7 - blocked
     assert!(attacks & (1u64 << 26) != 0); // c4 - can capture
-    assert!(attacks & (1u64 << 25) == 0); // b4 - blocked
+    assert_eq!(attacks & (1u64 << 25), 0); // b4 - blocked
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn test_bishop_attacks_with_blockers() {
     let attacks = bishop_attacks(28, blockers);
     // Should attack up to g6 but not h7
     assert!(attacks & (1u64 << 46) != 0); // g6 - can capture
-    assert!(attacks & (1u64 << 55) == 0); // h7 - blocked
+    assert_eq!(attacks & (1u64 << 55), 0); // h7 - blocked
 }
 
 #[test]

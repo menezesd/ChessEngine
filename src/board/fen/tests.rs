@@ -148,8 +148,8 @@ fn test_fen_partial_castling() {
     let board =
         Board::try_from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w Kq - 0 1").unwrap();
     assert!((board.castling_rights & CASTLE_WHITE_K) != 0);
-    assert!((board.castling_rights & CASTLE_WHITE_Q) == 0);
-    assert!((board.castling_rights & CASTLE_BLACK_K) == 0);
+    assert_eq!((board.castling_rights & CASTLE_WHITE_Q), 0);
+    assert_eq!((board.castling_rights & CASTLE_BLACK_K), 0);
     assert!((board.castling_rights & CASTLE_BLACK_Q) != 0);
 }
 

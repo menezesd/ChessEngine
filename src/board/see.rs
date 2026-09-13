@@ -77,7 +77,7 @@ impl Board {
         ] {
             let mut candidates = attackers.0 & self.pieces_of(side, piece).0;
             while candidates != 0 {
-                let bit = candidates & candidates.wrapping_neg();
+                let bit = candidates.isolate_lowest_one();
                 let from = Bitboard(bit);
                 if self.see_capture_is_legal(from, piece, target, side, occupancy) {
                     return Some((piece, from));
