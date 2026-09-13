@@ -13,16 +13,24 @@ pub fn parse_setoption(parts: &[&str]) -> Option<(String, Option<String>)> {
     let mut name_parts: Vec<&str> = Vec::new();
     let mut value_parts: Vec<&str> = Vec::new();
     let mut field = SetOptionField::None;
+    let mut saw_value = false;
 
     for part in parts.iter().skip(1) {
-        match *part {
-            "name" => field = SetOptionField::Name,
-            "value" => field = SetOptionField::Value,
-            _ => match field {
-                SetOptionField::Name => name_parts.push(part),
-                SetOptionField::Value => value_parts.push(part),
-                SetOptionField::None => {}
-            },
+        match field {
+            SetOptionField::None => {
+                if *part == "name" {
+                    field = SetOptionField::Name;
+                }
+            }
+            SetOptionField::Name => {
+                if *part == "value" {
+                    field = SetOptionField::Value;
+                    saw_value = true;
+                } else {
+                    name_parts.push(part);
+                }
+            }
+            SetOptionField::Value => value_parts.push(part),
         }
     }
 
@@ -31,10 +39,10 @@ pub fn parse_setoption(parts: &[&str]) -> Option<(String, Option<String>)> {
     }
 
     let name = name_parts.join(" ");
-    let value = if value_parts.is_empty() {
-        None
-    } else {
+    let value = if saw_value {
         Some(value_parts.join(" "))
+    } else {
+        None
     };
 
     Some((name, value))
@@ -66,6 +74,36 @@ mod tests {
     fn parses_name_without_value() {
         let parts = ["setoption", "name", "Ponder"];
         assert_eq!(parse_setoption(&parts), Some(("Ponder".to_string(), None)));
+    }
+
+    #[test]
+    fn parses_explicit_empty_string_value() {
+        let parts = ["setoption", "name", "EvalFile", "value"];
+        assert_eq!(
+            parse_setoption(&parts),
+            Some(("EvalFile".to_string(), Some(String::new())))
+        );
+    }
+
+    #[test]
+    fn preserves_keywords_inside_string_value() {
+        let parts = [
+            "setoption",
+            "name",
+            "EvalFile",
+            "value",
+            "/tmp/name",
+            "name",
+            "value",
+            "network.nnue",
+        ];
+        assert_eq!(
+            parse_setoption(&parts),
+            Some((
+                "EvalFile".to_string(),
+                Some("/tmp/name name value network.nnue".to_string())
+            ))
+        );
     }
 
     #[test]

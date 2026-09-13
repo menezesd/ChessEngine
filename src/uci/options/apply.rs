@@ -15,6 +15,21 @@ enum ApplyOptionResult {
 }
 
 impl UciOptions {
+    fn load_default_nnue(state: &mut SearchState) -> bool {
+        #[cfg(feature = "embedded_nnue")]
+        {
+            state.tables.nnue = Some(std::sync::Arc::new(
+                crate::board::nnue::NnueNetwork::from_embedded(),
+            ));
+            true
+        }
+        #[cfg(not(feature = "embedded_nnue"))]
+        {
+            let _ = state;
+            false
+        }
+    }
+
     fn parsed_clamped<T>(value: Option<&str>, min: T, max: T) -> Option<T>
     where
         T: std::str::FromStr + Ord,
@@ -41,13 +56,20 @@ impl UciOptions {
         }
     }
 
-    fn reload_nnue_files(&self, state: &mut SearchState) {
-        if !self.eval_file.is_empty() {
-            let _ = state.load_nnue(&self.eval_file);
+    fn reload_nnue_files(&self, state: &mut SearchState) -> bool {
+        if self.eval_file.is_empty() {
+            if !Self::load_default_nnue(state) {
+                return false;
+            }
+        } else if state.load_nnue(&self.eval_file).is_err() {
+            return false;
         }
-        if !self.static_eval_file.is_empty() {
+        if self.static_eval_file.is_empty() {
+            state.tables.static_nnue = None;
+        } else {
             let _ = state.load_static_nnue(&self.static_eval_file);
         }
+        true
     }
 
     fn apply_use_nnue(&mut self, value: Option<&str>, state: &mut SearchState) {
@@ -55,34 +77,46 @@ impl UciOptions {
             return;
         };
 
-        self.use_nnue = use_nnue;
-        if self.use_nnue {
-            self.reload_nnue_files(state);
+        if use_nnue {
+            if self.reload_nnue_files(state) {
+                self.use_nnue = true;
+            }
         } else {
+            self.use_nnue = false;
             state.tables.nnue = None;
             state.tables.static_nnue = None;
         }
     }
 
     fn set_eval_file(&mut self, value: Option<&str>, state: &mut SearchState) {
-        if Self::assign_option_string(&mut self.eval_file, value) && self.use_nnue {
-            let _ = state.load_nnue(&self.eval_file);
+        let Some(value) = value else {
+            return;
+        };
+
+        if !self.use_nnue {
+            self.eval_file = value.to_string();
+        } else if value.is_empty() {
+            if Self::load_default_nnue(state) {
+                self.eval_file.clear();
+            }
+        } else if state.load_nnue(value).is_ok() {
+            self.eval_file = value.to_string();
         }
     }
 
     fn set_static_eval_file(&mut self, value: Option<&str>, state: &mut SearchState) {
-        if Self::assign_option_string(&mut self.static_eval_file, value) && self.use_nnue {
-            let _ = state.load_static_nnue(&self.static_eval_file);
-        }
-    }
-
-    fn assign_option_string(target: &mut String, value: Option<&str>) -> bool {
         let Some(value) = value else {
-            return false;
+            return;
         };
 
-        *target = value.to_string();
-        !target.is_empty()
+        if !self.use_nnue {
+            self.static_eval_file = value.to_string();
+        } else if value.is_empty() {
+            self.static_eval_file.clear();
+            state.tables.static_nnue = None;
+        } else if state.load_static_nnue(value).is_ok() {
+            self.static_eval_file = value.to_string();
+        }
     }
 
     fn apply_engine_option(&mut self, normalized: &str, value: Option<&str>) -> ApplyOptionResult {
@@ -265,6 +299,7 @@ impl UciOptions {
             ApplyOptionResult::Unhandled => {}
         }
         if self.apply_nnue_option(&normalized, value, state) {
+            state.clear_evaluation_cache();
             return None;
         }
         Self::apply_search_option(&normalized, value, state);

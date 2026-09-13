@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn searchmoves_preserves_the_list_and_parses_following_limits() {
+    let params = parse_go_params(&[
+        "go",
+        "wtime",
+        "1000",
+        "searchmoves",
+        "e2e4",
+        "d2d4",
+        "depth",
+        "3",
+        "ponder",
+    ]);
+
+    assert_eq!(params.searchmoves, Some(vec!["e2e4".into(), "d2d4".into()]));
+    assert_eq!(params.wtime, Some(1000));
+    assert_eq!(params.depth, Some(3));
+    assert!(params.ponder);
+}
+
+#[test]
+fn empty_searchmoves_is_distinct_from_no_restriction() {
+    let params = parse_go_params(&["go", "searchmoves", "depth", "3"]);
+    assert_eq!(params.searchmoves, Some(Vec::new()));
+    assert_eq!(params.depth, Some(3));
+    assert_eq!(parse_go_params(&["go", "depth", "3"]).searchmoves, None);
+}
+
+#[test]
 fn parse_go_params_empty() {
     let parts: Vec<&str> = vec!["go"];
     let params = parse_go_params(&parts);

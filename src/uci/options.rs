@@ -205,6 +205,45 @@ mod tests {
     use crate::board::SearchState;
 
     #[test]
+    fn evaluation_options_discard_scores_from_the_previous_evaluator() {
+        use crate::board::{Board, Color};
+        use crate::tt::BoundType;
+
+        for (name, value) in [
+            ("UseNNUE", "false"),
+            ("NnueEvalScale", "200"),
+            ("NnueHceBlend", "0"),
+            ("NnuePureStaticEval", "true"),
+            ("UseFullHCE", "false"),
+            ("UseTunedHCE", "false"),
+            ("UseFullHCEStaticEval", "true"),
+            ("NnueStaticEvalScale", "200"),
+            ("NnueStaticBlend", "0"),
+        ] {
+            let mut options = UciOptions::new(1);
+            let mut state = SearchState::new(1);
+            let board = Board::new();
+            state
+                .tables
+                .tt
+                .store(board.hash(), 10, 1234, BoundType::Exact, None, 0);
+            state
+                .tables
+                .correction_history
+                .update(123, Color::White, 0, 400, 8);
+
+            options.apply_setoption(name, Some(value), &mut state);
+
+            assert!(state.tables.tt.probe(board.hash()).is_none(), "{name}");
+            assert_eq!(
+                state.tables.correction_history.get(123, Color::White),
+                0,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn setoption_hash_is_clamped_to_advertised_bounds() {
         let mut options = UciOptions::new(16);
         let mut state = SearchState::new(16);
@@ -298,8 +337,174 @@ mod tests {
         options.apply_setoption("UseNNUE", None, &mut state);
         assert!(!options.use_nnue);
 
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/board/nnue/embedded.nnue");
+        options.apply_setoption("EvalFile", path.to_str(), &mut state);
         options.apply_setoption("UseNNUE", Some("true"), &mut state);
         assert!(options.use_nnue);
+    }
+
+    #[test]
+    fn setoption_use_nnue_stays_disabled_when_configured_eval_file_cannot_load() {
+        let mut options = UciOptions::new(1);
+        let mut state = SearchState::new(1);
+        let missing = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/board/nnue/definitely-missing-test-network.nnue");
+        assert!(!missing.exists());
+
+        options.apply_setoption("EvalFile", missing.to_str(), &mut state);
+        assert_eq!(options.eval_file, missing.to_str().unwrap());
+
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+
+        assert!(!options.use_nnue);
+        assert!(state.shared_nnue().is_none());
+    }
+
+    #[cfg(not(feature = "embedded_nnue"))]
+    #[test]
+    fn setoption_use_nnue_without_network_stays_disabled() {
+        let mut options = UciOptions::new(1);
+        let mut state = SearchState::new(1);
+
+        assert!(options.eval_file.is_empty());
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+
+        assert!(!options.use_nnue);
+        assert!(state.shared_nnue().is_none());
+    }
+
+    #[cfg(feature = "embedded_nnue")]
+    #[test]
+    fn setoption_use_nnue_loads_embedded_network_without_eval_file() {
+        let mut options = UciOptions::new(1);
+        let mut state = SearchState::new(1);
+
+        assert!(state.tables.nnue.is_none());
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        assert!(state.tables.nnue.is_some());
+
+        options.apply_setoption("UseNNUE", Some("false"), &mut state);
+        assert!(state.tables.nnue.is_none());
+
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        assert!(state.tables.nnue.is_some());
+    }
+
+    #[cfg(feature = "embedded_nnue")]
+    #[test]
+    fn empty_eval_file_restores_embedded_network() {
+        let mut options = UciOptions::new(1);
+        let mut state = SearchState::new(1);
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/board/nnue/embedded.nnue");
+
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        options.apply_setoption("EvalFile", path.to_str(), &mut state);
+        let loaded = state.shared_nnue().expect("file network should be loaded");
+
+        options.apply_setoption("EvalFile", Some(""), &mut state);
+
+        let reset = state
+            .shared_nnue()
+            .expect("embedded network should be restored");
+        assert!(options.eval_file.is_empty());
+        assert!(!std::sync::Arc::ptr_eq(&loaded, &reset));
+    }
+
+    #[cfg(not(feature = "embedded_nnue"))]
+    #[test]
+    fn empty_eval_file_keeps_loaded_network_without_default() {
+        let mut options = UciOptions::new(1);
+        let mut state = SearchState::new(1);
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/board/nnue/embedded.nnue");
+
+        options.apply_setoption("EvalFile", path.to_str(), &mut state);
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        let loaded = state.shared_nnue().expect("file network should be loaded");
+
+        options.apply_setoption("EvalFile", Some(""), &mut state);
+
+        assert!(options.use_nnue);
+        assert_eq!(options.eval_file, path.to_str().unwrap());
+        let after = state
+            .shared_nnue()
+            .expect("file network should remain loaded");
+        assert!(std::sync::Arc::ptr_eq(&loaded, &after));
+    }
+
+    #[test]
+    fn failed_eval_file_update_keeps_current_network_and_option() {
+        let mut options = UciOptions::new(1);
+        let mut state = SearchState::new(1);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("src/board/nnue/embedded.nnue");
+        let missing = root.join("src/board/nnue/definitely-missing-test-network.nnue");
+        assert!(!missing.exists());
+
+        options.apply_setoption("EvalFile", path.to_str(), &mut state);
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        let loaded = state.shared_nnue().expect("file network should be loaded");
+
+        options.apply_setoption("EvalFile", missing.to_str(), &mut state);
+
+        assert_eq!(options.eval_file, path.to_str().unwrap());
+        let after = state
+            .shared_nnue()
+            .expect("valid network should remain loaded");
+        assert!(std::sync::Arc::ptr_eq(&loaded, &after));
+
+        options.apply_setoption("UseNNUE", Some("false"), &mut state);
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        assert!(state.shared_nnue().is_some());
+    }
+
+    #[test]
+    fn empty_static_eval_file_disables_the_static_network() {
+        let mut options = UciOptions::new(1);
+        let mut state = SearchState::new(1);
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/board/nnue/embedded.nnue");
+
+        options.apply_setoption("EvalFile", path.to_str(), &mut state);
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        options.apply_setoption("StaticEvalFile", path.to_str(), &mut state);
+        assert!(state.shared_static_nnue().is_some());
+
+        options.apply_setoption("StaticEvalFile", Some(""), &mut state);
+
+        assert!(options.static_eval_file.is_empty());
+        assert!(state.shared_static_nnue().is_none());
+    }
+
+    #[test]
+    fn failed_static_eval_file_update_keeps_current_network_and_option() {
+        let mut options = UciOptions::new(1);
+        let mut state = SearchState::new(1);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("src/board/nnue/embedded.nnue");
+        let missing = root.join("src/board/nnue/definitely-missing-test-network.nnue");
+        assert!(!missing.exists());
+
+        options.apply_setoption("EvalFile", path.to_str(), &mut state);
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        options.apply_setoption("StaticEvalFile", path.to_str(), &mut state);
+        let loaded = state
+            .shared_static_nnue()
+            .expect("static file network should be loaded");
+
+        options.apply_setoption("StaticEvalFile", missing.to_str(), &mut state);
+
+        assert_eq!(options.static_eval_file, path.to_str().unwrap());
+        let after = state
+            .shared_static_nnue()
+            .expect("valid static network should remain loaded");
+        assert!(std::sync::Arc::ptr_eq(&loaded, &after));
+
+        options.apply_setoption("UseNNUE", Some("false"), &mut state);
+        options.apply_setoption("UseNNUE", Some("true"), &mut state);
+        assert!(state.shared_static_nnue().is_some());
     }
 
     #[test]

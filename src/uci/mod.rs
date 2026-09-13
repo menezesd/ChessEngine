@@ -78,7 +78,9 @@ fn parse_position_source(parts: &[&str]) -> Result<(Board, usize), UciError> {
                 return Err(UciError::MissingParts);
             }
             let fen = parts[fen_start..fen_end].join(" ");
-            Ok((Board::try_from_fen(&fen)?, fen_end))
+            let board = Board::try_from_fen(&fen)?;
+            board.validate_king_counts()?;
+            Ok((board, fen_end))
         }
         _ => Err(UciError::MissingParts),
     }
@@ -163,6 +165,34 @@ mod tests {
         .unwrap();
 
         assert!(!board.white_to_move());
+    }
+
+    #[test]
+    fn try_parse_position_rejects_invalid_king_counts() {
+        let mut board = Board::new();
+        let original_hash = board.hash;
+        let result = try_parse_position_command(
+            &mut board,
+            &[
+                "position",
+                "fen",
+                "8/8/8/8/8/8/8/K7",
+                "w",
+                "-",
+                "-",
+                "0",
+                "1",
+            ],
+        );
+
+        assert!(matches!(
+            result,
+            Err(UciError::InvalidFen(FenError::InvalidKingCount {
+                white: 1,
+                black: 0
+            }))
+        ));
+        assert_eq!(board.hash, original_hash);
     }
 
     #[test]

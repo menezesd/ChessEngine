@@ -1,5 +1,5 @@
 use crate::board::search::DEFAULT_MAX_DEPTH;
-use crate::engine::time::{build_search_request, TimeConfig};
+use crate::engine::time::{build_search_request, TimeConfig, TimeControl};
 use crate::engine::SearchParams as EngineSearchParams;
 use crate::uci::command::GoParams;
 use crate::uci::print::print_time_info;
@@ -23,7 +23,10 @@ impl UciSession {
         let time_control = self.state.update_time_control(params, is_white);
         let depth = requested_depth(params);
         let go_ponder = params.ponder;
-        let go_infinite = params.infinite;
+        // An unconstrained bare `go` has the same lifecycle as `go infinite`:
+        // even if the finite internal depth cap is reached, wait for `stop`
+        // before publishing a result.
+        let go_infinite = matches!(time_control, TimeControl::Infinite);
         let nodes = (!go_infinite).then_some(params.nodes).flatten();
 
         let time_config = TimeConfig {
@@ -48,6 +51,12 @@ impl UciSession {
             ponder: request.ponder,
             infinite: request.infinite,
             multi_pv: self.options.multi_pv,
+            root_moves: params.searchmoves.as_ref().map(|moves| {
+                moves
+                    .iter()
+                    .filter_map(|mv| self.engine.board_mut().parse_move(mv).ok())
+                    .collect()
+            }),
         };
 
         GoSearchPlan {
@@ -83,18 +92,7 @@ impl UciSession {
             plan.depth_hint,
         );
 
-        let is_checkmate = self.engine.board_mut().is_checkmate();
-        let is_stalemate = self.engine.board_mut().is_stalemate();
-        let is_draw = self.engine.board().is_draw();
-
         self.engine.start_search(plan.search_params, move |result| {
-            if result.best_move.is_none() {
-                if is_checkmate {
-                    println!("info score mate -1");
-                } else if is_stalemate || is_draw {
-                    println!("info score cp 0");
-                }
-            }
             print_bestmove_with_ponder(result);
         });
     }
@@ -206,6 +204,18 @@ mod tests {
         let plan = session.build_go_plan(&params, true);
         assert!(plan.search_params.infinite);
         assert_eq!(plan.search_params.depth, None);
+        assert_eq!(plan.max_nodes, 0);
+    }
+
+    #[test]
+    fn bare_go_is_unlimited_until_stop() {
+        let mut session = UciSession::new(1);
+        let plan = session.build_go_plan(&GoParams::default(), true);
+
+        assert!(plan.search_params.infinite);
+        assert_eq!(plan.search_params.depth, None);
+        assert_eq!(plan.search_params.soft_time_ms, 0);
+        assert_eq!(plan.search_params.hard_time_ms, 0);
         assert_eq!(plan.max_nodes, 0);
     }
 }

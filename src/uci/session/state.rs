@@ -36,6 +36,12 @@ fn go_time_control(params: &GoParams, is_white: bool) -> TimeControl {
         return TimeControl::move_time(Duration::from_millis(mt));
     }
 
+    // With no search/time constraint at all, UCI `go` means keep searching
+    // until the GUI sends `stop`.  Do not invent the fallback clock here.
+    if !has_explicit_limit(params) {
+        return TimeControl::Infinite;
+    }
+
     // UCI permits depth/node/mate bounds together with a clock.  Preserve the
     // clock in that case so the search has both constraints; only a fixed
     // search with no active-side clock is truly untimed.
@@ -56,6 +62,16 @@ fn duration_from_millis(value: Option<u64>) -> Option<Duration> {
 
 fn is_fixed_search(params: &GoParams) -> bool {
     params.depth.is_some() || params.nodes.is_some() || params.mate.is_some_and(|mate| mate > 0)
+}
+
+fn has_explicit_limit(params: &GoParams) -> bool {
+    params.wtime.is_some()
+        || params.btime.is_some()
+        || params.winc.is_some()
+        || params.binc.is_some()
+        || params.movetime.is_some()
+        || params.movestogo.is_some()
+        || is_fixed_search(params)
 }
 
 fn side_time(params: &GoParams, is_white: bool) -> Option<u64> {
@@ -154,6 +170,25 @@ mod tests {
             ..GoParams::default()
         };
 
+        assert_eq!(
+            state.update_time_control(&params, true),
+            TimeControl::Infinite
+        );
+    }
+
+    #[test]
+    fn update_time_control_uses_infinite_when_no_limit_is_given() {
+        let mut state = UciState::default();
+
+        assert_eq!(
+            state.update_time_control(&GoParams::default(), true),
+            TimeControl::Infinite
+        );
+
+        let params = GoParams {
+            searchmoves: Some(vec!["e2e4".to_string()]),
+            ..GoParams::default()
+        };
         assert_eq!(
             state.update_time_control(&params, true),
             TimeControl::Infinite

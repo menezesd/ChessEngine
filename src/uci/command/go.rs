@@ -9,6 +9,7 @@ pub struct GoParams {
     pub depth: Option<u32>,
     pub nodes: Option<u64>,
     pub mate: Option<u32>,
+    pub searchmoves: Option<Vec<String>>,
     pub ponder: bool,
     pub infinite: bool,
 }
@@ -29,8 +30,8 @@ fn assign_if_parsed<T: std::str::FromStr>(target: &mut Option<T>, value: Option<
 /// Parse a clock value, clamping negatives to zero.
 ///
 /// GUIs report negative remaining time when the engine is already over
-/// budget. Rejecting the value would silently fall back to the default
-/// 5-second clock; an empty clock keeps the engine in instant-move mode.
+/// budget. Keep that as an explicit zero clock instead of dropping the
+/// timing information entirely.
 fn assign_clamped_clock(target: &mut Option<u64>, value: Option<&str>) -> bool {
     let Some(parsed) = parsed_value::<i64>(value) else {
         return false;
@@ -55,12 +56,39 @@ fn assign_numeric_param(params: &mut GoParams, name: &str, value: Option<&str>) 
     }
 }
 
+fn is_go_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "wtime"
+            | "btime"
+            | "winc"
+            | "binc"
+            | "movetime"
+            | "movestogo"
+            | "nodes"
+            | "depth"
+            | "mate"
+            | "ponder"
+            | "infinite"
+            | "searchmoves"
+    )
+}
+
 #[must_use]
 pub fn parse_go_params(parts: &[&str]) -> GoParams {
     let mut params = GoParams::default();
     let mut i = 1;
 
     while i < parts.len() {
+        if parts[i] == "searchmoves" {
+            i += 1;
+            let start = i;
+            while i < parts.len() && !is_go_keyword(parts[i]) {
+                i += 1;
+            }
+            params.searchmoves = Some(parts[start..i].iter().map(|s| (*s).to_string()).collect());
+            continue;
+        }
         let value = parts.get(i + 1).copied();
         let consumed = if assign_numeric_param(&mut params, parts[i], value) {
             2
