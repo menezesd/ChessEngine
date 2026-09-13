@@ -91,6 +91,8 @@ impl ContinuationHistory {
     }
 
     /// Decay all entries
+    // `iter_mut()` is required until by-ref `IntoIterator` for arrays reaches stable.
+    #[allow(clippy::explicit_iter_loop)]
     pub fn decay(&mut self) {
         for outer in self.entries.iter_mut() {
             for entry in outer.iter_mut() {
@@ -100,6 +102,8 @@ impl ContinuationHistory {
     }
 
     /// Reset all entries
+    // `iter_mut()` is required until by-ref `IntoIterator` for arrays reaches stable.
+    #[allow(clippy::explicit_iter_loop)]
     pub fn reset(&mut self) {
         for outer in self.entries.iter_mut() {
             for entry in outer.iter_mut() {
@@ -162,6 +166,8 @@ impl CountermoveHistory {
     }
 
     /// Decay all entries
+    // `iter_mut()` is required until by-ref `IntoIterator` for arrays reaches stable.
+    #[allow(clippy::explicit_iter_loop)]
     pub fn decay(&mut self) {
         for outer in self.entries.iter_mut() {
             for entry in outer.iter_mut() {
@@ -171,6 +177,8 @@ impl CountermoveHistory {
     }
 
     /// Reset all entries
+    // `iter_mut()` is required until by-ref `IntoIterator` for arrays reaches stable.
+    #[allow(clippy::explicit_iter_loop)]
     pub fn reset(&mut self) {
         for outer in self.entries.iter_mut() {
             for entry in outer.iter_mut() {

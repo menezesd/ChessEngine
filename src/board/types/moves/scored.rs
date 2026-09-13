@@ -83,9 +83,9 @@ impl ScoredMoveList {
 
         let mut best_idx = start;
         let mut best_score = self.moves[start].score;
-        for i in (start + 1)..self.len {
-            if self.moves[i].score > best_score {
-                best_score = self.moves[i].score;
+        for (i, item) in self.moves.iter().enumerate().take(self.len).skip(start + 1) {
+            if item.score > best_score {
+                best_score = item.score;
                 best_idx = i;
             }
         }

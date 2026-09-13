@@ -367,7 +367,7 @@ mod tests {
         let mut options = UciOptions::new(1);
         let mut state = SearchState::new(1);
 
-        assert!(options.eval_file.is_empty());
+        assert_eq!(options.eval_file, "");
         options.apply_setoption("UseNNUE", Some("true"), &mut state);
 
         assert!(!options.use_nnue);
@@ -408,7 +408,7 @@ mod tests {
         let reset = state
             .shared_nnue()
             .expect("embedded network should be restored");
-        assert!(options.eval_file.is_empty());
+        assert_eq!(options.eval_file, "");
         assert!(!std::sync::Arc::ptr_eq(&loaded, &reset));
     }
 
@@ -474,7 +474,7 @@ mod tests {
 
         options.apply_setoption("StaticEvalFile", Some(""), &mut state);
 
-        assert!(options.static_eval_file.is_empty());
+        assert_eq!(options.static_eval_file, "");
         assert!(state.shared_static_nnue().is_none());
     }
 
