@@ -8,6 +8,7 @@
 //! u64 pairs using XOR verification to detect torn reads.
 
 use std::mem;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::board::Move;
 
@@ -31,8 +32,9 @@ fn tt_bucket_count(size_mb: usize, bucket_size: usize) -> usize {
 /// Multiple threads can read and write concurrently without locks.
 /// Torn reads are detected via XOR verification and discarded.
 pub struct TranspositionTable {
-    buckets: Vec<TTBucket>,
+    buckets: Box<[TTBucket]>,
     mask: usize,
+    ever_stored: AtomicBool,
 }
 
 impl TranspositionTable {
@@ -42,15 +44,17 @@ impl TranspositionTable {
         let bucket_size = mem::size_of::<TTBucket>();
         let num_buckets = tt_bucket_count(size_mb, bucket_size);
 
-        let mut buckets = Vec::with_capacity(num_buckets);
-        for _ in 0..num_buckets {
-            buckets.push(TTBucket::new());
-        }
-
         TranspositionTable {
-            buckets,
+            buckets: Self::empty_buckets(num_buckets),
             mask: num_buckets - 1,
+            ever_stored: AtomicBool::new(false),
         }
+    }
+
+    fn empty_buckets(num_buckets: usize) -> Box<[TTBucket]> {
+        // SAFETY: A bucket contains only atomic integers and padding.
+        // Zero is valid for both atomic fields and represents an empty slot.
+        unsafe { Box::<[TTBucket]>::new_zeroed_slice(num_buckets).assume_init() }
     }
 
     fn index(&self, hash: u64) -> usize {
@@ -58,11 +62,11 @@ impl TranspositionTable {
     }
 
     /// Prefetch TT bucket for a hash to hide memory latency.
-    /// Call this before making a move, then probe after the move is made.
+    /// Call this with the child hash before searching the child position.
     #[inline]
     pub fn prefetch(&self, hash: u64) {
-        let idx = self.index(hash);
-        let bucket_ptr = self.buckets.as_ptr().wrapping_add(idx);
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64"))]
+        let bucket_ptr = self.buckets.as_ptr().wrapping_add(self.index(hash));
 
         // Use CPU prefetch instructions where available
         #[cfg(target_arch = "x86_64")]
@@ -77,11 +81,18 @@ impl TranspositionTable {
             _mm_prefetch(bucket_ptr.cast::<i8>(), _MM_HINT_T0);
         }
 
-        // Fallback for other architectures: volatile read brings cache line in
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+        #[cfg(target_arch = "aarch64")]
         unsafe {
-            std::ptr::read_volatile(bucket_ptr.cast::<u8>());
+            // PRFM is a cache hint and does not read shared atomic data.
+            std::arch::asm!(
+                "prfm pldl1keep, [{address}]",
+                address = in(reg) bucket_ptr,
+                options(readonly, nostack, preserves_flags),
+            );
         }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")))]
+        let _ = hash;
     }
 
     /// Probe the table for an entry matching the given hash.
@@ -123,6 +134,11 @@ impl TranspositionTable {
         generation: u16,
         halfmove_clock: u32,
     ) {
+        // This flag only transitions from false to true. A sweep racing a
+        // writer cannot reset it and accidentally skip a later clear.
+        if !self.ever_stored.load(Ordering::Relaxed) {
+            self.ever_stored.store(true, Ordering::Relaxed);
+        }
         let depth_u8 = depth.min(255) as u8;
         let score_i16 = score.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         let gen_u8 = (generation & 0x3F) as u8;
@@ -156,8 +172,22 @@ impl TranspositionTable {
 
     /// Clear all entries from the table.
     pub fn clear(&self) {
+        if !self.ever_stored.load(Ordering::Relaxed) {
+            return;
+        }
         for bucket in &self.buckets {
             bucket.clear();
+        }
+    }
+
+    pub(crate) fn clear_exclusive(&mut self) {
+        if *self.ever_stored.get_mut() {
+            let bucket_count = self.buckets.len();
+            // Release the old allocation first to avoid holding two tables
+            // in memory. The allocator can supply zeroed pages on demand.
+            drop(mem::take(&mut self.buckets));
+            self.buckets = Self::empty_buckets(bucket_count);
+            *self.ever_stored.get_mut() = false;
         }
     }
 }

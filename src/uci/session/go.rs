@@ -5,7 +5,7 @@ use crate::uci::command::GoParams;
 use crate::uci::print::print_time_info;
 use crate::uci::report::print_bestmove_with_ponder;
 
-use super::UciSession;
+use super::{time_control::go_time_control, UciSession};
 
 const PLIES_PER_MATE_MOVE: u32 = 2;
 
@@ -20,14 +20,22 @@ pub(super) struct GoSearchPlan {
 
 impl UciSession {
     pub(super) fn build_go_plan(&mut self, params: &GoParams, is_white: bool) -> GoSearchPlan {
-        let time_control = self.state.update_time_control(params, is_white);
-        let depth = requested_depth(params);
+        let time_control = go_time_control(params, is_white);
+        let depth = requested_depth(params).or_else(|| {
+            // With a game clock, a forced reply needs only enough search to
+            // seed a continuation. Explicit analysis limits still apply.
+            (matches!(time_control, TimeControl::Incremental { .. })
+                && !params.ponder
+                && params.searchmoves.is_none()
+                && self.engine.board().has_single_legal_move())
+            .then_some(1)
+        });
         let go_ponder = params.ponder;
         // An unconstrained bare `go` has the same lifecycle as `go infinite`:
         // even if the finite internal depth cap is reached, wait for `stop`
         // before publishing a result.
         let go_infinite = matches!(time_control, TimeControl::Infinite);
-        let nodes = (!go_infinite).then_some(params.nodes).flatten();
+        let nodes = if go_infinite { None } else { params.nodes };
 
         let time_config = TimeConfig {
             move_overhead_ms: self.options.move_overhead_ms,
@@ -52,9 +60,10 @@ impl UciSession {
             infinite: request.infinite,
             multi_pv: self.options.multi_pv,
             root_moves: params.searchmoves.as_ref().map(|moves| {
+                let board = self.engine.board_mut();
                 moves
                     .iter()
-                    .filter_map(|mv| self.engine.board_mut().parse_move(mv).ok())
+                    .filter_map(|mv| board.parse_move(mv).ok())
                     .collect()
             }),
         };
@@ -77,7 +86,7 @@ impl UciSession {
         self.engine.stop_search();
         // Re-apply the debug flag in case `debug` arrived mid-search, when
         // the non-blocking `set_trace` cannot reach the locked state.
-        self.engine.set_trace(self.state.debug);
+        self.engine.set_trace(self.debug);
 
         let plan = self.build_go_plan(params, self.engine.board().white_to_move());
 
@@ -124,6 +133,40 @@ mod tests {
     use super::{requested_depth, UciSession};
     use crate::board::search::DEFAULT_MAX_DEPTH;
     use crate::uci::command::GoParams;
+
+    #[test]
+    fn only_reply_on_a_game_clock_gets_a_short_search() {
+        let mut session = UciSession::new(1);
+        session.engine.set_board(crate::board::Board::from_fen(
+            "7k/5K2/8/8/8/8/8/R7 b - - 0 1",
+        ));
+        let mut params = GoParams {
+            wtime: Some(10_000),
+            btime: Some(10_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            session.build_go_plan(&params, false).search_params.depth,
+            Some(1)
+        );
+        params.depth = Some(8);
+        assert_eq!(
+            session.build_go_plan(&params, false).search_params.depth,
+            Some(8)
+        );
+        params.depth = None;
+        params.ponder = true;
+        assert_eq!(
+            session.build_go_plan(&params, false).search_params.depth,
+            None
+        );
+        params.ponder = false;
+        params.movetime = Some(200);
+        assert_eq!(
+            session.build_go_plan(&params, false).search_params.depth,
+            None
+        );
+    }
 
     #[test]
     fn requested_depth_prefers_explicit_depth() {

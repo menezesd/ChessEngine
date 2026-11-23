@@ -3,18 +3,12 @@ use std::sync::Arc;
 use crate::board::SearchIterationInfo;
 
 fn print_uci_info(info: &SearchIterationInfo) {
-    let multipv_str = if info.multipv > 1 {
-        format!(" multipv {}", info.multipv)
-    } else {
-        String::new()
-    };
-
     if let Some(mate) = info.mate_in {
         println!(
-            "info depth {} seldepth {}{} nodes {} nps {} time {} score mate {} pv {}",
+            "info depth {} seldepth {} multipv {} nodes {} nps {} time {} score mate {} pv {}",
             info.depth,
             info.seldepth,
-            multipv_str,
+            info.multipv,
             info.nodes,
             info.nps,
             info.time_ms,
@@ -23,10 +17,10 @@ fn print_uci_info(info: &SearchIterationInfo) {
         );
     } else {
         println!(
-            "info depth {} seldepth {}{} nodes {} nps {} time {} score cp {} pv {}",
+            "info depth {} seldepth {} multipv {} nodes {} nps {} time {} score cp {} pv {}",
             info.depth,
             info.seldepth,
-            multipv_str,
+            info.multipv,
             info.nodes,
             info.nps,
             info.time_ms,

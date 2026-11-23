@@ -89,6 +89,19 @@ fn compute_time_limits_honors_explicit_movestogo_below_estimate_floor() {
 }
 
 #[test]
+fn last_move_before_time_control_uses_the_clock_even_below_five_seconds() {
+    let config = TimeConfig::default();
+    assert_eq!(
+        compute_incremental_limits(4_000, 0, Some(1), &config),
+        (2_765, 3_555)
+    );
+    assert_eq!(
+        compute_incremental_limits(4_000, 0, Some(0), &config),
+        compute_incremental_limits(4_000, 0, None, &config)
+    );
+}
+
+#[test]
 fn panic_time_limits_saturates_extreme_increment() {
     let (soft, hard) = compute_incremental_limits(1_000, u64::MAX, None, &test_config());
 

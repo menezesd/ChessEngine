@@ -36,6 +36,12 @@ pub enum XBoardCommand {
         base_seconds: u32,
         increment_seconds: u32,
     },
+    /// Set a time control whose increment is expressed in fractional seconds.
+    LevelWithFractionalIncrement {
+        moves_per_session: u32,
+        base_seconds: u32,
+        increment_ms: u64,
+    },
     /// Set exact seconds per move
     St(u32),
     /// Set max depth

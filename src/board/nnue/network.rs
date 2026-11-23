@@ -110,6 +110,31 @@ impl NnueAccumulator {
         simd::sub_weights(&mut self.white, &network.feature_weights[white_feat]);
         simd::sub_weights(&mut self.black, &network.feature_weights[black_feat]);
     }
+
+    pub(in crate::board) fn update_from_parent(
+        &mut self,
+        parent: &Self,
+        from: (usize, usize),
+        to: (usize, usize),
+        captured: Option<(usize, usize)>,
+        network: &NnueNetwork,
+    ) {
+        let weights = &network.feature_weights;
+        simd::move_weights(
+            &parent.white,
+            &mut self.white,
+            &weights[to.0],
+            &weights[from.0],
+            captured.map(|(white, _)| &weights[white]),
+        );
+        simd::move_weights(
+            &parent.black,
+            &mut self.black,
+            &weights[to.1],
+            &weights[from.1],
+            captured.map(|(_, black)| &weights[black]),
+        );
+    }
 }
 
 /// NNUE network weights
@@ -242,21 +267,55 @@ impl NnueNetwork {
         self.input_size >= TACTICAL_INPUT_SIZE
     }
 
+    pub(in crate::board) fn output_fits_i32(&self) -> bool {
+        // The absolute sum bounds every partial reduction, even when
+        // activations and weights vary between lanes.
+        const MAX_WEIGHT_SUM: i32 = i32::MAX / (QA * QA);
+        [&self.output_weights_white, &self.output_weights_black]
+            .into_iter()
+            .all(|weights| {
+                weights
+                    .iter()
+                    .map(|&weight| i32::from(weight).abs())
+                    .sum::<i32>()
+                    <= MAX_WEIGHT_SUM
+            })
+    }
+
     /// Evaluate position given accumulator and side to move
     /// Returns evaluation in centipawns from side-to-move perspective
     #[inline]
     #[must_use]
     pub fn evaluate(&self, acc: &NnueAccumulator, white_to_move: bool) -> i32 {
+        self.evaluate_with_bounded_output(acc, white_to_move, false)
+    }
+
+    /// Search derives the bound once from the immutable weights it uses.
+    #[inline]
+    pub(in crate::board) fn evaluate_with_bounded_output(
+        &self,
+        acc: &NnueAccumulator,
+        white_to_move: bool,
+        output_fits_i32: bool,
+    ) -> i32 {
         let (us_acc, them_acc) = if white_to_move {
             (&acc.white, &acc.black)
         } else {
             (&acc.black, &acc.white)
         };
 
-        // SCReLU activation and dot product (returns i64 to avoid overflow)
         // Swapping the weights too would cancel the side-to-move selection.
-        let us_output = simd::screlu_dot(us_acc, &self.output_weights_white);
-        let them_output = simd::screlu_dot(them_acc, &self.output_weights_black);
+        let (us_output, them_output) = if output_fits_i32 {
+            (
+                i64::from(simd::screlu_dot_i32(us_acc, &self.output_weights_white)),
+                i64::from(simd::screlu_dot_i32(them_acc, &self.output_weights_black)),
+            )
+        } else {
+            (
+                simd::screlu_dot(us_acc, &self.output_weights_white),
+                simd::screlu_dot(them_acc, &self.output_weights_black),
+            )
+        };
 
         // Combine outputs and scale
         let output = us_output + them_output + i64::from(self.output_bias) * QA as i64;
@@ -371,6 +430,13 @@ impl NnueNetwork {
     pub fn from_embedded() -> Self {
         Self::from_bytes(EMBEDDED_NETWORK).expect("Embedded NNUE is invalid")
     }
+
+    pub(crate) fn shared_embedded() -> std::sync::Arc<Self> {
+        use std::sync::{Arc, OnceLock};
+
+        static NETWORK: OnceLock<Arc<NnueNetwork>> = OnceLock::new();
+        Arc::clone(NETWORK.get_or_init(|| Arc::new(NnueNetwork::from_embedded())))
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +461,34 @@ mod tests {
 
         assert_eq!(network.evaluate(&acc, true), crate::board::nnue::SCALE);
         assert_eq!(network.evaluate(&acc, false), -crate::board::nnue::SCALE);
+    }
+
+    #[test]
+    fn bounded_output_matches_wide_output_at_the_weight_limit() {
+        use crate::board::nnue::QA;
+
+        let data = vec![0; raw_network_bytes(BASE_INPUT_SIZE)];
+        let mut network = NnueNetwork::from_bytes(&data).unwrap();
+        let limit = i32::MAX / (QA * QA);
+        network.output_weights_white[0] = i16::MAX;
+        network.output_weights_white[1] = (limit - i32::from(i16::MAX)) as i16;
+        network.output_weights_black[0] = i16::MIN;
+        network.output_weights_black[1] = 1;
+        let acc = super::NnueAccumulator {
+            white: [QA; HIDDEN_SIZE],
+            black: [QA / 2; HIDDEN_SIZE],
+        };
+
+        assert!(network.output_fits_i32());
+        for white in [true, false] {
+            assert_eq!(
+                network.evaluate_with_bounded_output(&acc, white, true),
+                network.evaluate(&acc, white),
+            );
+        }
+
+        network.output_weights_white[1] += 1;
+        assert!(!network.output_fits_i32());
     }
 
     #[test]

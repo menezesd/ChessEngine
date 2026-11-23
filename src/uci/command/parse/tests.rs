@@ -142,6 +142,16 @@ fn parse_uci_command_setoption() {
 }
 
 #[test]
+fn parse_uci_command_preserves_whitespace_inside_option_values() {
+    let command = "setoption   name  EvalFile  value   /tmp/two  spaces\tnetwork.nnue ";
+    let Some(UciCommand::SetOption { name, value }) = parse_uci_command(command) else {
+        panic!("Expected SetOption command");
+    };
+    assert_eq!(name, "EvalFile");
+    assert_eq!(value.as_deref(), Some("/tmp/two  spaces\tnetwork.nnue"));
+}
+
+#[test]
 fn parse_uci_command_debug_on() {
     let cmd = parse_uci_command("debug on");
     match cmd {

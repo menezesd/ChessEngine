@@ -1,7 +1,18 @@
 //! Make/unmake move tests.
 
-use crate::board::{Board, Color, Move, Piece, Square, UnmakeInfo};
+use crate::board::{Board, Color, Move, Piece, Square, UnmakeInfo, CASTLE_BLACK_K, CASTLE_WHITE_K};
+use crate::zobrist::ZOBRIST;
 use rand::prelude::*;
+
+fn recompute_pawn_hash(board: &Board) -> u64 {
+    let mut hash = 0;
+    for color in Color::BOTH {
+        for square in board.pieces_of(color, Piece::Pawn).iter() {
+            hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][color.index()][square.index()];
+        }
+    }
+    hash
+}
 
 fn find_move(board: &mut Board, from: Square, to: Square, promotion: Option<Piece>) -> Move {
     for m in &board.generate_moves() {
@@ -20,8 +31,10 @@ fn test_en_passant_make_unmake() {
     let original_ep = board.en_passant_target;
     let mv = find_move(&mut board, Square::new(4, 4), Square::new(5, 5), None);
     let info = board.make_move(mv);
+    assert_eq!(board.pawn_hash(), recompute_pawn_hash(&board));
     board.unmake_move(mv, info);
     assert_eq!(board.hash(), original_hash);
+    assert_eq!(board.pawn_hash(), recompute_pawn_hash(&board));
     assert_eq!(board.en_passant_target, original_ep);
 }
 
@@ -36,8 +49,10 @@ fn test_promotion_make_unmake() {
         Some(Piece::Queen),
     );
     let info = board.make_move(mv);
+    assert_eq!(board.pawn_hash(), 0);
     board.unmake_move(mv, info);
     assert_eq!(board.hash(), original_hash);
+    assert_eq!(board.pawn_hash(), recompute_pawn_hash(&board));
     assert_eq!(
         board.piece_at(Square::new(6, 0)),
         Some((Color::White, Piece::Pawn))
@@ -71,6 +86,27 @@ fn test_null_move_preserves_castling_rights() {
     assert_eq!(board.castling_rights, original_castling);
     board.unmake_null_move(info);
     assert_eq!(board.castling_rights, original_castling);
+}
+
+#[test]
+fn corner_rook_moves_update_the_relevant_castling_rights_and_hash() {
+    for (fen, coordinate, remaining_rights) in [
+        (
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            "a1a8",
+            CASTLE_WHITE_K | CASTLE_BLACK_K,
+        ),
+        ("4k1bR/8/8/8/8/8/8/4K3 w k - 0 1", "h8h7", CASTLE_BLACK_K),
+    ] {
+        let mut board = Board::from_fen(fen);
+        let before = (board.castling_rights, board.hash);
+        let mv = board.parse_move(coordinate).unwrap();
+        let info = board.make_move(mv);
+        assert_eq!(board.castling_rights, remaining_rights);
+        assert_eq!(board.hash, board.calculate_initial_hash());
+        board.unmake_move(mv, info);
+        assert_eq!((board.castling_rights, board.hash), before);
+    }
 }
 
 #[test]
@@ -120,12 +156,14 @@ fn test_hash_matches_recompute_after_random_moves() {
 
         let recomputed = board.calculate_initial_hash();
         assert_eq!(board.hash(), recomputed);
+        assert_eq!(board.pawn_hash(), recompute_pawn_hash(&board));
     }
 
     while let Some((mv, info)) = history.pop() {
         board.unmake_move(mv, info);
         let recomputed = board.calculate_initial_hash();
         assert_eq!(board.hash(), recomputed);
+        assert_eq!(board.pawn_hash(), recompute_pawn_hash(&board));
     }
 }
 

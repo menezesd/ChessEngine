@@ -19,13 +19,20 @@ pub mod output;
 mod search;
 mod state;
 
+use crate::board::Move;
 use command::{parse_xboard_command, XBoardCommand};
 use output::format_move;
 pub use state::XBoardHandler;
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
+
+struct CommandResponse {
+    text: String,
+    ponder_move: Option<Move>,
+}
 
 impl XBoardHandler {
     /// Run the `XBoard` protocol main loop.
@@ -45,9 +52,8 @@ impl XBoardHandler {
             match commands.recv_timeout(Duration::from_millis(5)) {
                 Ok(line) => {
                     if let Some(cmd) = parse_xboard_command(&line) {
-                        if let Some(response) = self.handle_command(&cmd) {
-                            writeln!(stdout, "{response}").ok();
-                            stdout.flush().ok();
+                        if let Some(response) = self.process_command(&cmd) {
+                            self.publish_response(&mut stdout, &response);
                         }
                         if matches!(cmd, XBoardCommand::Quit) {
                             break;
@@ -64,9 +70,8 @@ impl XBoardHandler {
                 .as_ref()
                 .is_some_and(thread::JoinHandle::is_finished)
             {
-                if let Some(output) = self.finish_thinking() {
-                    writeln!(stdout, "{output}").ok();
-                    stdout.flush().ok();
+                if let Some(response) = self.finish_thinking() {
+                    self.publish_response(&mut stdout, &response);
                 }
             }
         }
@@ -75,23 +80,38 @@ impl XBoardHandler {
         self.stop_analyze();
     }
 
+    fn publish_response(&mut self, stdout: &mut io::Stdout, response: &CommandResponse) {
+        writeln!(stdout, "{}", response.text).ok();
+        stdout.flush().ok();
+        if let Some(mv) = response.ponder_move {
+            self.start_ponder(mv);
+        }
+    }
+
     /// Join a completed (or explicitly stopped) move search and play its move.
-    fn finish_thinking(&mut self) -> Option<String> {
+    fn finish_thinking(&mut self) -> Option<CommandResponse> {
         let result = self.thinking.take()?.join().ok()?;
         let mv = result.best_move?;
-        let output = format_move(&self.board, &mv);
+        let text = format_move(&self.board, &mv);
         let info = self.board.make_move(mv);
         self.move_history.push((mv, info));
 
-        if let (true, Some(ponder_mv)) = (self.pondering_enabled, result.ponder_move) {
-            self.start_ponder(ponder_mv);
-        }
-
-        Some(output)
+        Some(CommandResponse {
+            text,
+            ponder_move: result.ponder_move.filter(|_| self.pondering_enabled),
+        })
     }
 
     /// Handle a single `XBoard` command.
     pub fn handle_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
+        let response = self.process_command(cmd)?;
+        if let Some(mv) = response.ponder_move {
+            self.start_ponder(mv);
+        }
+        Some(response.text)
+    }
+
+    fn process_command(&mut self, cmd: &XBoardCommand) -> Option<CommandResponse> {
         // Position and mode changes invalidate a running result. Join before
         // touching the board or locking search state so no stale move can
         // be published and no command waits for an uninterruptible search.
@@ -119,7 +139,15 @@ impl XBoardHandler {
             self.stop_analyze();
         }
 
-        let response = self.dispatch_command(cmd);
+        let response = if matches!(cmd, XBoardCommand::MoveNow) {
+            self.stop_flag.store(true, Ordering::SeqCst);
+            self.finish_thinking()
+        } else {
+            self.dispatch_command(cmd).map(|text| CommandResponse {
+                text,
+                ponder_move: None,
+            })
+        };
         if self.analyze_mode
             && !self.paused
             && !self.edit_mode
@@ -129,38 +157,6 @@ impl XBoardHandler {
             self.start_analyze();
         }
         response
-    }
-
-    fn dispatch_command(&mut self, cmd: &XBoardCommand) -> Option<String> {
-        // Edit commands must win over the normal move handler. Several valid
-        // edit tokens (for example `Ke1`) are also valid-looking SAN moves,
-        // but inside edit mode they place pieces rather than play a move.
-        let (edit_consumed, edit_response) = self.handle_edit_command(cmd);
-        if edit_consumed {
-            return edit_response;
-        }
-
-        if let Some(response) = self.handle_game_management_command(cmd) {
-            return Some(response);
-        }
-
-        if let Some(response) = self.handle_time_setting_command(cmd) {
-            return Some(response);
-        }
-
-        if let Some(response) = self.handle_search_control_command(cmd) {
-            return Some(response);
-        }
-
-        if let Some(response) = self.handle_analyze_command(cmd) {
-            return Some(response);
-        }
-
-        if let Some(response) = self.handle_protocol_misc_command(cmd) {
-            return Some(response);
-        }
-
-        None
     }
 }
 

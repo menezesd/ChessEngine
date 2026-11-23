@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::board::nnue::NnueNetwork;
 use crate::board::SearchState;
 
 use super::{
@@ -15,19 +18,17 @@ enum ApplyOptionResult {
 }
 
 impl UciOptions {
-    fn load_default_nnue(state: &mut SearchState) -> bool {
+    fn read_nnue(path: &str) -> std::io::Result<Option<Arc<NnueNetwork>>> {
+        (!path.is_empty())
+            .then(|| NnueNetwork::load(path).map(Arc::new))
+            .transpose()
+    }
+
+    fn read_main_nnue(path: &str) -> std::io::Result<Option<Arc<NnueNetwork>>> {
+        let network = Self::read_nnue(path)?;
         #[cfg(feature = "embedded_nnue")]
-        {
-            state.tables.nnue = Some(std::sync::Arc::new(
-                crate::board::nnue::NnueNetwork::from_embedded(),
-            ));
-            true
-        }
-        #[cfg(not(feature = "embedded_nnue"))]
-        {
-            let _ = state;
-            false
-        }
+        let network = network.or_else(|| Some(NnueNetwork::shared_embedded()));
+        Ok(network)
     }
 
     fn parsed_clamped<T>(value: Option<&str>, min: T, max: T) -> Option<T>
@@ -57,18 +58,17 @@ impl UciOptions {
     }
 
     fn reload_nnue_files(&self, state: &mut SearchState) -> bool {
-        if self.eval_file.is_empty() {
-            if !Self::load_default_nnue(state) {
-                return false;
-            }
-        } else if state.load_nnue(&self.eval_file).is_err() {
+        let (Ok(main), Ok(static_eval)) = (
+            Self::read_main_nnue(&self.eval_file),
+            Self::read_nnue(&self.static_eval_file),
+        ) else {
+            return false;
+        };
+        if main.is_none() && static_eval.is_none() {
             return false;
         }
-        if self.static_eval_file.is_empty() {
-            state.tables.static_nnue = None;
-        } else {
-            let _ = state.load_static_nnue(&self.static_eval_file);
-        }
+        state.tables.nnue = main;
+        state.tables.static_nnue = static_eval;
         true
     }
 
@@ -95,11 +95,8 @@ impl UciOptions {
 
         if !self.use_nnue {
             self.eval_file = value.to_string();
-        } else if value.is_empty() {
-            if Self::load_default_nnue(state) {
-                self.eval_file.clear();
-            }
-        } else if state.load_nnue(value).is_ok() {
+        } else if let Ok(Some(network)) = Self::read_main_nnue(value) {
+            state.tables.nnue = Some(network);
             self.eval_file = value.to_string();
         }
     }
@@ -111,10 +108,8 @@ impl UciOptions {
 
         if !self.use_nnue {
             self.static_eval_file = value.to_string();
-        } else if value.is_empty() {
-            self.static_eval_file.clear();
-            state.tables.static_nnue = None;
-        } else if state.load_static_nnue(value).is_ok() {
+        } else if let Ok(network) = Self::read_nnue(value) {
+            state.tables.static_nnue = network;
             self.static_eval_file = value.to_string();
         }
     }

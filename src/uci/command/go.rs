@@ -76,36 +76,30 @@ fn is_go_keyword(token: &str) -> bool {
 
 #[must_use]
 pub fn parse_go_params(parts: &[&str]) -> GoParams {
-    let mut params = GoParams::default();
-    let mut i = 1;
+    parse_go_tokens(parts.iter().skip(1).copied())
+}
 
-    while i < parts.len() {
-        if parts[i] == "searchmoves" {
-            i += 1;
-            let start = i;
-            while i < parts.len() && !is_go_keyword(parts[i]) {
-                i += 1;
+pub(super) fn parse_go_tokens<'a>(tokens: impl Iterator<Item = &'a str>) -> GoParams {
+    let mut params = GoParams::default();
+    let mut tokens = tokens.peekable();
+
+    while let Some(token) = tokens.next() {
+        match token {
+            "searchmoves" => {
+                let mut moves = Vec::new();
+                while let Some(mv) = tokens.next_if(|mv| !is_go_keyword(mv)) {
+                    moves.push(mv.to_owned());
+                }
+                params.searchmoves = Some(moves);
             }
-            params.searchmoves = Some(parts[start..i].iter().map(|s| (*s).to_string()).collect());
-            continue;
+            "ponder" => params.ponder = true,
+            "infinite" => params.infinite = true,
+            _ => {
+                if assign_numeric_param(&mut params, token, tokens.peek().copied()) {
+                    tokens.next();
+                }
+            }
         }
-        let value = parts.get(i + 1).copied();
-        let consumed = if assign_numeric_param(&mut params, parts[i], value) {
-            2
-        } else {
-            match parts[i] {
-                "ponder" => {
-                    params.ponder = true;
-                    1
-                }
-                "infinite" => {
-                    params.infinite = true;
-                    1
-                }
-                _ => 1,
-            }
-        };
-        i += consumed;
     }
     params
 }

@@ -1,4 +1,4 @@
-use super::pst::{MATERIAL_EG, MATERIAL_MG, PHASE_WEIGHTS, PST_EG, PST_MG};
+use super::eval_update::EvalState;
 use super::{Bitboard, Color, Piece, Square, ALL_CASTLING_RIGHTS};
 
 mod repetition;
@@ -13,12 +13,8 @@ pub struct UnmakeInfo {
     pub(crate) previous_hash: u64,
     pub(crate) previous_halfmove_clock: u32,
     pub(crate) previous_fullmove_number: u32,
-    pub(crate) made_hash: u64,
-    pub(crate) previous_repetition_count: u32,
-    // Incremental eval state (for restoration)
-    pub(crate) previous_eval_mg: [i32; 2],
-    pub(crate) previous_eval_eg: [i32; 2],
-    pub(crate) previous_game_phase: [i32; 2],
+    pub(crate) previous_repetition_count: Option<u32>,
+    pub(crate) previous_eval: EvalState,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -37,13 +33,11 @@ pub struct Board {
     pub(crate) en_passant_target: Option<Square>,
     pub(crate) castling_rights: u8, // bitmask
     pub(crate) hash: u64,           // Zobrist hash
+    pub(super) pawn_hash: u64,
     pub(crate) halfmove_clock: u32,
     pub(crate) fullmove_number: u32,
     pub(crate) repetition_counts: RepetitionTable,
-    // Incremental evaluation scores
-    pub(crate) eval_mg: [i32; 2],    // [white, black] middlegame scores
-    pub(crate) eval_eg: [i32; 2],    // [white, black] endgame scores
-    pub(crate) game_phase: [i32; 2], // [white, black] phase contribution
+    pub(crate) eval: EvalState,
     // Cached king squares for fast check detection [white, black]
     pub(crate) king_square: [Square; 2],
     // Mailbox for O(1) piece_at lookups (mirrors bitboard state)
@@ -52,21 +46,13 @@ pub struct Board {
 
 impl Board {
     fn add_piece_to_eval(&mut self, sq: Square, color: Color, piece: Piece) {
-        let mut eval = self.eval_state();
-        eval.add_piece(color.index(), piece, sq.index(), color == Color::White);
-        self.set_eval_state(eval);
+        self.eval
+            .add_piece(color.index(), piece, sq.index(), color == Color::White);
     }
 
     fn remove_piece_from_eval(&mut self, sq: Square, color: Color, piece: Piece) {
-        let mut eval = self.eval_state();
-        eval.remove_piece(color.index(), piece, sq.index(), color == Color::White);
-        self.set_eval_state(eval);
-    }
-
-    fn clear_incremental_eval(&mut self) {
-        self.eval_mg = [0, 0];
-        self.eval_eg = [0, 0];
-        self.game_phase = [0, 0];
+        self.eval
+            .remove_piece(color.index(), piece, sq.index(), color == Color::White);
     }
 
     #[must_use]
@@ -107,8 +93,9 @@ impl Board {
         self.en_passant_target = None;
         self.halfmove_clock = 0;
         self.fullmove_number = 1;
-        self.clear_incremental_eval();
+        self.eval = EvalState::new();
         self.hash = 0;
+        self.pawn_hash = 0;
         self.mailbox = [None; 64];
         // Keep the cached coordinates consistent with `Board::empty()` while
         // an editor rebuilds a position.  Leaving the previous king squares
@@ -204,24 +191,11 @@ impl Board {
 
     /// Recalculate incremental evaluation from scratch (used after FEN parsing or initialization)
     pub(crate) fn recalculate_incremental_eval(&mut self) {
-        self.clear_incremental_eval();
-
+        self.eval = EvalState::new();
         for color in Color::BOTH {
-            let c_idx = color.index();
             for piece in Piece::ALL {
-                let p_idx = piece.index();
-                for sq_idx in self.pieces_of(color, piece).iter() {
-                    let sq = sq_idx.index();
-                    // PST square: flip for white (tables are from black's perspective)
-                    let pst_sq = if color == Color::White {
-                        sq
-                    } else {
-                        sq ^ 0b11_1000
-                    };
-
-                    self.eval_mg[c_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][pst_sq];
-                    self.eval_eg[c_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][pst_sq];
-                    self.game_phase[c_idx] += PHASE_WEIGHTS[p_idx];
+                for square in self.pieces_of(color, piece).iter() {
+                    self.add_piece_to_eval(square, color, piece);
                 }
             }
         }
@@ -236,12 +210,11 @@ impl Board {
             en_passant_target: None,
             castling_rights: 0,
             hash: 0,
+            pawn_hash: 0,
             halfmove_clock: 0,
             fullmove_number: 1,
             repetition_counts: RepetitionTable::new(),
-            eval_mg: [0, 0],
-            eval_eg: [0, 0],
-            game_phase: [0, 0],
+            eval: EvalState::new(),
             // Will be set when kings are placed
             king_square: [Square::new(0, 4), Square::new(7, 4)],
             mailbox: [None; 64],
@@ -253,21 +226,12 @@ impl Board {
         self.hash
     }
 
-    /// Compute a Zobrist hash of only the pawn positions.
+    /// Zobrist hash of only the pawn positions.
     /// Used for pawn hash table lookups and correction history.
     #[must_use]
+    #[inline]
     pub fn pawn_hash(&self) -> u64 {
-        use crate::zobrist::ZOBRIST;
-
-        let mut hash = 0u64;
-
-        for color in Color::BOTH {
-            for sq in self.pieces_of(color, Piece::Pawn).iter() {
-                hash ^= ZOBRIST.piece_keys[Piece::Pawn.index()][color.index()][sq.index()];
-            }
-        }
-
-        hash
+        self.pawn_hash
     }
 
     #[must_use]

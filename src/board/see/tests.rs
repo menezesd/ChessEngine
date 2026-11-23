@@ -182,6 +182,58 @@ fn test_see_en_passant_opens_rook_recapture() {
 }
 
 #[test]
+fn see_en_passant_keeps_target_occupied_during_recaptures() {
+    // After dxe6 e.p., ...Nxe6 is legal because the knight blocks the
+    // e-file. White declines Rxe6+ Kxe6, so the exchange is even.
+    let mut board = make_board("8/2n1k3/8/3Pp3/8/8/8/K3R3 w - e6 0 1");
+    let ep = board.parse_move("d5e6").unwrap();
+    let score = board.see(ep.from(), ep.to());
+    board.make_move(ep);
+    assert!(board.parse_move("c7e6").is_ok());
+    assert_eq!(score, 0);
+}
+
+#[test]
+fn quiet_exchange_verifies_pins_and_defenders() {
+    for (fen, uci, piece, loses_material) in [
+        (
+            "3k4/8/8/3p4/8/8/2Q5/K2R4 w - - 0 1",
+            "c2c4",
+            Piece::Queen,
+            false,
+        ),
+        (
+            "7k/8/8/3p4/8/8/2Q5/K2R4 w - - 0 1",
+            "c2c4",
+            Piece::Queen,
+            true,
+        ),
+        (
+            "7k/8/8/8/3r4/8/4R3/K2R4 w - - 0 1",
+            "e2e4",
+            Piece::Rook,
+            true,
+        ),
+        (
+            "7k/8/8/8/3r4/8/4R3/K3R3 w - - 0 1",
+            "e2e4",
+            Piece::Rook,
+            false,
+        ),
+    ] {
+        let mut board = make_board(fen);
+        let mv = board.parse_move(uci).unwrap();
+        assert!(!board.see_quiet_safe(mv.from(), mv.to()));
+        board.make_move(mv);
+        assert_eq!(
+            board.can_win_exchange_on(mv.to(), piece),
+            loses_material,
+            "{fen}"
+        );
+    }
+}
+
+#[test]
 fn test_see_no_capture() {
     let board = make_board("8/8/8/8/4N3/8/8/8 w - - 0 1");
     let from = Square::new(3, 4);

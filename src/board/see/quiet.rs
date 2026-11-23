@@ -1,13 +1,13 @@
 use crate::board::attack_tables::{slider_attacks, KNIGHT_ATTACKS, PAWN_ATTACKS};
-use crate::board::{Board, Piece, Square};
+use crate::board::{Bitboard, Board, Piece, Square};
 
 use super::SEE_VALUES;
 
 impl Board {
-    /// Check if a quiet move is safe using SEE.
+    /// Screen a quiet move for possible material loss.
     ///
     /// Returns true if moving the piece to the destination is unlikely to lose material.
-    /// This evaluates what happens if the opponent captures our piece after we move it.
+    /// Search verifies flagged moves with a legal exchange after making the move.
     ///
     /// # Arguments
     /// * `from` - Source square of the moving piece
@@ -37,10 +37,8 @@ impl Board {
             let occupancy = self.all_occupied.0;
 
             let enemy_bishops = self.opponent_pieces(color, Piece::Bishop);
-            let enemy_queens = self.opponent_pieces(color, Piece::Queen);
             let diag_attacks = slider_attacks(to.index(), occupancy, true);
-            if (diag_attacks & (enemy_bishops.0 | enemy_queens.0)) != 0
-                && (diag_attacks & enemy_bishops.0) != 0
+            if (diag_attacks & enemy_bishops.0) != 0
                 && SEE_VALUES[Piece::Bishop.index()] < piece_value
             {
                 return false;
@@ -56,5 +54,20 @@ impl Board {
         }
 
         true
+    }
+
+    /// Verify that the side to move can win material by capturing the
+    /// piece that just moved to this square.
+    pub(crate) fn can_win_exchange_on(&self, target: Square, victim: Piece) -> bool {
+        let side = self.side_to_move();
+        let occupancy = self.all_occupied;
+        let attackers = self.attackers_to(target, occupancy).0 & self.occupied_by(side).0;
+        let Some((attacker, from)) =
+            self.least_valuable_legal_attacker(Bitboard(attackers), side, target, occupancy.0)
+        else {
+            return false;
+        };
+        let source = Square::from_index(from.0.trailing_zeros() as usize);
+        self.see_with_pieces(source, target, attacker, victim) > 0
     }
 }

@@ -75,6 +75,37 @@ if let Some(best) = find_best_move(&mut board, &mut state, 6, &stop) {
   principal variations returned.
 - **Ponder:** Enable with `setoption name Ponder value true` and use `ponderhit`
   when the GUI transitions from pondering to actual search.
+- **Endgames:** Built-in tables cover a pawn, rook, queen, bishop and knight,
+  opposite-color bishop pair, or two knights against a bare king. A rook versus
+  a pawn, knight, bishop, rook, or queen uses the exact distance to a winning
+  capture, pawn move, or checkmate. Compilation generates the tables. Search
+  respects the fifty-move clock, reports mating lines when their distance is
+  known, and recognizes the wrong-bishop rook-pawn fortress.
+
+The default engine uses 60% fast handcrafted evaluation (HCE) and 40%
+embedded NNUE throughout the search. Set `UseNNUE` to `false` for HCE
+alone, `EvalFile` to load a compatible network, or `NnueHceBlend` to change
+the NNUE percentage. `NnuePureStaticEval` lets pruning and quiescence reuse
+the main evaluator and its blend. Disabling it selects HCE for those calls
+by default. A loaded `StaticEvalFile` takes precedence, with `NnueStaticBlend`
+setting its NNUE percentage. A zero static blend selects HCE.
+Build with `--no-default-features` to omit the embedded network. Set either
+external file, then enable `UseNNUE` to load it in that build.
+
+### Optional Syzygy tablebases
+
+With a C compiler available, build with
+`cargo build --release --features syzygy`. Set the UCI option `SyzygyPath`
+to the directory containing your Syzygy `.rtbw` and `.rtbz` files.
+Separate multiple directories with `:` on Unix or `;` on Windows.
+Set the option to `<empty>` to disable probing.
+
+The engine probes covered root positions of up to seven pieces using the
+current fifty-move clock and honors `searchmoves` and `MultiPV`. It can use
+WDL files alone when they prove the result for the requested moves. During
+search it also probes WDL after a pawn move or capture resets the clock.
+The files are downloaded separately. The Rust library API exposes
+`SearchState::set_syzygy_path` for one configured search state per process.
 
 ## Development
 - Run tests: `cargo test`
@@ -100,3 +131,8 @@ The fitter only emits the engine's 21 representable HCE term weights, keeps
 tempo fixed, excludes draw-scaled positions by default, and bounds each default
 weight change. Treat its held-out metric as a screening signal: adopt a
 candidate only after same-time-control WAC/STS and broader regression testing.
+
+For a file of previously labelled endgame positions, run
+`scripts/label_stockfish_fens.py` with `--depth 18 --screen-depth 14`. It
+preserves input order and deepens scores that disagree by at least 40 cp.
+Set `--screen-threshold` to adjust that threshold.

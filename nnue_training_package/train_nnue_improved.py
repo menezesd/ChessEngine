@@ -2,26 +2,24 @@
 """
 Improved NNUE Training Script
 
-Key improvements over train_nnue_256.py:
-1. Better data filtering - skip positions in check, captures, extreme evals
-2. Data augmentation - horizontal board mirror (2x effective data)
-3. Lower WDL lambda (0.25) for better tactical accuracy
-4. Validation split to detect overfitting
-5. Better learning rate schedule with warmup
-6. Gradient accumulation for larger effective batch size
+Uses horizontal mirroring, grouped validation, an optional game-result loss
+and gradient accumulation. Piece features are expanded only for the active
+batch so the size of the training set does not dictate the dense tensor size.
 """
 
 import argparse
-import math
+from array import array
 from contextlib import nullcontext
-import os
+from hashlib import blake2b
+import math
 import random
-import struct
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,6 +33,12 @@ HIDDEN_SIZE = 256  # Must match the Rust network and exported file layout.
 SCALE = 400
 QA = 255
 QB = 64
+# Target-space cap for forced-win/mate evaluations. Evals beyond eval_clip
+# stretch toward this value (in centipawns) so mates stay sharply separated
+# from quiet advantages without dominating the loss.
+EVAL_TARGET_CAP = 3000
+# Typical magnitude of a Stockfish mate score (32000 - ply).
+MATE_SCORE_FLOOR = 32000
 
 PIECE_MAP = {
     "P": 0,
@@ -85,20 +89,18 @@ def feature_index(
     piece_type: int, piece_color: int, square: int, perspective: int
 ) -> int:
     """Compute feature index for NNUE."""
-    if perspective == 1:  # Black's perspective - flip board
-        oriented_sq = square ^ 56
-        oriented_color = 1 - piece_color
-    else:  # White's perspective
-        oriented_sq = square
-        oriented_color = piece_color
-    return oriented_color * 384 + piece_type * 64 + oriented_sq
+    index = piece_color * 384 + piece_type * 64 + square
+    return _opposite_perspective(index) if perspective == 1 else index
+
+
+def _opposite_perspective(indices):
+    """Swap feature colors and flip ranks for scalar or batched indices."""
+    return ((indices + INPUT_SIZE // 2) % INPUT_SIZE) ^ 56
 
 
 def mirror_square(sq: int) -> int:
     """Mirror square horizontally (a1 <-> h1, etc.)."""
-    rank = sq // 8
-    file = sq % 8
-    return rank * 8 + (7 - file)
+    return sq ^ 7
 
 
 def parse_fen_features(
@@ -108,16 +110,17 @@ def parse_fen_features(
 
     If do_mirror=True, horizontally mirror the position (for data augmentation).
     """
-    parts = fen.split()
-    board = parts[0]
-    side_to_move = parts[1] if len(parts) > 1 else "w"
-    white_to_move = side_to_move == "w"
+    white, white_to_move = _white_fen_features(fen, do_mirror)
+    return white, [_opposite_perspective(index) for index in white], white_to_move
 
+
+def _white_fen_features(fen: str, do_mirror: bool = False) -> Tuple[List[int], bool]:
+    parts = fen.split(maxsplit=2)
+    white_to_move = len(parts) == 1 or parts[1] == "w"
     white_features = []
-    black_features = []
     square = 56
 
-    for char in board:
+    for char in parts[0]:
         if char == "/":
             square -= 16
         elif char.isdigit():
@@ -130,15 +133,13 @@ def parse_fen_features(
             actual_sq = mirror_square(square) if do_mirror else square
 
             white_features.append(feature_index(piece_type, piece_color, actual_sq, 0))
-            black_features.append(feature_index(piece_type, piece_color, actual_sq, 1))
             square += 1
 
-    return white_features, black_features, white_to_move
+    return white_features, white_to_move
 
 
 def is_quiet_position(fen: str) -> bool:
-    """Check if position is quiet (not in check, no obvious tactical complications)."""
-    # Basic heuristic: skip if there's only one piece type left (likely endgame tablebase territory)
+    """Legacy material filter for positions with at most two pawns and kings."""
     parts = fen.split()
     board = parts[0]
 
@@ -173,7 +174,7 @@ class NNUE256(nn.Module):
         nn.init.kaiming_normal_(
             self.feature_weights, mode="fan_out", nonlinearity="relu"
         )
-        self.feature_weights.data *= 0.18  # Smaller init for 512 hidden
+        self.feature_weights.data *= 0.18
         nn.init.zeros_(self.feature_bias)
         nn.init.normal_(self.output_weights_white, std=0.06)
         nn.init.normal_(self.output_weights_black, std=0.06)
@@ -265,64 +266,34 @@ class NNUE256(nn.Module):
 
     def export_quantized(self, path: str):
         """Export to quantized binary format for Rust."""
-        # Validate before opening the destination so a failed training run
-        # cannot replace a usable network with corrupt or truncated weights.
-        for name, parameter in self.named_parameters():
-            if not torch.isfinite(parameter).all().item():
+        parts = []
+        weights = (
+            ("feature_weights", QA),
+            ("feature_bias", QA),
+            ("output_weights_white", QB),
+            ("output_weights_black", QB),
+            ("output_bias", QA * QB),
+        )
+        for name, scale in weights:
+            values = getattr(self, name).detach().cpu().numpy()
+            if not np.isfinite(values).all():
                 raise ValueError(f"Cannot export non-finite parameter: {name}")
-        with open(path, "wb") as f:
-            # Feature weights
-            weights = (
-                (self.feature_weights.detach().cpu().numpy() * QA)
-                .round()
-                .clip(-32768, 32767)
-                .astype("<i2")
-            )
-            for i in range(INPUT_SIZE):
-                for j in range(HIDDEN_SIZE):
-                    f.write(struct.pack("<h", int(weights[i, j])))
+            parts.append((values * scale).round().clip(-32768, 32767).astype("<i2").tobytes())
+        payload = b"".join(parts)
 
-            # Feature bias
-            bias = (
-                (self.feature_bias.detach().cpu().numpy() * QA)
-                .round()
-                .clip(-32768, 32767)
-                .astype("<i2")
-            )
-            for j in range(HIDDEN_SIZE):
-                f.write(struct.pack("<h", int(bias[j])))
-
-            # Output weights white
-            out_w = (
-                (self.output_weights_white.detach().cpu().numpy() * QB)
-                .round()
-                .clip(-32768, 32767)
-            )
-            for j in range(HIDDEN_SIZE):
-                f.write(struct.pack("<h", int(out_w[j])))
-
-            # Output weights black
-            out_b = (
-                (self.output_weights_black.detach().cpu().numpy() * QB)
-                .round()
-                .clip(-32768, 32767)
-            )
-            for j in range(HIDDEN_SIZE):
-                f.write(struct.pack("<h", int(out_b[j])))
-
-            # Output bias
-            out_bias = (
-                (self.output_bias.detach().cpu().numpy() * QA * QB)
-                .round()
-                .clip(-32768, 32767)
-            )
-            f.write(struct.pack("<h", int(out_bias[0])))
-
-        print(f"Exported network to {path} ({os.path.getsize(path)} bytes)")
+        # An engine loading the file during training must see a complete network.
+        destination = Path(path).resolve()
+        with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
+            temporary = Path(directory) / "weights.nnue"
+            temporary.write_bytes(payload)
+            temporary.replace(destination)
+        print(f"Exported network to {path} ({len(payload)} bytes)")
 
 
 class ImprovedChessDataset(Dataset):
-    """Improved dataset with filtering and augmentation."""
+    """Store one sparse row per position and expand only active batches."""
+
+    MAX_PIECES = 32
 
     def __init__(
         self,
@@ -331,149 +302,173 @@ class ImprovedChessDataset(Dataset):
         filter_quiet: bool = True,
         augment: bool = True,
         eval_clip: float = 1500,
+        precompute: bool = True,
     ):
-        self.positions = []
         self.augment = augment
-        count = 0
+        self.precompute = precompute
+        self.eval_clip = eval_clip
+        features = array("h")
+        scores = array("f")
+        turns = array("B")
+        results = array("f")
+        groups = array("Q")
         skipped = 0
 
         for data_file in data_files:
             print(f"Loading {data_file}...")
-            with open(data_file, "r") as f:
-                for line in f:
-                    if max_positions and count >= max_positions:
+            with open(data_file) as source:
+                for line in source:
+                    if max_positions and len(scores) >= max_positions:
                         break
-                    line = line.strip()
-                    if not line:
-                        continue
                     parts = line.split("|")
                     if len(parts) < 2:
                         continue
                     fen = parts[0].strip()
-
                     try:
-                        eval_score = float(parts[1].strip())
-                    except ValueError:
+                        score = float(parts[1])
+                        if not math.isfinite(score) or (filter_quiet and not is_quiet_position(fen)):
+                            skipped += 1
+                            continue
+                        white, white_to_move = _white_fen_features(fen)
+                    except (IndexError, ValueError, KeyError):
+                        skipped += 1
+                        continue
+                    if len(white) > self.MAX_PIECES or any(
+                        not 0 <= index < INPUT_SIZE for index in white
+                    ):
                         skipped += 1
                         continue
 
-                    # Filter extreme evaluations (likely mates or errors)
-                    if not math.isfinite(eval_score) or abs(eval_score) > eval_clip:
-                        skipped += 1
-                        continue
-
-                    # Filter non-quiet positions
-                    if filter_quiet and not is_quiet_position(fen):
-                        skipped += 1
-                        continue
-
-                    # Parse game result (stored from white's perspective)
                     game_result = 0.5
                     if len(parts) >= 3:
-                        r = parts[2].strip()
-                        if r in ("1.0", "1"):
+                        if parts[2].strip() in ("1.0", "1"):
                             game_result = 1.0
-                        elif r in ("0.0", "0"):
+                        elif parts[2].strip() in ("0.0", "0"):
                             game_result = 0.0
 
-                    try:
-                        white_feat, black_feat, stm = parse_fen_features(
-                            fen, do_mirror=False
-                        )
+                    features.extend(white + [INPUT_SIZE] * (self.MAX_PIECES - len(white)))
+                    turns.append(white_to_move)
+                    scores.append(self._scale_eval_target(score if white_to_move else -score))
+                    results.append(game_result if white_to_move else 1.0 - game_result)
+                    groups.append(self._group_key(fen, white_to_move))
 
-                        # Data eval is from WHITE's perspective.
-                        # Network outputs from STM perspective, so convert.
-                        if not stm:  # Black to move
-                            stm_eval = -eval_score  # Flip eval to black's perspective
-                            stm_result = 1.0 - game_result
-                        else:
-                            stm_eval = eval_score
-                            stm_result = game_result
-
-                        self.positions.append(
-                            {
-                                "fen": fen,
-                                "white_feat": white_feat,
-                                "black_feat": black_feat,
-                                "stm": stm,
-                                "eval": stm_eval,
-                                "result": stm_result,
-                            }
-                        )
-                        count += 1
-                    except Exception:
-                        skipped += 1
-                        continue
-
-            if max_positions and count >= max_positions:
+            if max_positions and len(scores) >= max_positions:
                 break
+
+        self.positions = torch.from_numpy(np.frombuffer(features, dtype=np.int16)).view(
+            len(scores), self.MAX_PIECES
+        )
+        self.scores = torch.from_numpy(np.frombuffer(scores, dtype=np.float32)).reshape(-1, 1)
+        self.turns = torch.from_numpy(np.frombuffer(turns, dtype=np.bool_))
+        self.results = torch.from_numpy(np.frombuffer(results, dtype=np.float32)).reshape(-1, 1)
+        self.groups = np.frombuffer(groups, dtype=np.uint64)
 
         print(f"Loaded {len(self.positions):,} positions (skipped {skipped:,})")
         if augment:
-            print(f"With augmentation: {len(self.positions) * 2:,} effective positions")
+            print(f"With augmentation: {len(self):,} effective positions")
+
+    @staticmethod
+    def _group_key(fen: str, white_to_move: bool) -> int:
+        # Counters and rights are absent from the NNUE inputs. Group a board
+        # with its horizontal mirror even if both appear in the source data.
+        board = fen.split(maxsplit=1)[0]
+        mirrored = "/".join(rank[::-1] for rank in board.split("/"))
+        key = min(board, mirrored) + (" w" if white_to_move else " b")
+        return int.from_bytes(blake2b(key.encode(), digest_size=8).digest(), "little")
+
+    def _scale_eval_target(self, eval_score: float) -> float:
+        """Keep mate targets above quieter advantages while bounding their loss."""
+        x = min(abs(eval_score), MATE_SCORE_FLOOR)
+        if x <= self.eval_clip:
+            return math.copysign(x / SCALE, eval_score)
+        slope = (EVAL_TARGET_CAP - self.eval_clip) / (MATE_SCORE_FLOOR - self.eval_clip)
+        capped = self.eval_clip + slope * (x - self.eval_clip)
+        return math.copysign(capped / SCALE, eval_score)
 
     def __len__(self):
-        # 2x positions if augmentation is enabled
-        return len(self.positions) * 2 if self.augment else len(self.positions)
+        return len(self.positions) * (2 if self.augment else 1)
 
     def __getitem__(self, idx):
-        # Determine if this is an augmented (mirrored) sample
+        if self.precompute:
+            return int(idx)
+        return tuple(value[0] for value in self.batch([idx]))
+
+    def batch(self, indices):
+        count = len(self.positions)
+        indices = torch.as_tensor(indices, dtype=torch.long)
+        actual = indices.remainder(count)
+        white = self.positions[actual].long()
+        padding = white == INPUT_SIZE
         if self.augment:
-            is_mirrored = idx >= len(self.positions)
-            actual_idx = idx % len(self.positions)
-        else:
-            is_mirrored = False
-            actual_idx = idx
+            mirror = ((indices >= count) * 7).unsqueeze(1)
+            white = torch.where(padding, white, white ^ mirror)
+        black = torch.where(padding, white, _opposite_perspective(white))
 
-        pos = self.positions[actual_idx]
+        # The extra column absorbs padding without overwriting real features.
+        def dense(sparse):
+            batch = torch.zeros((len(indices), INPUT_SIZE + 1), dtype=torch.float32)
+            return batch.scatter_(1, sparse, 1)[:, :INPUT_SIZE]
 
-        # Get features (potentially mirrored)
-        if is_mirrored:
-            white_feat, black_feat, stm = parse_fen_features(pos["fen"], do_mirror=True)
-        else:
-            white_feat = pos["white_feat"]
-            black_feat = pos["black_feat"]
-            stm = pos["stm"]
+        return dense(white), dense(black), self.turns[actual], self.scores[actual], self.results[actual]
 
-        white_tensor = torch.zeros(INPUT_SIZE, dtype=torch.float32)
-        black_tensor = torch.zeros(INPUT_SIZE, dtype=torch.float32)
-        for i in white_feat:
-            white_tensor[i] = 1.0
-        for i in black_feat:
-            black_tensor[i] = 1.0
 
-        return (
-            white_tensor,
-            black_tensor,
-            torch.tensor(stm, dtype=torch.bool),
-            torch.tensor([pos["eval"] / SCALE], dtype=torch.float32),
-            torch.tensor([pos["result"]], dtype=torch.float32),
-        )
+class BatchIndexCollate:
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __call__(self, batch):
+        return self.dataset.batch(batch)
+
+
+def collate_dense(batch):
+    return tuple(torch.stack(field) for field in zip(*batch))
 
 
 def split_dataset(dataset, val_split, seed=42):
-    """Keep duplicate positions and all their mirrors in a single split."""
+    """Keep identical inputs and their mirrors in a single split."""
     if not 0.0 <= val_split < 1.0:
         raise ValueError("val_split must be between 0 (inclusive) and 1 (exclusive)")
-    if not dataset.positions:
-        raise ValueError("no usable training positions")
-
-    def position_key(pos):
-        # Move counters do not make a new position for the neural evaluator.
-        return " ".join(pos["fen"].split()[:4])
-
-    keys = list(dict.fromkeys(position_key(pos) for pos in dataset.positions))
-    random.Random(seed).shuffle(keys)
-    val_count = min(len(keys) - 1, max(1, int(len(keys) * val_split))) if val_split else 0
-    validation_keys = set(keys[:val_count])
-    train_indices, validation_indices = [], []
     count = len(dataset.positions)
-    for index, pos in enumerate(dataset.positions):
-        indices = validation_indices if position_key(pos) in validation_keys else train_indices
-        indices.append(index)
+    if not count:
+        raise ValueError("no usable training positions")
+    if not val_split:
+        return Subset(dataset, range(len(dataset))), Subset(dataset, range(0))
+
+    # A reproducible hash partition avoids a Python object for every FEN.
+    keys = dataset.groups
+    salt = np.uint64(random.Random(seed).getrandbits(64))
+    validation = (keys ^ salt) < int(val_split * (1 << 64))
+    if not validation.any() or validation.all():
+        # Retain both splits for small datasets if two groups exist.
+        validation = keys != keys[0] if validation.all() else keys == keys[0]
+        if validation.all():
+            validation[:] = False
+
+    index_type = np.int32 if len(dataset) <= np.iinfo(np.int32).max else np.int64
+
+    def part(mask):
+        indices = np.flatnonzero(mask).astype(index_type, copy=False)
         if dataset.augment:
-            indices.append(index + count)
-    return Subset(dataset, train_indices), Subset(dataset, validation_indices)
+            indices = np.concatenate((indices, indices + count))
+        return Subset(dataset, indices)
+
+    return part(~validation), part(validation)
+
+
+class ShuffledBatches:
+    """Shuffle compact indices without making one Python list per epoch."""
+
+    def __init__(self, count, batch_size):
+        self.count = count
+        self.batch_size = batch_size
+        self.dtype = torch.int32 if count <= np.iinfo(np.int32).max else torch.int64
+
+    def __iter__(self):
+        for batch in torch.randperm(self.count, dtype=self.dtype).split(self.batch_size):
+            yield batch.tolist()
+
+    def __len__(self):
+        return (self.count + self.batch_size - 1) // self.batch_size
 
 
 def _training_losses(
@@ -620,19 +615,28 @@ def main():
         help="Disable horizontal mirror augmentation",
     )
     parser.add_argument(
-        "--no-filter", action="store_true", help="Disable quiet position filtering"
+        "--no-filter",
+        action="store_true",
+        help="Include positions with only kings and up to two pawns",
     )
     parser.add_argument(
         "--eval-clip",
         type=float,
         default=1500,
-        help="Clip evaluations beyond this value",
+        help="Evals beyond this map linearly toward EVAL_TARGET_CAP instead of "
+        "being dropped, so forced wins stay learnable",
     )
     parser.add_argument(
         "--dropout", type=float, default=0.0, help="Dropout rate for regularization"
     )
     parser.add_argument(
         "--val-split", type=float, default=0.05, help="Validation split ratio"
+    )
+    parser.add_argument(
+        "--precompute",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Expand sparse feature rows together when assembling a batch",
     )
     args = parser.parse_args()
 
@@ -657,6 +661,7 @@ def main():
         filter_quiet=not args.no_filter,
         augment=not args.no_augment,
         eval_clip=args.eval_clip,
+        precompute=args.precompute,
     )
 
     train_dataset, val_dataset = split_dataset(full_dataset, args.val_split)
@@ -667,13 +672,18 @@ def main():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        drop_last=False,
+        batch_sampler=ShuffledBatches(len(train_dataset), args.batch_size),
+        collate_fn=(
+            BatchIndexCollate(full_dataset) if args.precompute else collate_dense
+        ),
         **loader_config,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False, **loader_config
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        collate_fn=(
+            BatchIndexCollate(full_dataset) if args.precompute else collate_dense
+        ),
+        **loader_config,
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)

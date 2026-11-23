@@ -32,7 +32,7 @@ pub struct XBoardHandler {
     pub(super) moves_per_session: u32,
     pub(super) level_start_fullmove: u32,
     pub(super) base_time_sec: u32,
-    pub(super) increment_sec: u32,
+    pub(super) increment_ms: u64,
     pub(super) stop_flag: Arc<AtomicBool>,
     /// Foreground move search, joined by the protocol thread on completion.
     pub(super) thinking: Option<JoinHandle<SearchResult>>,
@@ -58,7 +58,7 @@ impl XBoardHandler {
     pub fn new() -> Self {
         XBoardHandler {
             board: Board::new(),
-            state: Arc::new(Mutex::new(SearchState::new(DEFAULT_TT_MB))),
+            state: Arc::new(Mutex::new(SearchState::for_play(DEFAULT_TT_MB))),
             force_mode: false,
             engine_color: None,
             post_thinking: Arc::new(AtomicBool::new(false)),
@@ -70,7 +70,7 @@ impl XBoardHandler {
             moves_per_session: 40,
             level_start_fullmove: 0,
             base_time_sec: 300,
-            increment_sec: 0,
+            increment_ms: 0,
             stop_flag: Arc::new(AtomicBool::new(false)),
             thinking: None,
             move_history: Vec::new(),

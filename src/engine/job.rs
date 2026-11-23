@@ -22,10 +22,8 @@ pub struct SearchJob {
     pub planned_hard_time_ms: u64,
     /// Handle to the search thread
     handle: JoinHandle<()>,
-    /// Optional handle to the timer thread enforcing hard stops
+    /// Timed searches start a watchdog immediately. Pondering starts it on hit.
     timer_handle: Option<JoinHandle<()>>,
-    /// Optional handle to the ponderhit timer thread
-    ponderhit_timer_handle: Option<JoinHandle<()>>,
 }
 
 impl SearchJob {
@@ -48,24 +46,27 @@ impl SearchJob {
             planned_hard_time_ms,
             handle,
             timer_handle,
-            ponderhit_timer_handle: None,
         }
     }
 
     /// Cancel the search, discard its result, and wait for the thread to finish.
-    pub fn stop_and_wait(mut self) {
+    pub fn stop_and_wait(self) {
         self.publish.store(false, Ordering::Release);
-        self.stop.store(true, Ordering::Relaxed);
-        self.pondering.store(false, Ordering::Relaxed);
+        self.signal_stop();
         let _ = self.handle.join();
-        Self::join_timer(self.timer_handle.take());
-        Self::join_timer(self.ponderhit_timer_handle.take());
+        if let Some(timer) = self.timer_handle {
+            let _ = timer.join();
+        }
     }
 
     /// Signal stop without waiting.
     pub fn signal_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
         self.pondering.store(false, Ordering::Relaxed);
+        self.handle.thread().unpark();
+        if let Some(timer) = &self.timer_handle {
+            timer.thread().unpark();
+        }
     }
 
     /// Return whether the search thread has completed.
@@ -87,16 +88,11 @@ impl SearchJob {
 
         // Iteration management can spend beyond the soft target when needed.
         // The watchdog enforces the hard deadline, or a soft-only limit.
-        self.ponderhit_timer_handle =
+        self.timer_handle =
             spawn_stop_timer(hard_deadline.or(soft_deadline), Arc::clone(&self.stop));
 
         self.pondering.store(false, Ordering::Relaxed);
-    }
-
-    fn join_timer(timer: Option<JoinHandle<()>>) {
-        if let Some(timer) = timer {
-            let _ = timer.join();
-        }
+        self.handle.thread().unpark();
     }
 }
 

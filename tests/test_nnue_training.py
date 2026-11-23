@@ -2,8 +2,10 @@
 
 import importlib.util
 from contextlib import nullcontext
+import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -222,6 +224,49 @@ class TrainingContractTests(unittest.TestCase):
                     self.assertFalse(train_positions & validation_positions)
                     self.assertEqual(train_positions | validation_positions, set(range(original_count)))
 
+    def test_packaged_batches_expand_only_real_features_in_both_orientations(self):
+        trainer = TRAINERS[3]
+        fens = ["7k/8/8/3p4/3P4/8/3Q4/K7 w - - 0 1", "1k6/8/8/8/1q6/8/1P6/7K b - - 0 1"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "positions.txt"
+            path.write_text("".join(f"{fen} | 400 | 1\n" for fen in fens))
+            dataset = trainer.ImprovedChessDataset([str(path)])
+            single = trainer.ImprovedChessDataset([str(path)], precompute=False)
+            indices = [3, 0, 2, 1]
+            batch = trainer.BatchIndexCollate(dataset)([dataset[i] for i in indices])
+            for actual, expected in zip(batch, trainer.collate_dense([single[i] for i in indices])):
+                torch.testing.assert_close(actual, expected)
+
+            for row, idx in enumerate(indices):
+                white, black, stm = trainer.parse_fen_features(
+                    fens[idx % len(fens)], do_mirror=idx >= len(fens)
+                )
+                for features, tensor in zip((white, black), batch[:2]):
+                    expected = torch.zeros(trainer.INPUT_SIZE)
+                    expected[features] = 1
+                    torch.testing.assert_close(tensor[row], expected)
+                self.assertEqual(batch[2][row].item(), stm)
+                self.assertEqual(batch[3][row].item(), 1 if stm else -1)
+                self.assertEqual(batch[4][row].item(), 1 if stm else 0)
+
+    def test_packaged_split_groups_duplicate_inputs_and_explicit_mirrors(self):
+        trainer = TRAINERS[3]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "positions.txt"
+            path.write_text(
+                "7k/8/8/8/8/8/3Q4/K7 w - - 0 1 | 400\n"
+                "7k/8/8/8/8/8/3Q4/K7 w - - 4 6 | 430\n"
+                "k7/8/8/8/8/8/4Q3/7K w - - 2 3 | 410\n"
+                "7k/8/8/8/8/8/3Q4/K7 b - - 0 1 | 400\n"
+            )
+            dataset = trainer.ImprovedChessDataset([str(path)])
+            for seed in range(8):
+                train, validation = trainer.split_dataset(dataset, 0.5, seed)
+                self.assertTrue(train)
+                self.assertTrue(validation)
+                same_input = {0, 1, 2, 4, 5, 6}
+                self.assertTrue(same_input <= set(train.indices) or same_input <= set(validation.indices))
+
     def test_disabled_validation_selects_by_training_loss(self):
         with tempfile.TemporaryDirectory() as directory:
             for trainer in (TRAINERS[1], TRAINERS[3]):
@@ -306,6 +351,42 @@ class TrainingContractTests(unittest.TestCase):
                     model = toy_model(trainer)
                     model.export_quantized(str(path))
                     self.assertEqual(exported_scores(path, trainer), [500, -300])
+
+    @unittest.skipUnless(os.environ.get("CHESS_ENGINE_TEST_BINARY"), "requires a built UCI engine")
+    def test_packaged_export_loads_with_the_same_feature_scores_in_the_engine(self):
+        trainer = TRAINERS[3]
+        model = toy_model(trainer)
+        with torch.no_grad():
+            model.feature_weights[0, 0] = 0.0
+            model.feature_weights[trainer.feature_index(4, 0, 11, 0), 0] = 1.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            weights = Path(directory) / "runtime.nnue"
+            model.export_quantized(str(weights))
+            output = subprocess.run(
+                [os.environ["CHESS_ENGINE_TEST_BINARY"], "--uci"],
+                input=(
+                    f"setoption name EvalFile value {weights}\n"
+                    "setoption name UseNNUE value true\n"
+                    "setoption name NnueHceBlend value 100\n"
+                    "setoption name NnuePureStaticEval value true\n"
+                    "position fen 7k/8/8/8/8/8/3Q4/K7 w - - 0 1\n"
+                    "eval\n"
+                    "position fen 7k/8/8/8/8/8/3Q4/K7 b - - 0 1\n"
+                    "eval\n"
+                    "quit\n"
+                ),
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout
+        scores = [
+            int(line.rsplit(" ", 1)[-1])
+            for line in output.splitlines()
+            if line.startswith("info string eval hce ")
+        ]
+        self.assertEqual(scores, [500, -300], output)
 
     def test_base_datasets_convert_white_labels_to_the_side_to_move(self):
         with tempfile.TemporaryDirectory() as directory:

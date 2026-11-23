@@ -1,4 +1,5 @@
 use crate::board::{SearchParams, SearchState};
+use crate::engine::time::TimeConfig;
 
 mod apply;
 mod output;
@@ -7,6 +8,7 @@ mod parse;
 use output::{print_check, print_spin, print_string};
 
 pub use parse::parse_setoption;
+pub(in crate::uci) use parse::parse_setoption_line;
 
 pub(super) const HASH_MIN_MB: usize = 1;
 pub(super) const HASH_MAX_MB: usize = 65_536;
@@ -54,23 +56,28 @@ pub struct UciOptions {
     pub use_nnue: bool,
     pub eval_file: String,
     pub static_eval_file: String,
+    #[cfg(feature = "syzygy")]
+    pub syzygy_path: String,
 }
 
 impl UciOptions {
     #[must_use]
     pub fn new(hash_mb: usize) -> Self {
+        let time = TimeConfig::default();
         UciOptions {
             hash_mb,
             threads: 1,
-            default_max_nodes: 0,
-            move_overhead_ms: 50,
-            soft_time_percent: 70,
-            hard_time_percent: 90,
+            default_max_nodes: time.default_max_nodes,
+            move_overhead_ms: time.move_overhead_ms,
+            soft_time_percent: time.soft_time_percent,
+            hard_time_percent: time.hard_time_percent,
             multi_pv: 1,
             ponder: false,
             use_nnue: false,
             eval_file: String::new(),
             static_eval_file: String::new(),
+            #[cfg(feature = "syzygy")]
+            syzygy_path: String::new(),
         }
     }
 
@@ -123,6 +130,8 @@ impl UciOptions {
         print_spin("Max Nodes", self.default_max_nodes, MAX_NODES_MIN, u64::MAX);
         print_spin("MultiPV", self.multi_pv, MULTIPV_MIN, MULTIPV_MAX);
         print_check("Ponder", self.ponder);
+        #[cfg(feature = "syzygy")]
+        print_string("SyzygyPath", &self.syzygy_path);
     }
 
     fn print_nnue_options(&self, state: &SearchState) {

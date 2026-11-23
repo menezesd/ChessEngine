@@ -1,51 +1,34 @@
-enum SetOptionField {
-    None,
-    Name,
-    Value,
+fn next_word<'a>(line: &mut &'a str) -> Option<&'a str> {
+    let rest = line.trim_start();
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let (word, remaining) = rest.split_at(end);
+    *line = remaining;
+    (!word.is_empty()).then_some(word)
 }
 
 #[must_use]
 pub fn parse_setoption(parts: &[&str]) -> Option<(String, Option<String>)> {
-    if parts.is_empty() || parts[0] != "setoption" {
+    parse_setoption_line(&parts.join(" "))
+}
+
+pub(in crate::uci) fn parse_setoption_line(mut line: &str) -> Option<(String, Option<String>)> {
+    if next_word(&mut line)? != "setoption" {
         return None;
     }
+    while next_word(&mut line)? != "name" {}
 
-    let mut name_parts: Vec<&str> = Vec::new();
-    let mut value_parts: Vec<&str> = Vec::new();
-    let mut field = SetOptionField::None;
-    let mut saw_value = false;
-
-    for part in parts.iter().skip(1) {
-        match field {
-            SetOptionField::None => {
-                if *part == "name" {
-                    field = SetOptionField::Name;
-                }
-            }
-            SetOptionField::Name => {
-                if *part == "value" {
-                    field = SetOptionField::Value;
-                    saw_value = true;
-                } else {
-                    name_parts.push(part);
-                }
-            }
-            SetOptionField::Value => value_parts.push(part),
+    let mut name = String::new();
+    while let Some(word) = next_word(&mut line) {
+        if word == "value" {
+            // Filenames can include multiple consecutive spaces or tabs.
+            return (!name.is_empty()).then(|| (name, Some(line.trim().to_owned())));
         }
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
     }
-
-    if name_parts.is_empty() {
-        return None;
-    }
-
-    let name = name_parts.join(" ");
-    let value = if saw_value {
-        Some(value_parts.join(" "))
-    } else {
-        None
-    };
-
-    Some((name, value))
+    (!name.is_empty()).then_some((name, None))
 }
 
 #[cfg(test)]

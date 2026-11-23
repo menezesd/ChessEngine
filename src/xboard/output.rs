@@ -12,24 +12,36 @@
 
 use crate::board::{Board, Move, SearchIterationInfo};
 
+const MATE_SCORE_BASE: i32 = 100_000;
+
 /// Convert a completed search's coordinate PV into CECP thinking output.
-pub(super) fn format_search_info(board: &Board, info: &SearchIterationInfo) -> String {
+pub(super) fn format_search_info(
+    board: &Board,
+    info: &SearchIterationInfo,
+    ponder_move: Option<Move>,
+) -> String {
     let mut position = board.clone();
     let mut pv = Vec::new();
+    if let Some(mv) = ponder_move {
+        pv.push(position.move_to_san(&mv));
+        position.make_move(mv);
+    }
     for text in info.pv.split_whitespace() {
         let Ok(mv) = position.parse_move(text) else {
             break;
         };
+        pv.push(position.move_to_san(&mv));
         position.make_move(mv);
-        pv.push(mv);
     }
-    format_thinking(
-        board,
+    let score = info.mate_in.map_or(info.score, |moves| {
+        info.score.signum() * (MATE_SCORE_BASE + moves.abs())
+    });
+    thinking_line(
         info.depth,
-        info.score,
+        score,
         info.time_ms / 10,
         info.nodes,
-        &pv,
+        &pv.join(" "),
     )
 }
 
@@ -45,8 +57,11 @@ pub fn format_thinking(
     nodes: u64,
     pv: &[Move],
 ) -> String {
-    let pv_str = format_pv_san(board, pv);
-    format!("{depth} {score} {time_cs} {nodes} {pv_str}")
+    thinking_line(depth, score, time_cs, nodes, &format_pv_san(board, pv))
+}
+
+fn thinking_line(depth: u32, score: i32, time_cs: u64, nodes: u64, pv: &str) -> String {
+    format!("{depth} {score} {time_cs} {nodes} {pv}")
 }
 
 /// Format a PV as SAN notation.

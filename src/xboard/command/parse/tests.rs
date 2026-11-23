@@ -151,9 +151,16 @@ fn test_level() {
 
 #[test]
 fn test_level_malformed_values_are_unknown() {
-    match parse_xboard_command("level nope bad also_bad") {
-        Some(XBoardCommand::Unknown(command)) => assert_eq!(command, "level nope bad also_bad"),
-        _ => panic!("Expected malformed level to remain unknown"),
+    for input in [
+        "level nope bad also_bad",
+        "level 0 0:30 -0.1",
+        "level 0 0:30 NaN",
+        "level 0 0:30 inf",
+    ] {
+        match parse_xboard_command(input) {
+            Some(XBoardCommand::Unknown(command)) => assert_eq!(command, input),
+            _ => panic!("Expected malformed level to remain unknown"),
+        }
     }
 }
 

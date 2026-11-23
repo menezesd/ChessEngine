@@ -49,8 +49,10 @@ class UCIClient:
                 self.send(f"setoption name {option}")
             self.send("isready")
             self.wait_for("readyok")
-        except BaseException:
+        except BaseException as error:
             self.quit()
+            if isinstance(error, BrokenPipeError):
+                raise RuntimeError("engine closed its output during UCI handshake") from error
             raise
 
     def _reader(self):
@@ -123,7 +125,7 @@ class UCIClient:
             if self.proc.poll() is None:
                 try:
                     self.send("quit")
-                except (BrokenPipeError, OSError):
+                except OSError:
                     pass
                 try:
                     self.proc.wait(timeout=2)
@@ -132,5 +134,9 @@ class UCIClient:
                     self.proc.wait()
         finally:
             self.reader_thread.join(timeout=1)
-            self.proc.stdin.close()
-            self.proc.stdout.close()
+            for pipe in (self.proc.stdin, self.proc.stdout):
+                try:
+                    pipe.close()
+                except OSError:
+                    # Closing stdin can flush a command after the engine exits.
+                    pass

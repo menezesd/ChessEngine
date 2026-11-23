@@ -37,6 +37,22 @@ fn test_level_command_initializes_clock_from_base_time() {
 }
 
 #[test]
+fn fractional_level_replaces_the_active_time_control() {
+    let mut handler = XBoardHandler::new();
+    handler.handle_command(&XBoardCommand::St(5));
+    let command = parse_xboard_command("level 0 0:30 0.29").unwrap();
+    handler.handle_command(&command);
+    assert_eq!(
+        handler.time_control(),
+        TimeControl::Incremental {
+            time_left_ms: 30_000,
+            inc_ms: 290,
+            movestogo: None,
+        }
+    );
+}
+
+#[test]
 fn test_zero_remaining_time_is_a_clock_limit() {
     let mut handler = XBoardHandler::new();
     handler.handle_command(&XBoardCommand::Time(0));
@@ -390,7 +406,7 @@ fn test_finished_search_makes_engine_move() {
     handler.start_thinking();
     let output = handler.finish_thinking().expect("engine should move");
 
-    assert!(output.starts_with("move "));
+    assert!(output.text.starts_with("move "));
     assert_eq!(handler.move_history.len(), 1);
     assert_eq!(handler.board.side_to_move(), Color::Black);
 }

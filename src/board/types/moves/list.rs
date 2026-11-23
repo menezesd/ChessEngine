@@ -36,6 +36,22 @@ impl MoveList {
         }
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(Move) -> bool) {
+        let mut kept = 0;
+        for index in 0..self.len {
+            let mv = self.moves[index];
+            if keep(mv) {
+                self.moves[kept] = mv;
+                kept += 1;
+            }
+        }
+        self.len = kept;
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.len

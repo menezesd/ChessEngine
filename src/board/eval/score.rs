@@ -1,63 +1,6 @@
 /// Total phase value (sum of all pieces' phase weights at game start)
 const PHASE_TOTAL: i32 = 24;
 
-/// Accumulated evaluation score with middlegame and endgame components.
-#[derive(Debug, Clone, Copy, Default)]
-pub(super) struct EvalScore {
-    pub(super) mg: i32,
-    pub(super) eg: i32,
-}
-
-impl EvalScore {
-    /// Create a new score from mg/eg tuple.
-    #[inline]
-    pub(super) const fn new(mg: i32, eg: i32) -> Self {
-        EvalScore { mg, eg }
-    }
-
-    /// Create a score where mg and eg are the same (e.g., for bonuses).
-    #[inline]
-    pub(super) const fn both(value: i32) -> Self {
-        EvalScore {
-            mg: value,
-            eg: value,
-        }
-    }
-
-    /// Create a score with only middlegame component.
-    #[inline]
-    pub(super) const fn mg_only(mg: i32) -> Self {
-        EvalScore { mg, eg: 0 }
-    }
-}
-
-impl std::ops::Add for EvalScore {
-    type Output = Self;
-
-    #[inline]
-    fn add(self, other: Self) -> Self {
-        EvalScore {
-            mg: self.mg + other.mg,
-            eg: self.eg + other.eg,
-        }
-    }
-}
-
-impl std::ops::AddAssign for EvalScore {
-    #[inline]
-    fn add_assign(&mut self, other: Self) {
-        self.mg += other.mg;
-        self.eg += other.eg;
-    }
-}
-
-impl From<(i32, i32)> for EvalScore {
-    #[inline]
-    fn from((mg, eg): (i32, i32)) -> Self {
-        EvalScore { mg, eg }
-    }
-}
-
 /// Phase factors for tapered evaluation.
 ///
 /// Encapsulates the middlegame/endgame interpolation weights.
@@ -74,7 +17,7 @@ pub(super) struct PhaseFactors {
 impl PhaseFactors {
     /// Compute phase factors from game phase values.
     #[inline]
-    pub(super) fn from_game_phase(white_phase: i32, black_phase: i32) -> Self {
+    pub(super) fn from_game_phase([white_phase, black_phase]: [i32; 2]) -> Self {
         let midphase = (white_phase + black_phase).min(PHASE_TOTAL);
         let endphase = PHASE_TOTAL - midphase;
         // Double endgame weight when one side has no non-pawn pieces
@@ -92,12 +35,15 @@ impl PhaseFactors {
 
     /// Apply tapered evaluation to middlegame and endgame scores.
     #[inline]
-    pub(super) fn taper(&self, mg_score: i32, eg_score: i32) -> i32 {
+    pub(super) fn taper(&self, (mg_score, eg_score): (i32, i32)) -> i32 {
         (mg_score * self.midphase + self.endgame_mult * eg_score * self.endphase) / PHASE_TOTAL
     }
 
     #[inline]
-    pub(super) fn taper_pair(&self, (mg_score, eg_score): (i32, i32)) -> i32 {
-        self.taper(mg_score, eg_score)
+    pub(super) fn taper_total<const N: usize>(&self, terms: [(i32, i32); N]) -> i32 {
+        let scores = terms
+            .into_iter()
+            .fold((0, 0), |(mg, eg), term| (mg + term.0, eg + term.1));
+        self.taper(scores)
     }
 }

@@ -14,7 +14,10 @@ import sys
 import time
 from pathlib import Path
 
-import chess
+if __package__:
+    from .wac_eval_nnue import iter_epd, parse_epd, uci_to_san
+else:
+    from wac_eval_nnue import iter_epd, parse_epd, uci_to_san
 
 
 class UCIEngine:
@@ -139,34 +142,10 @@ class UCIEngine:
 
 def parse_epd_line(line: str) -> tuple[str, list[str], str]:
     """Return (FEN, best_moves, id)."""
-    tokens = line.strip().split()
-    if len(tokens) < 6 or "bm" not in tokens:
-        raise ValueError(f"Malformed EPD: {line}")
-    fen = " ".join(tokens[:4] + ["0", "1"])
-    bm_idx = tokens.index("bm")
-    best_moves = []
-    for mv in tokens[bm_idx + 1 :]:
-        if mv.endswith(";"):
-            mv = mv.rstrip(";")
-        if mv == "id":
-            break
-        best_moves.append(mv)
-    if "id" in tokens:
-        id_idx = tokens.index("id")
-        epd_id = tokens[id_idx + 1].strip('";')
-    else:
-        epd_id = "unknown"
-    return fen, best_moves, epd_id
-
-
-def uci_to_san(fen: str, uci_move: str) -> str:
-    """Convert UCI move to SAN notation."""
-    try:
-        board = chess.Board(fen)
-        move = chess.Move.from_uci(uci_move)
-        return board.san(move)
-    except Exception:
-        return uci_move  # Return original if conversion fails
+    fen, best_moves, epd_id = parse_epd(line)
+    if fen is None:
+        raise ValueError(f"EPD position lacks best moves in {line.strip()!r}")
+    return fen, best_moves, str(epd_id)
 
 
 def run_wac(engine_path: str, epd_path: Path, limit: int, movetime_ms: int, threads: int = 1, options: list[str] | None = None) -> None:
@@ -176,13 +155,8 @@ def run_wac(engine_path: str, epd_path: Path, limit: int, movetime_ms: int, thre
     mismatches = []
     stalls = 0
 
-    with epd_path.open() as f:
-        for line in f:
-            if not line.strip():
-                continue
-            if total >= limit:
-                break
-            fen, bms, epd_id = parse_epd_line(line)
+    try:
+        for fen, bms, epd_id in iter_epd(epd_path, limit):
             total += 1
             try:
                 best_uci = engine.bestmove_for_fen(fen, movetime_ms, timeout=10.0)
@@ -203,7 +177,8 @@ def run_wac(engine_path: str, epd_path: Path, limit: int, movetime_ms: int, thre
             else:
                 mismatches.append((epd_id, best_san, bms[0]))
 
-    engine.quit()
+    finally:
+        engine.quit()
     print(f"WAC results ({epd_path.name}, limit={limit}, movetime={movetime_ms}ms, threads={threads}): {correct}/{total}")
     if stalls:
         print(f"engine stalls recovered: {stalls}")

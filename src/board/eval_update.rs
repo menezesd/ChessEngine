@@ -81,15 +81,8 @@ impl EvalState {
         let from_pst = pst_square(from_idx, is_white);
         let to_pst = pst_square(to_idx, is_white);
 
-        // Remove from old square
-        self.mg[color_idx] -= MATERIAL_MG[p_idx] + PST_MG[p_idx][from_pst];
-        self.eg[color_idx] -= MATERIAL_EG[p_idx] + PST_EG[p_idx][from_pst];
-        self.phase[color_idx] -= PHASE_WEIGHTS[p_idx];
-
-        // Add to new square
-        self.mg[color_idx] += MATERIAL_MG[p_idx] + PST_MG[p_idx][to_pst];
-        self.eg[color_idx] += MATERIAL_EG[p_idx] + PST_EG[p_idx][to_pst];
-        self.phase[color_idx] += PHASE_WEIGHTS[p_idx];
+        self.mg[color_idx] += PST_MG[p_idx][to_pst] - PST_MG[p_idx][from_pst];
+        self.eg[color_idx] += PST_EG[p_idx][to_pst] - PST_EG[p_idx][from_pst];
     }
 }
 
@@ -103,18 +96,12 @@ impl Board {
     /// Get a snapshot of the current eval state.
     #[must_use]
     pub fn eval_state(&self) -> EvalState {
-        EvalState {
-            mg: self.eval_mg,
-            eg: self.eval_eg,
-            phase: self.game_phase,
-        }
+        self.eval
     }
 
     /// Set the eval state from a snapshot.
     pub fn set_eval_state(&mut self, state: EvalState) {
-        self.eval_mg = state.mg;
-        self.eval_eg = state.eg;
-        self.game_phase = state.phase;
+        self.eval = state;
     }
 }
 

@@ -1,4 +1,5 @@
 use super::{bit_for_square, castle_bit, Board, Color, Piece, Square};
+use crate::zobrist::ZOBRIST;
 
 impl Board {
     pub(crate) fn has_castling_right(&self, color: Color, side: char) -> bool {
@@ -13,6 +14,9 @@ impl Board {
         self.occupied[c_idx].0 |= bit;
         self.all_occupied.0 |= bit;
         self.mailbox[sq.index()] = Some((color, piece));
+        if piece == Piece::Pawn {
+            self.pawn_hash ^= ZOBRIST.piece_keys[p_idx][c_idx][sq.index()];
+        }
         if piece == Piece::King {
             self.king_square[c_idx] = sq;
         }
@@ -26,6 +30,30 @@ impl Board {
         self.occupied[c_idx].0 &= !bit;
         self.all_occupied.0 &= !bit;
         self.mailbox[sq.index()] = None;
+        if piece == Piece::Pawn {
+            self.pawn_hash ^= ZOBRIST.piece_keys[p_idx][c_idx][sq.index()];
+        }
+    }
+
+    /// Relocate a piece whose destination is empty.
+    #[inline]
+    pub(super) fn relocate_piece(&mut self, from: Square, to: Square, color: Color, piece: Piece) {
+        debug_assert_eq!(self.piece_at(from), Some((color, piece)));
+        debug_assert!(self.is_empty(to));
+        let mask = bit_for_square(from).0 | bit_for_square(to).0;
+        let color_index = color.index();
+        self.pieces[color_index][piece.index()].0 ^= mask;
+        self.occupied[color_index].0 ^= mask;
+        self.all_occupied.0 ^= mask;
+        self.mailbox[from.index()] = None;
+        self.mailbox[to.index()] = Some((color, piece));
+        if piece == Piece::Pawn {
+            let keys = &ZOBRIST.piece_keys[Piece::Pawn.index()][color_index];
+            self.pawn_hash ^= keys[from.index()] ^ keys[to.index()];
+        }
+        if piece == Piece::King {
+            self.king_square[color_index] = to;
+        }
     }
 
     /// O(1) lookup of piece at a square using mailbox representation.

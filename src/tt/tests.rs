@@ -124,14 +124,20 @@ fn test_newer_generation_preferred() {
 
 #[test]
 fn test_clear() {
-    let tt = TranspositionTable::new(1);
     let hash = 0x123456789ABCDEF0;
-
-    tt.store(hash, 10, 500, BoundType::Exact, None, 1);
-    assert!(tt.probe(hash).is_some());
-
-    tt.clear();
-    assert!(tt.probe(hash).is_none());
+    for exclusive in [false, true] {
+        let mut tt = TranspositionTable::new(1);
+        tt.store(hash, 10, 500, BoundType::Exact, None, 1);
+        assert!(tt.probe(hash).is_some());
+        if exclusive {
+            tt.clear_exclusive();
+        } else {
+            tt.clear();
+        }
+        assert!(tt.probe(hash).is_none());
+        tt.store(hash, 12, 550, BoundType::LowerBound, None, 2);
+        assert_eq!(tt.probe(hash).unwrap().score, 550);
+    }
 }
 
 #[test]

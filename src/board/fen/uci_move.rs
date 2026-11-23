@@ -63,19 +63,10 @@ impl Board {
             None
         };
 
-        let legal_moves = self.generate_moves();
-        for legal_move in &legal_moves {
-            if legal_move.from() == from_sq
-                && legal_move.to() == to_sq
-                && legal_move.promotion() == promotion
-            {
-                return Ok(*legal_move);
-            }
-        }
-
-        Err(MoveParseError::IllegalMove {
-            notation: uci.to_string(),
-        })
+        self.legal_move_at(from_sq, to_sq, promotion)
+            .ok_or_else(|| MoveParseError::IllegalMove {
+                notation: uci.to_string(),
+            })
     }
 
     /// Parse a UCI move and make it on the board in one call.

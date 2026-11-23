@@ -134,13 +134,21 @@ fn parse_complex_command(trimmed: &str, parts: &CommandParts<'_>) -> XBoardComma
 fn parse_level_command(parts: &CommandParts<'_>) -> Option<XBoardCommand> {
     let moves_per_session = parts.parsed(1)?;
     let base_seconds = parts.get(2).and_then(parse_time_control)?;
-    let increment_seconds = parts.parsed(3)?;
-
-    Some(XBoardCommand::Level {
-        moves_per_session,
-        base_seconds,
-        increment_seconds,
-    })
+    if let Some(increment_seconds) = parts.parsed(3) {
+        Some(XBoardCommand::Level {
+            moves_per_session,
+            base_seconds,
+            increment_seconds,
+        })
+    } else {
+        let seconds: f64 = parts.parsed(3)?;
+        let increment = std::time::Duration::try_from_secs_f64(seconds).ok()?;
+        Some(XBoardCommand::LevelWithFractionalIncrement {
+            moves_per_session,
+            base_seconds,
+            increment_ms: u64::try_from(increment.as_millis()).ok()?,
+        })
+    }
 }
 
 fn is_edit_piece(s: &str) -> bool {

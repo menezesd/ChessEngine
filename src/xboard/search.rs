@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+use crate::board::search::SEARCH_THREAD_STACK_SIZE;
 use crate::board::{
     find_best_move, search, Board, Move, SearchClock, SearchConfig, SearchLimits, SearchResult,
 };
@@ -18,33 +19,36 @@ const XBOARD_SOFT_TIME_PERCENT: u64 = 5;
 const XBOARD_HARD_TIME_PERCENT: u64 = 15;
 const XBOARD_DEFAULT_MAX_NODES: u64 = 0;
 const HINT_DEPTH: u32 = 4;
-const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 impl XBoardHandler {
     /// Use the same search, stack size, and live output switch in every mode.
     fn spawn_search(
         &self,
         mut board: Board,
+        ponder_move: Option<Move>,
         mut config: SearchConfig,
         stop: Arc<AtomicBool>,
         name: &str,
     ) -> thread::JoinHandle<SearchResult> {
         let root = board.clone();
+        if let Some(mv) = ponder_move {
+            board.make_move(mv);
+        }
         let post = Arc::clone(&self.post_thinking);
         config.info_callback = Some(Arc::new(move |info| {
             if post.load(Ordering::Relaxed) {
                 let mut stdout = io::stdout().lock();
-                writeln!(stdout, "{}", format_search_info(&root, info)).ok();
+                writeln!(stdout, "{}", format_search_info(&root, info, ponder_move)).ok();
                 stdout.flush().ok();
             }
         }));
         let state = Arc::clone(&self.state);
         thread::Builder::new()
             .name(name.to_string())
-            .stack_size(SEARCH_STACK_SIZE)
+            .stack_size(SEARCH_THREAD_STACK_SIZE)
             .spawn(move || {
                 let mut state = state.lock();
-                state.new_search();
+                state.prepare_search();
                 search(&mut board, &mut state, config, &stop)
             })
             .expect("failed to spawn XBoard search thread")
@@ -85,6 +89,7 @@ impl XBoardHandler {
         let stop = Arc::new(AtomicBool::new(false));
         let handle = self.spawn_search(
             self.board.clone(),
+            None,
             SearchConfig::depth(self.max_depth).with_ponder(false),
             Arc::clone(&stop),
             "xboard-analysis",
@@ -97,12 +102,10 @@ impl XBoardHandler {
     pub(super) fn start_ponder(&mut self, ponder_move: Move) {
         self.stop_ponder();
 
-        let mut ponder_board = self.board.clone();
-        ponder_board.make_move(ponder_move);
-
         let stop = Arc::new(AtomicBool::new(false));
         let handle = self.spawn_search(
-            ponder_board,
+            self.board.clone(),
+            Some(ponder_move),
             SearchConfig::depth(self.max_depth),
             Arc::clone(&stop),
             "xboard-ponder",
@@ -127,9 +130,18 @@ impl XBoardHandler {
             SearchConfig::from_limits(&self.search_limits(time_control))
         };
         // CECP depth and clock limits apply simultaneously.
-        config.max_depth = Some(self.max_depth);
+        config.max_depth = Some(
+            if matches!(time_control, TimeControl::Incremental { .. })
+                && self.board.has_single_legal_move()
+            {
+                self.max_depth.min(1)
+            } else {
+                self.max_depth
+            },
+        );
         self.thinking = Some(self.spawn_search(
             self.board.clone(),
+            None,
             config,
             Arc::clone(&self.stop_flag),
             "xboard-search",
@@ -150,7 +162,7 @@ impl XBoardHandler {
                     .saturating_sub(self.level_start_fullmove);
                 Some(self.moves_per_session - played % self.moves_per_session)
             };
-            TimeControl::from_xboard_time(time_cs, self.increment_sec, moves_to_go)
+            TimeControl::from_xboard_time_ms(time_cs, self.increment_ms, moves_to_go)
         } else {
             TimeControl::Depth
         }

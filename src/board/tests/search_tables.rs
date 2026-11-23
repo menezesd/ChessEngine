@@ -79,6 +79,25 @@ fn test_killer_same_move_no_duplicate() {
 }
 
 #[test]
+fn promoting_an_existing_killer_keeps_three_distinct_moves() {
+    let mut table = KillerTable::new();
+    let d4 = make_move((1, 3), (3, 3));
+    let e4 = make_move((1, 4), (3, 4));
+    let c4 = make_move((1, 2), (3, 2));
+    for mv in [d4, e4, c4, e4] {
+        table.update(0, mv);
+    }
+    assert_eq!(table.primary(0), e4);
+    assert_eq!(table.secondary(0), c4);
+    assert_eq!(table.tertiary(0), d4);
+
+    table.update(0, d4);
+    assert_eq!(table.primary(0), d4);
+    assert_eq!(table.secondary(0), e4);
+    assert_eq!(table.tertiary(0), c4);
+}
+
+#[test]
 fn test_killer_different_plies_independent() {
     let mut table = KillerTable::new();
     let mv0 = make_move((1, 4), (3, 4));
@@ -366,13 +385,15 @@ fn test_mvv_lva_ordering_correct() {
 
 #[test]
 fn test_mvv_lva_en_passant() {
-    let board = make_board("8/8/8/3Pp3/8/8/8/8 w - e6 0 1");
+    let mut board = make_board("7k/8/4p3/3Pp3/8/8/8/K7 w - - 0 1");
+    let ordinary = board.parse_move("d5e6").unwrap();
+    let mut board_with_ep = make_board("7k/8/8/3Pp3/8/8/8/K7 w - e6 0 1");
+    let en_passant = board_with_ep.parse_move("d5e6").unwrap();
     let state = SearchState::new(1);
-    let mv = Move::en_passant(Square::new(4, 3), Square::new(5, 4)); // dxe6 e.p.
-
-    let score = state.tables.mvv_lva_score(&board, &mv);
-    // Should use pawn value for victim
-    assert!(score > 0);
+    assert_eq!(
+        state.tables.mvv_lva_score(&board_with_ep, &en_passant),
+        state.tables.mvv_lva_score(&board, &ordinary),
+    );
 }
 
 #[test]

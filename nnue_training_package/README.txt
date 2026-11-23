@@ -31,6 +31,10 @@ Data file needed:
   sf18_d14_full_extracted.txt (8.8GB, 144M positions)
   OR sf18_d14_25M.txt (1.5GB, 25M positions - smaller subset)
 
+The trainer stores one compact feature row per position and builds dense
+tensors for each batch. Mirrored positions share the original row. Validation
+groups duplicate network inputs and their mirrors together.
+
 After training, copy .nnue to engine:
   cp nnue_256_sigmoid.nnue src/board/nnue/nets/default.nnue
 

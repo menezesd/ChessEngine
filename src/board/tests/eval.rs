@@ -9,6 +9,32 @@
 
 use crate::board::state::Board;
 
+#[test]
+fn tactical_nnue_preserves_feature_order_and_perspective() {
+    use crate::board::nnue::network::{
+        in_check_feature_index, king_pressure_feature_index, mobility_feature_index,
+    };
+    use crate::board::{Color, Piece};
+
+    let board = Board::from_fen("4k3/8/5N2/8/8/8/8/4K3 b - - 0 1");
+    let expected = |perspective| {
+        vec![
+            in_check_feature_index(Color::Black.index(), perspective),
+            king_pressure_feature_index(
+                Color::Black.index(),
+                Piece::Knight.index(),
+                2,
+                perspective,
+            ),
+            mobility_feature_index(Color::White.index(), Piece::Knight.index(), 7, perspective),
+        ]
+    };
+    assert_eq!(
+        board.compute_nnue_dynamic_features(),
+        (expected(0), expected(1))
+    );
+}
+
 // Deliberately permits sparse boards for isolated term arithmetic.  Do not use
 // this helper for legal-move, draw, search, or whole-position evaluation tests.
 fn make_board(fen: &str) -> Board {

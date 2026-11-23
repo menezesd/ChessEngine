@@ -2,7 +2,9 @@
 //!
 //! Contains attack computation methods used by multiple evaluation terms.
 
-use crate::board::attack_tables::{slider_attacks, KING_ATTACKS, KNIGHT_ATTACKS};
+use crate::board::attack_tables::{
+    pawn_attacks_from_bitboard, slider_attacks, KING_ATTACKS, KNIGHT_ATTACKS,
+};
 use crate::board::state::Board;
 use crate::board::types::{Bitboard, Color, Piece};
 
@@ -87,19 +89,10 @@ impl Board {
     /// Get all squares attacked by pawns of a color.
     #[must_use]
     pub fn pawn_attacks(&self, color: Color) -> Bitboard {
-        let pawns = self.pieces_of(color, Piece::Pawn);
-        match color {
-            Color::White => {
-                let left = (pawns.0 << 7) & !Bitboard::FILE_H.0;
-                let right = (pawns.0 << 9) & !Bitboard::FILE_A.0;
-                Bitboard(left | right)
-            }
-            Color::Black => {
-                let left = (pawns.0 >> 9) & !Bitboard::FILE_H.0;
-                let right = (pawns.0 >> 7) & !Bitboard::FILE_A.0;
-                Bitboard(left | right)
-            }
-        }
+        Bitboard(pawn_attacks_from_bitboard(
+            self.pieces_of(color, Piece::Pawn).0,
+            color == Color::White,
+        ))
     }
 
     /// Get all squares attacked by any piece of a color.

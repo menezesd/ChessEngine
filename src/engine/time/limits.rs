@@ -5,9 +5,6 @@ use super::{TimeConfig, TimeControl};
 /// Time threshold below which we enter "panic mode" (in ms)
 const PANIC_THRESHOLD_MS: u64 = 5000;
 
-/// Minimum moves-to-go estimate to avoid over-thinking
-const MIN_MOVES_TO_GO: u64 = 10;
-
 /// Safety margin added to overhead for critical time detection
 const CRITICAL_TIME_MARGIN_MS: u64 = 50;
 const CRITICAL_TIME_FALLBACK_DIVISOR: u64 = 2;
@@ -45,8 +42,8 @@ fn is_critical_time(time_left_ms: u64, move_overhead_ms: u64) -> bool {
     time_left_ms <= move_overhead_ms.saturating_add(CRITICAL_TIME_MARGIN_MS)
 }
 
-fn critical_time_limits(time_left_ms: u64) -> (u64, u64) {
-    let fallback = (time_left_ms / CRITICAL_TIME_FALLBACK_DIVISOR).max(1);
+fn critical_time_limits(safe_ms: u64) -> (u64, u64) {
+    let fallback = (safe_ms / CRITICAL_TIME_FALLBACK_DIVISOR).max(1);
     (fallback, fallback)
 }
 
@@ -67,6 +64,7 @@ pub(super) fn compute_incremental_limits(
     config: &TimeConfig,
 ) -> (u64, u64) {
     let safe_ms = time_left_ms.saturating_sub(config.move_overhead_ms);
+    let movestogo = movestogo.filter(|&moves| moves > 0);
 
     if is_critical_time(time_left_ms, config.move_overhead_ms) {
         // Budget from the time that remains after transmission overhead;
@@ -75,17 +73,12 @@ pub(super) fn compute_incremental_limits(
         return critical_time_limits(safe_ms);
     }
 
-    if safe_ms < PANIC_THRESHOLD_MS {
+    if safe_ms < PANIC_THRESHOLD_MS && movestogo.is_none() {
         return panic_time_limits(safe_ms, inc_ms);
     }
 
-    // The floor guards only our own estimate. An explicit `movestogo` from
-    // the GUI is authoritative: with `movestogo 1` (last move before a time
-    // control) the engine should spend most of the clock, not a tenth.
-    let moves_to_go = movestogo.map_or_else(
-        || estimated_moves_to_go(safe_ms).max(MIN_MOVES_TO_GO),
-        |mtg| mtg.max(1),
-    );
+    // Honor the GUI's moves-to-go count, including the last move in a time control.
+    let moves_to_go = movestogo.unwrap_or_else(|| estimated_moves_to_go(safe_ms));
 
     let base_time = (safe_ms / moves_to_go).saturating_add(inc_ms);
     let soft_cap = safe_ms.saturating_mul(config.soft_time_percent) / PERCENT_DENOMINATOR;

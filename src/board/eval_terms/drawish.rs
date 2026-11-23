@@ -5,7 +5,7 @@
 use crate::board::state::Board;
 use crate::board::types::{Color, Piece};
 
-/// Multiplier for certain draws (KK, KNK, KBK)
+/// Multiplier for dead positions and KNNK.
 const DRAW_CERTAIN: i32 = 0;
 
 /// Multiplier for drawish positions (1/4 of normal evaluation)
@@ -47,25 +47,14 @@ impl Board {
         let w_minor = wn + wb;
         let w_major = wr + wq;
 
-        // Strong side has no pawns
-        if sp == 0 {
-            // KK, KNK, KBK - certain draws only against a bare king. An
-            // opposing pawn or major piece can still create promotion or
-            // mating chances, so it must not be scaled to an automatic zero.
-            if s_major == 0 && s_minor <= 1 && w_minor == 0 && w_major == 0 && wp == 0 {
-                return DRAW_CERTAIN;
-            }
+        if sp == 0 && wp == 0 {
             // KNNK (two knights versus a lone king) is game-theoretically
             // drawn. Search handles the exceptional legal mate-in-one
             // positions explicitly, so the static HCE score should not retain
             // a blunder-seeking bonus here.
-            if s_major == 0 && sn == 2 && sb == 0 && w_minor == 0 && w_major == 0 && wp == 0 {
+            if s_major == 0 && sn == 2 && sb == 0 && w_minor == 0 && w_major == 0 {
                 return DRAW_CERTAIN;
             }
-        }
-
-        // No pawns on either side - various drawn endings
-        if sp == 0 && wp == 0 {
             // KR vs KM - usually draw
             if sr == 1 && sq == 0 && s_minor == 0 && wr == 0 && wq == 0 && w_minor == 1 {
                 return DRAW_LIKELY;

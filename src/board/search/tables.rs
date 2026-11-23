@@ -45,52 +45,15 @@ pub struct SearchTables {
 }
 
 impl SearchTables {
-    fn new_per_thread_tables() -> (
-        KillerTable,
-        HistoryTable,
-        CounterMoveTable,
-        ContinuationHistory,
-        CountermoveHistory,
-        CaptureHistory,
-        CorrectionHistory,
-    ) {
-        (
-            KillerTable::new(),
-            HistoryTable::new(),
-            CounterMoveTable::new(),
-            ContinuationHistory::new(),
-            CountermoveHistory::new(),
-            CaptureHistory::new(),
-            CorrectionHistory::new(),
-        )
-    }
-
     /// Create a new `SearchTables` with a fresh transposition table of the given size.
     #[must_use]
     pub fn new(tt_mb: usize) -> Self {
-        let (
-            killer_moves,
-            history,
-            counter_moves,
-            continuation_history,
-            countermove_history,
-            capture_history,
-            correction_history,
-        ) = Self::new_per_thread_tables();
-
-        SearchTables {
-            tt: Arc::new(TranspositionTable::new(tt_mb)),
-            pawn_hash: Arc::new(crate::pawn_hash::PawnHashTable::default()),
-            nnue: None,
-            static_nnue: None,
-            killer_moves,
-            history,
-            counter_moves,
-            continuation_history,
-            countermove_history,
-            capture_history,
-            correction_history,
-        }
+        Self::with_shared(
+            Arc::new(TranspositionTable::new(tt_mb)),
+            Arc::new(crate::pawn_hash::PawnHashTable::default()),
+            None,
+            None,
+        )
     }
 
     /// Create a new `SearchTables` with shared TT, pawn hash, and NNUE.
@@ -103,28 +66,18 @@ impl SearchTables {
         nnue: Option<Arc<NnueNetwork>>,
         static_nnue: Option<Arc<NnueNetwork>>,
     ) -> Self {
-        let (
-            killer_moves,
-            history,
-            counter_moves,
-            continuation_history,
-            countermove_history,
-            capture_history,
-            correction_history,
-        ) = Self::new_per_thread_tables();
-
-        SearchTables {
+        Self {
             tt,
             pawn_hash,
             nnue,
             static_nnue,
-            killer_moves,
-            history,
-            counter_moves,
-            continuation_history,
-            countermove_history,
-            capture_history,
-            correction_history,
+            killer_moves: KillerTable::new(),
+            history: HistoryTable::new(),
+            counter_moves: CounterMoveTable::new(),
+            continuation_history: ContinuationHistory::new(),
+            countermove_history: CountermoveHistory::new(),
+            capture_history: CaptureHistory::new(),
+            correction_history: CorrectionHistory::new(),
         }
     }
 
@@ -154,31 +107,27 @@ impl SearchTables {
         };
         let attacker = move_order::piece_value(attacker_piece);
 
-        if mv.is_en_passant() {
-            let mvv_lva = mvv_lva_value(move_order::piece_value(Piece::Pawn), attacker);
-            return capture_order_score(
-                0,
-                mvv_lva,
-                promotion_bonus,
-                self.capture_history_bonus(attacker_piece, Piece::Pawn),
-            );
-        }
-
-        let Some((_, victim_piece)) = board.piece_at(mv.to()) else {
+        let victim_piece = if mv.is_en_passant() {
+            Piece::Pawn
+        } else if let Some((_, piece)) = board.piece_at(mv.to()) {
+            piece
+        } else {
             return 0;
         };
         let captured = move_order::piece_value(victim_piece);
         let mvv_lva = mvv_lva_value(captured, attacker);
 
-        let enemy_king_sq = board.find_king(board.side_to_move().opponent());
-        let to_sq = mv.to();
-        let rank_diff = (to_sq.rank() as i32 - enemy_king_sq.rank() as i32).abs();
-        let file_diff = (to_sq.file() as i32 - enemy_king_sq.file() as i32).abs();
-        let near_king = rank_diff <= 1 && file_diff <= 1;
-
-        let see_score = if attacker > captured && !near_king {
-            board.see_with_pieces(mv.from(), mv.to(), attacker_piece, victim_piece)
-                / SEE_SCORE_DIVISOR
+        let see_score = if attacker > captured {
+            let enemy_king = board.find_king(board.side_to_move().opponent());
+            let target = mv.to();
+            let near_king = target.rank().abs_diff(enemy_king.rank()) <= 1
+                && target.file().abs_diff(enemy_king.file()) <= 1;
+            if near_king {
+                0
+            } else {
+                board.see_with_pieces(mv.from(), target, attacker_piece, victim_piece)
+                    / SEE_SCORE_DIVISOR
+            }
         } else {
             0
         };

@@ -54,7 +54,7 @@ impl EngineController {
     pub fn new(tt_mb: usize) -> Self {
         EngineController {
             board: Board::new(),
-            search_state: Arc::new(Mutex::new(SearchState::new(tt_mb))),
+            search_state: Arc::new(Mutex::new(SearchState::for_play(tt_mb))),
             current_job: None,
             info_callback: None,
             num_threads: 1,
@@ -142,7 +142,7 @@ impl EngineController {
 
     /// Execute a closure with mutable access to the search state.
     ///
-    /// Returns `Some(R)` if the lock was acquired, `None` if poisoned.
+    /// The result is wrapped in `Some` for compatibility with earlier callers.
     pub fn with_search_state<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut SearchState) -> R,
@@ -151,6 +151,7 @@ impl EngineController {
     }
 
     /// Execute a closure with immutable access to the search state.
+    /// The result is wrapped in `Some` for compatibility with earlier callers.
     pub fn with_search_state_ref<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&SearchState) -> R,

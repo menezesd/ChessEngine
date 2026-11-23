@@ -64,37 +64,33 @@ pub fn parse_uci_move(board: &mut Board, uci_string: &str) -> Option<Move> {
     board.parse_move(uci_string).ok()
 }
 
-fn parse_position_source(parts: &[&str]) -> Result<(Board, usize), UciError> {
-    let Some(kind) = parts.get(1) else {
-        return Err(UciError::MissingParts);
-    };
-
-    match *kind {
-        "startpos" => Ok((Board::new(), 2)),
-        "fen" => {
-            let fen_start = 2;
-            let fen_end = fen_start + POSITION_FEN_FIELDS;
-            if parts.len() < fen_end {
-                return Err(UciError::MissingParts);
+fn parse_position_source<'a>(parts: &mut impl Iterator<Item = &'a str>) -> Result<Board, UciError> {
+    match parts.next() {
+        Some("startpos") => Ok(Board::new()),
+        Some("fen") => {
+            let mut fields = [""; POSITION_FEN_FIELDS];
+            for field in &mut fields {
+                *field = parts.next().ok_or(UciError::MissingParts)?;
             }
-            let fen = parts[fen_start..fen_end].join(" ");
-            let board = Board::try_from_fen(&fen)?;
+            let board = Board::try_from_fen(&fields.join(" "))?;
             board.validate_king_counts()?;
-            Ok((board, fen_end))
+            Ok(board)
         }
         _ => Err(UciError::MissingParts),
     }
 }
 
-fn apply_position_moves(board: &mut Board, moves: &[&str]) -> Result<(), UciError> {
+fn apply_position_moves<'a>(
+    board: &mut Board,
+    moves: impl Iterator<Item = &'a str>,
+) -> Result<(), UciError> {
     for move_str in moves {
-        let mv = board
-            .parse_move(move_str)
+        board
+            .make_move_uci(move_str)
             .map_err(|e| UciError::InvalidMove {
-                move_str: (*move_str).to_string(),
+                move_str: move_str.to_string(),
                 error: e,
             })?;
-        board.make_move(mv);
     }
     Ok(())
 }
@@ -104,15 +100,22 @@ fn apply_position_moves(board: &mut Board, moves: &[&str]) -> Result<(), UciErro
 /// Supports both "position startpos" and "position fen <fen>" formats,
 /// optionally followed by "moves <move1> <move2> ...".
 pub fn try_parse_position_command(board: &mut Board, parts: &[&str]) -> Result<(), UciError> {
-    let (mut parsed_board, mut i) = parse_position_source(parts)?;
+    parse_position_tokens(board, parts.iter().copied().skip(1))
+}
 
-    if i < parts.len() && parts[i] == "moves" {
-        i += 1;
-        apply_position_moves(&mut parsed_board, &parts[i..])?;
-    } else if let Some(token) = parts.get(i) {
-        return Err(UciError::UnexpectedToken {
-            token: (*token).to_string(),
-        });
+fn parse_position_tokens<'a>(
+    board: &mut Board,
+    mut parts: impl Iterator<Item = &'a str>,
+) -> Result<(), UciError> {
+    let mut parsed_board = parse_position_source(&mut parts)?;
+    match parts.next() {
+        Some("moves") => apply_position_moves(&mut parsed_board, parts)?,
+        Some(token) => {
+            return Err(UciError::UnexpectedToken {
+                token: token.to_string(),
+            });
+        }
+        None => {}
     }
 
     *board = parsed_board;

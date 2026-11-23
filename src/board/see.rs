@@ -51,13 +51,12 @@ impl Board {
         // bitboards at `target`, even though the virtual exchange has already
         // replaced it. Exclude that square when filtering enemy attackers.
         let target_bit = Bitboard::from_square(target).0;
-        let enemy = side.opponent();
-        let enemy_attackers = self.attackers_to(king_square, Bitboard(occupancy_after)).0
-            & self.occupied_by(enemy).0
-            & occupancy_after
-            & !target_bit;
-
-        enemy_attackers == 0
+        !self.is_square_attacked_with_occupancy(
+            king_square,
+            side.opponent(),
+            occupancy_after,
+            !occupancy_after | target_bit,
+        )
     }
 
     fn least_valuable_legal_attacker(
@@ -96,6 +95,7 @@ impl Board {
     /// Positive = winning for the side making the initial capture.
     /// Negative = losing.
     /// Zero = equal exchange.
+    /// Promoting captures are evaluated as queen promotions.
     ///
     /// # Arguments
     /// * `from` - Source square of the capturing piece
@@ -179,6 +179,7 @@ impl Board {
         let mut occupancy = self.all_occupied.0;
         if let Some(capture_sq) = en_passant_capture_square {
             occupancy &= !Bitboard::from_square(capture_sq).0;
+            occupancy |= Bitboard::from_square(to).0;
         }
 
         // Get all attackers to the target square
@@ -234,9 +235,7 @@ impl Board {
                 break;
             }
 
-            // Leave the last slot unused: the minimax pass below reads
-            // `gain[depth + 1]`, so a sequence ending exactly at the array
-            // boundary would read out of bounds.
+            // Stop adding recaptures once the exchange stack is full.
             if depth + 1 >= MAX_DEPTH {
                 break;
             }

@@ -4,10 +4,10 @@
 //! - Rook endgame activity (rook cutting off king)
 //! - King centralization (stronger in endgame)
 //! - Wrong bishop detection (can't control rook pawn promotion square)
-//! - Fortress detection (recognize drawable patterns)
+//! - Single-pawn rook endings (king access and frontal blockade)
 
 use crate::board::state::Board;
-use crate::board::types::{Bitboard, Color, Piece};
+use crate::board::types::{Bitboard, Color, Piece, Square};
 
 /// Rook activity bonus for cutting off enemy king
 pub const ROOK_CUT_OFF_EG: i32 = 15;
@@ -24,21 +24,10 @@ impl Board {
     /// Returns (middlegame, endgame) score from white's perspective.
     #[must_use]
     pub fn eval_endgame_patterns(&self) -> (i32, i32) {
-        // These patterns are primarily for endgame
-        let mg = 0;
-        let mut eg = 0;
-
-        for color in Color::BOTH {
-            eg += color.sign() * self.eval_endgame_for_color(color);
-        }
-
-        // Check for fortress patterns
-        if self.is_fortress() {
-            // Reduce score toward draw
-            eg /= 4;
-        }
-
-        (mg, eg)
+        (
+            0,
+            self.eval_endgame_for_color(Color::White) - self.eval_endgame_for_color(Color::Black),
+        )
     }
 
     fn eval_endgame_for_color(&self, color: Color) -> i32 {
@@ -159,25 +148,61 @@ impl Board {
         0
     }
 
-    /// Detect fortress patterns.
-    fn is_fortress(&self) -> bool {
-        // Simplified fortress detection
-        // Full implementation would recognize specific patterns
+    /// Static score from White's perspective for one-pawn rook endings.
+    pub(in crate::board) fn single_pawn_rook_eval(&self) -> Option<i32> {
+        let piece_count = self.all_occupied.popcount();
+        if !matches!(piece_count, 4 | 5) {
+            return None;
+        }
+        let pawn = self.all_pieces_of_type(Piece::Pawn).iter().next()?;
+        let pawn_side = self.color_on(pawn)?;
+        let defender = pawn_side.opponent();
+        let defending_rook = self.pieces_of(defender, Piece::Rook).iter().next()?;
+        if (piece_count == 5 && self.pieces_of(pawn_side, Piece::Rook).is_empty())
+            || self.piece_count(pawn_side, Piece::King) != 1
+            || self.piece_count(defender, Piece::King) != 1
+            || !(1..=6).contains(&pawn.rank())
+        {
+            return None;
+        }
+        let white_pawn = pawn_side == Color::White;
+        let next_square = pawn.forward(white_pawn)?;
+        let distance_to_advance = |king: Square| {
+            king.file()
+                .abs_diff(next_square.file())
+                .max(king.rank().abs_diff(next_square.rank())) as i32
+        };
+        let relative_rank = |rank| if white_pawn { rank } else { 7 - rank };
+        let pawn_rank = relative_rank(pawn.rank());
+        let frontal_rook = defending_rook.file() == pawn.file()
+            && relative_rank(defending_rook.rank()) > pawn_rank;
+        let defending_king = self.find_king(defender);
+        let defender_distance = distance_to_advance(defending_king);
+        let pawn_king_distance = distance_to_advance(self.find_king(pawn_side));
 
-        // Check for common fortress: rook+pawn vs rook with blocked pawn
-        let white_rooks = self.piece_count(Color::White, Piece::Rook);
-        let black_rooks = self.piece_count(Color::Black, Piece::Rook);
-        let white_pawns = self.piece_count(Color::White, Piece::Pawn);
-        let black_pawns = self.piece_count(Color::Black, Piece::Pawn);
-
-        // Very simplified: if material is roughly equal and few pawns, might be fortress-ish
-        if white_rooks == 1 && black_rooks == 1 && white_pawns <= 1 && black_pawns <= 1 {
-            // Potential fortress - would need deeper analysis
-            // For now, just return false to avoid false positives
-            return false;
+        if piece_count == 4 {
+            let supported_advance = pawn_king_distance <= 1 && defender_distance >= 2;
+            let threat = (pawn_rank as i32 - 3).max(0) * if supported_advance { 65 } else { 25 };
+            let rook_score = 420
+                - 22 * pawn_rank as i32
+                - threat
+                - 13 * (defender_distance - pawn_king_distance)
+                + 35 * i32::from(frontal_rook);
+            return Some(defender.sign() * rook_score.max(0));
         }
 
-        false
+        // The extra pawn is worth more when its king can escort it.
+        // A rook in front of the pawn can slow its advance from a distance.
+        let supporting_rook = self.pieces_of(pawn_side, Piece::Rook).iter().next()?;
+        let rook_behind_pawn = supporting_rook.file() == pawn.file()
+            && relative_rank(supporting_rook.rank()) < pawn_rank;
+        let king_blocks_pawn = defending_king.file().abs_diff(pawn.file()) <= 1
+            && relative_rank(defending_king.rank()) > pawn_rank;
+        let score = 35 + 13 * pawn_rank as i32 + 22 * (defender_distance - pawn_king_distance)
+            - 55 * i32::from(frontal_rook)
+            - 32 * i32::from(king_blocks_pawn)
+            + 20 * i32::from(rook_behind_pawn);
+        Some(pawn_side.sign() * score)
     }
 }
 

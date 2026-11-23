@@ -1,6 +1,6 @@
 mod go;
 mod output;
-mod state;
+mod time_control;
 
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
@@ -10,12 +10,11 @@ use crate::engine::EngineController;
 use crate::eval_math::{blended_eval, scaled_eval};
 use crate::uci::command::{parse_uci_command, UciCommand};
 use crate::uci::options::{UciOptionAction, UciOptions};
-use crate::uci::parse_position_command;
+use crate::uci::parse_position_tokens;
 use crate::uci::print::print_perft_info;
 use crate::uci::report::print_ready;
 
 use output::default_info_callback;
-use state::UciState;
 
 const KNOWN_COMMANDS: &[&str] = &[
     "uci",
@@ -36,28 +35,41 @@ const KNOWN_COMMANDS: &[&str] = &[
 pub(super) struct UciSession {
     pub(in crate::uci::session) engine: EngineController,
     pub(in crate::uci::session) options: UciOptions,
-    pub(in crate::uci::session) state: UciState,
+    debug: bool,
 }
 
 impl UciSession {
     fn new(default_tt_mb: usize) -> Self {
-        let options = UciOptions::new(default_tt_mb);
+        let mut options = UciOptions::new(default_tt_mb);
         let mut engine = EngineController::new(options.hash_mb);
+        options.use_nnue = engine.search_state().lock().tables.nnue.is_some();
         engine.set_info_callback(Some(default_info_callback()));
         UciSession {
             engine,
             options,
-            state: UciState::default(),
+            debug: false,
         }
     }
 
     /// Handle the "setoption" command
     fn handle_setoption(&mut self, name: &str, value: Option<&str>) {
         self.engine.stop_search();
-        let action = self
-            .engine
-            .with_search_state(|state| self.options.apply_setoption(name, value, state))
-            .flatten();
+        #[cfg(feature = "syzygy")]
+        if name.eq_ignore_ascii_case("SyzygyPath") {
+            if let Some(path) = value {
+                let path = if path == "<empty>" { "" } else { path };
+                match self.engine.search_state().lock().set_syzygy_path(path) {
+                    Ok(()) => path.clone_into(&mut self.options.syzygy_path),
+                    Err(error) => println!("info string SyzygyPath: {error}"),
+                }
+            }
+            return;
+        }
+
+        let action = {
+            let mut state = self.engine.search_state().lock();
+            self.options.apply_setoption(name, value, &mut state)
+        };
         if let Some(action) = action {
             self.apply_option_action(action);
         }
@@ -75,15 +87,16 @@ impl UciSession {
     }
 
     fn handle_position(&mut self, line: &str) {
-        self.engine.stop_search();
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        parse_position_command(self.engine.board_mut(), &parts);
+        let parts = line.split_whitespace().skip(1);
+        if let Err(error) = parse_position_tokens(self.engine.board_mut(), parts) {
+            eprintln!("Error: {error}");
+        }
     }
 
     fn handle_perft(&mut self, depth: usize) {
-        self.engine.stop_search();
+        let board = self.engine.board_mut();
         let start = Instant::now();
-        let nodes = self.engine.board_mut().perft(depth);
+        let nodes = board.perft(depth);
         print_perft_info(depth, nodes, start.elapsed());
     }
 
@@ -116,8 +129,9 @@ impl UciSession {
                 (None, Some(hce_eval)) => hce_eval,
                 (None, None) => 0,
             };
+            let static_score = state.evaluate_static_position(self.engine.board());
             println!(
-                "info string eval hce {hce} nnue {nnue} blend {blend} blended {blended}",
+                "info string eval hce {hce} nnue {nnue} blend {blend} blended {blended} static {static_score}",
                 hce = hce.map_or_else(|| "none".to_string(), |v| v.to_string()),
                 nnue = nnue.map_or_else(|| "none".to_string(), |v| v.to_string())
             );
@@ -146,7 +160,7 @@ impl UciSession {
     }
 
     fn handle_unknown(&self, line: &str) {
-        if self.state.debug {
+        if self.debug {
             eprintln!("Unknown command: {line}");
             eprintln!("Known commands: {}", KNOWN_COMMANDS.join(", "));
         }
@@ -197,8 +211,8 @@ impl UciSession {
                 self.handle_setoption(&name, value.as_deref());
             }
             UciCommand::Debug(value) => {
-                self.state.debug = matches!(value.as_deref(), Some("on"));
-                self.engine.set_trace(self.state.debug);
+                self.debug = matches!(value.as_deref(), Some("on"));
+                self.engine.set_trace(self.debug);
             }
             UciCommand::Quit => {
                 self.engine.stop_search();

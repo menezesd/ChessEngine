@@ -1,10 +1,10 @@
-use super::{parse_go_params, UciCommand};
+use super::{go::parse_go_tokens, UciCommand};
 
 const DEFAULT_PERFT_DEPTH: usize = 1;
 
-fn parse_perft_depth(parts: &[&str]) -> usize {
-    let depth = match parts.get(1) {
-        Some(&"depth") => parts.get(2),
+fn parse_perft_depth(mut args: std::str::SplitWhitespace<'_>) -> usize {
+    let depth = match args.next() {
+        Some("depth") => args.next(),
         value => value,
     };
 
@@ -17,32 +17,26 @@ fn parse_perft_depth(parts: &[&str]) -> usize {
 #[must_use]
 pub fn parse_uci_command(line: &str) -> Option<UciCommand> {
     let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if parts.is_empty() {
-        return None;
-    }
+    let mut words = trimmed.split_whitespace();
 
-    let cmd = match parts[0] {
+    let cmd = match words.next()? {
         "uci" => UciCommand::Uci,
         "isready" => UciCommand::IsReady,
         "ucinewgame" => UciCommand::UciNewGame,
         "position" => UciCommand::Position(trimmed.to_string()),
-        "go" => UciCommand::Go(parse_go_params(&parts)),
+        "go" => UciCommand::Go(parse_go_tokens(words)),
         "eval" => UciCommand::Eval,
         "evalfeatures" => UciCommand::EvalFeatures,
-        "perft" => UciCommand::Perft(parse_perft_depth(&parts)),
+        "perft" => UciCommand::Perft(parse_perft_depth(words)),
         "setoption" => {
-            let parsed = crate::uci::options::parse_setoption(&parts);
+            let parsed = crate::uci::options::parse_setoption_line(line);
             if let Some((name, value)) = parsed {
                 UciCommand::SetOption { name, value }
             } else {
                 UciCommand::Unknown(trimmed.to_string())
             }
         }
-        "debug" => UciCommand::Debug(parts.get(1).map(|v| (*v).to_string())),
+        "debug" => UciCommand::Debug(words.next().map(str::to_owned)),
         "stop" => UciCommand::Stop,
         "ponderhit" => UciCommand::PonderHit,
         "quit" => UciCommand::Quit,

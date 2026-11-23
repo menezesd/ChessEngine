@@ -1,40 +1,19 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::board::search::smp::{smp_search, SmpConfig};
-use crate::board::search::DEFAULT_MAX_DEPTH;
+use crate::board::search::{DEFAULT_MAX_DEPTH, SEARCH_THREAD_STACK_SIZE};
 use crate::board::{search, SearchClock, SearchConfig, SearchInfoCallback, SearchResult};
 use crate::timer::{search_deadlines, spawn_stop_timer};
 
 use super::{EngineController, SearchParams};
 use crate::engine::job::SearchJob;
 
-/// Search thread stack size (32 MB)
-const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
-/// Poll interval while an early result waits for ponderhit or stop.
-const SEARCH_RELEASE_POLL_MS: u64 = 10;
-
 impl EngineController {
     fn is_timed_search(params: &SearchParams) -> bool {
         !params.infinite && !params.ponder
-    }
-
-    fn search_time_limit_ms(params: &SearchParams) -> u64 {
-        if Self::is_timed_search(params) {
-            params.soft_time_ms
-        } else {
-            0
-        }
-    }
-
-    fn search_hard_time_limit_ms(params: &SearchParams) -> u64 {
-        if Self::is_timed_search(params) {
-            params.hard_time_ms
-        } else {
-            0
-        }
     }
 
     fn should_spawn_hard_stop_timer(params: &SearchParams) -> bool {
@@ -52,7 +31,7 @@ impl EngineController {
         search_deadlines(start, params.soft_time_ms, params.hard_time_ms)
     }
 
-    fn build_search_config(&self, params: &SearchParams, node_limit: u64) -> SearchConfig {
+    fn build_search_config(params: &SearchParams, node_limit: u64) -> SearchConfig {
         let mut config = if let Some(d) = params.depth {
             SearchConfig::depth(d)
         } else {
@@ -66,9 +45,6 @@ impl EngineController {
         if node_limit > 0 {
             config = config.with_nodes(node_limit);
         }
-        if let Some(cb) = &self.info_callback {
-            config = config.with_info_callback(cb.clone());
-        }
         if params.multi_pv > 1 {
             config = config.with_multi_pv(params.multi_pv);
         }
@@ -78,7 +54,8 @@ impl EngineController {
 
     fn wait_for_search_release(infinite: bool, pondering: &AtomicBool, stop: &AtomicBool) {
         while (infinite || pondering.load(Ordering::Relaxed)) && !stop.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(SEARCH_RELEASE_POLL_MS));
+            // SearchJob wakes this thread after changing either release flag.
+            thread::park();
         }
     }
 
@@ -106,7 +83,7 @@ impl EngineController {
 
         let node_limit = {
             let mut guard = self.search_state.lock();
-            guard.new_search();
+            guard.prepare_search();
             guard.stats.max_nodes
         };
 
@@ -124,91 +101,56 @@ impl EngineController {
             None
         };
 
-        let search_board = self.board.clone();
+        let mut search_board = self.board.clone();
         let search_state = Arc::clone(&self.search_state);
         let stop_clone = Arc::clone(&stop);
         let pondering_clone = Arc::clone(&pondering);
+        let publish_clone = Arc::clone(&publish);
         let num_threads = self.num_threads;
-        let info_callback = self.gated_info_callback(&publish);
         let infinite = params.infinite;
+        let ponder = params.ponder;
 
-        // Root restrictions and MultiPV currently use the single-threaded
-        // path so every published line observes the requested search domain.
-        let handle = if num_threads > 1 && params.multi_pv <= 1 && params.root_moves.is_none() {
-            let publish_clone = Arc::clone(&publish);
-            let smp_config = SmpConfig {
-                num_threads,
-                max_depth: params
-                    .depth
-                    .unwrap_or(DEFAULT_MAX_DEPTH)
-                    .min(DEFAULT_MAX_DEPTH),
-                time_limit_ms: Self::search_time_limit_ms(&params),
-                hard_time_limit_ms: Self::search_hard_time_limit_ms(&params),
-                clock: Some(Arc::clone(&clock)),
-                node_limit,
-                info_callback,
-                ponder: params.ponder,
-                infinite,
-            };
-
-            let handle = thread::Builder::new()
-                .name("search-main".to_string())
-                .stack_size(SEARCH_STACK_SIZE)
-                .spawn(move || {
-                    let mut guard = search_state.lock();
-                    let result =
-                        smp_search(&search_board, &mut guard, smp_config, stop_clone.clone());
-                    drop(guard);
-
-                    EngineController::wait_for_search_release(
+        let mut config = Self::build_search_config(&params, node_limit);
+        config.info_callback = self.gated_info_callback(&publish);
+        config.clock = Some(Arc::clone(&clock));
+        // MultiPV and restricted root lists use the single-threaded search.
+        let use_smp = num_threads > 1 && config.multi_pv <= 1 && config.root_moves.is_none();
+        let thread_name = if use_smp { "search-main" } else { "search" };
+        let handle = thread::Builder::new()
+            .name(thread_name.to_owned())
+            .stack_size(SEARCH_THREAD_STACK_SIZE)
+            .spawn(move || {
+                let mut state = search_state.lock();
+                let result = if use_smp {
+                    let smp_config = SmpConfig {
+                        num_threads,
+                        max_depth: config.max_depth.unwrap_or(DEFAULT_MAX_DEPTH),
+                        time_limit_ms: config.time_limit_ms,
+                        hard_time_limit_ms: config.hard_time_limit_ms,
+                        clock: config.clock,
+                        node_limit: config.node_limit,
+                        info_callback: config.info_callback,
+                        ponder,
                         infinite,
-                        &pondering_clone,
-                        &stop_clone,
-                    );
-                    // The hard-stop watchdog shares this flag.  Once the search
-                    // and any publication wait are over, wake it instead of leaving
-                    // a completed job's timer alive until its deadline.
-                    stop_clone.store(true, Ordering::Relaxed);
+                    };
+                    smp_search(
+                        &search_board,
+                        &mut state,
+                        smp_config,
+                        Arc::clone(&stop_clone),
+                    )
+                } else {
+                    search(&mut search_board, &mut state, config, &stop_clone)
+                };
+                drop(state);
 
-                    if publish_clone.load(Ordering::Acquire) {
-                        on_complete(result);
-                    }
-                })
-                .expect("failed to spawn search thread");
-            handle
-        } else {
-            let mut config = self.build_search_config(&params, node_limit);
-            config.info_callback = info_callback;
-            // Live clock: lets a ponderhit reset re-time the running search.
-            config.clock = Some(Arc::clone(&clock));
-            let mut search_board = search_board;
-            let publish_clone = Arc::clone(&publish);
-
-            let handle = thread::Builder::new()
-                .name("search".to_string())
-                .stack_size(SEARCH_STACK_SIZE)
-                .spawn(move || {
-                    let mut guard = search_state.lock();
-                    let result: SearchResult =
-                        search(&mut search_board, &mut guard, config, &stop_clone);
-                    drop(guard);
-
-                    EngineController::wait_for_search_release(
-                        infinite,
-                        &pondering_clone,
-                        &stop_clone,
-                    );
-                    // See the SMP path above. Keep this after the wait so
-                    // early ponder/infinite results await the GUI's command.
-                    stop_clone.store(true, Ordering::Relaxed);
-
-                    if publish_clone.load(Ordering::Acquire) {
-                        on_complete(result);
-                    }
-                })
-                .expect("failed to spawn search thread");
-            handle
-        };
+                Self::wait_for_search_release(infinite, &pondering_clone, &stop_clone);
+                stop_clone.store(true, Ordering::Relaxed);
+                if publish_clone.load(Ordering::Acquire) {
+                    on_complete(result);
+                }
+            })
+            .expect("failed to spawn search thread");
 
         self.current_job = Some(SearchJob::new(
             stop,
@@ -316,6 +258,7 @@ mod tests {
             let mut controller = EngineController::new(1);
             controller.set_threads(threads);
             let state = Arc::clone(controller.search_state());
+            let next_generation = state.lock().generation.wrapping_add(1);
             controller.start_search(
                 SearchParams {
                     depth: Some(1),
@@ -325,17 +268,15 @@ mod tests {
                     // A real callback may lock this state to read statistics.
                     // Use try_lock here so a regression fails without hanging.
                     sender
-                        .send(state.try_lock().map(|state| state.stats.nodes))
+                        .send(state.try_lock().map(|state| state.generation))
                         .unwrap();
                 },
             );
 
-            assert!(
-                receiver
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap()
-                    .is_some(),
-                "completion callback ran with the search state locked ({threads} threads)"
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Some(next_generation),
+                "expected one generation advance and an unlocked state ({threads} threads)"
             );
             controller.stop_search();
         }

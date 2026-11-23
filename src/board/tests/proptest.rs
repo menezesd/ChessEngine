@@ -1,7 +1,7 @@
 //! Property-based tests using proptest.
 
 use crate::board::search::{HistoryTable, KillerTable};
-use crate::board::{Board, Move, Piece, Square, UnmakeInfo};
+use crate::board::{Board, Move, Piece, Square, UnmakeInfo, EMPTY_MOVE};
 use proptest::prelude::*;
 
 /// Strategy to generate a random legal move sequence length
@@ -138,16 +138,7 @@ proptest! {
         }
     }
 
-    /// Property: incrementally maintained eval state always matches a
-    /// from-scratch recomputation.
-    ///
-    /// `make_move`/`unmake_move` update `eval_mg`/`eval_eg`/`game_phase`
-    /// incrementally rather than recomputing them; a missed or
-    /// double-applied update on any single move type (capture, en passant,
-    /// castling, promotion) would drift the running score without
-    /// affecting move counts, so perft cannot catch it. This mirrors
-    /// `prop_hash_consistency` but checks the eval accumulators against
-    /// `recalculate_incremental_eval`, the from-scratch oracle.
+    /// Compare incremental evaluation with a from-scratch score after each move.
     #[test]
     fn prop_incremental_eval_matches_recompute(seed in seed_strategy(), num_moves in move_count_strategy()) {
         use rand::prelude::*;
@@ -166,9 +157,7 @@ proptest! {
 
             let mut recomputed = board.clone();
             recomputed.recalculate_incremental_eval();
-            prop_assert_eq!(board.eval_mg, recomputed.eval_mg);
-            prop_assert_eq!(board.eval_eg, recomputed.eval_eg);
-            prop_assert_eq!(board.game_phase, recomputed.game_phase);
+            prop_assert_eq!(board.eval_state(), recomputed.eval_state());
         }
     }
 
@@ -331,14 +320,59 @@ proptest! {
 
         for _ in 0..num_moves {
             let moves = board.generate_moves();
-            let mut probe_board = board.clone();
-            prop_assert_eq!(probe_board.has_legal_move(), !moves.is_empty());
+            prop_assert_eq!(board.has_legal_move(), !moves.is_empty());
+            prop_assert_eq!(board.has_multiple_legal_moves(), moves.len() > 1);
+            prop_assert_eq!(board.has_single_legal_move(), moves.len() == 1);
+            if board.is_in_check(board.side_to_move()) {
+                let mut evasions = crate::board::MoveList::new();
+                board.generate_evasions_into(&mut evasions);
+                prop_assert_eq!(evasions.as_slice(), moves.as_slice());
+            } else {
+                prop_assert_eq!(board.has_legal_move_out_of_check(), !moves.is_empty());
+            }
+            let arbitrary = crate::board::Move::from_u16(rng.r#gen());
+            prop_assert_eq!(
+                board.is_legal_move(arbitrary),
+                moves.iter().any(|&mv| mv == arbitrary)
+            );
 
             if moves.is_empty() {
                 break;
             }
             let mv = moves.as_slice()[rng.gen_range(0..moves.len())];
+            prop_assert!(board.is_legal_move(mv));
+            prop_assert_eq!(board.parse_move(&mv.to_string()), Ok(mv));
+            prop_assert_eq!(board.has_legal_move_except(mv), moves.len() > 1);
             board.make_move(mv);
+        }
+    }
+
+    #[test]
+    fn prop_tactical_move_generation_matches_full_generation(
+        seed in seed_strategy(),
+        num_moves in 1..80usize
+    ) {
+        use rand::prelude::*;
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut board = Board::new();
+        for _ in 0..num_moves {
+            let moves = board.generate_moves();
+            let expected: Vec<_> = moves.iter().copied().filter(|mv| mv.is_tactical()).collect();
+            let tactical = board.generate_tactical_moves();
+            prop_assert_eq!(tactical.as_slice(), expected.as_slice(), "{}", board.to_fen());
+            for &mv in tactical.iter().filter(|mv| mv.is_capture() && !mv.is_promotion()) {
+                let (_, piece) = board.piece_at(mv.from()).unwrap();
+                let predicted = board.capture_gives_check(mv, piece);
+                let undo = board.make_move(mv);
+                let actual = board.is_in_check(board.side_to_move());
+                board.unmake_move(mv, undo);
+                prop_assert_eq!(predicted, actual, "{} {}", board.to_fen(), mv);
+            }
+            let Some(chosen) = moves.as_slice().choose(&mut rng) else {
+                break;
+            };
+            board.make_move(*chosen);
         }
     }
 
@@ -346,10 +380,11 @@ proptest! {
     // SEE Property Tests
     // ========================================================================
 
-    /// Property: SEE for captures is bounded by victim value
+    /// Property: SEE cannot exceed the material gained by the initial capture.
     #[test]
     fn prop_see_bounded_by_victim(seed in seed_strategy(), num_moves in 0..15usize) {
         use rand::prelude::*;
+        use crate::board::see::SEE_VALUES;
 
         let mut board = Board::new();
         let mut rng = StdRng::seed_from_u64(seed);
@@ -364,27 +399,17 @@ proptest! {
             board.make_move(moves.as_slice()[idx]);
         }
 
-        // Check SEE for all captures
         let moves = board.generate_moves();
-        for mv in &moves {
-            if mv.is_capture() {
-                let see = board.see(mv.from(), mv.to());
-
-                // SEE should not exceed the value of the captured piece
-                // (can't gain more than what's there)
-                if let Some((_, victim)) = board.piece_at(mv.to()) {
-                    let victim_value = match victim {
-                        Piece::Pawn => 100,
-                        Piece::Knight => 320,
-                        Piece::Bishop => 330,
-                        Piece::Rook => 500,
-                        Piece::Queen => 900,
-                        Piece::King => 20000,
-                    };
-                    prop_assert!(see <= victim_value,
-                        "SEE {} exceeds victim value {} for {:?}", see, victim_value, mv);
-                }
-            }
+        for mv in moves.iter().filter(|mv| mv.is_capture()) {
+            let victim = if mv.is_en_passant() {
+                Piece::Pawn
+            } else {
+                board.piece_at(mv.to()).unwrap().1
+            };
+            let promotion = SEE_VALUES[Piece::Queen.index()] - SEE_VALUES[Piece::Pawn.index()];
+            let limit = SEE_VALUES[victim.index()] + i32::from(mv.is_promotion()) * promotion;
+            let see = board.see(mv.from(), mv.to());
+            prop_assert!(see <= limit, "SEE {} exceeds initial material gain {} for {:?}", see, limit, mv);
         }
     }
 
@@ -429,18 +454,20 @@ proptest! {
         );
 
         table.update(ply, mv1);
+        prop_assert_eq!(table.primary(ply), mv1);
 
-        if ply < crate::board::MAX_PLY {
-            prop_assert_eq!(table.primary(ply), mv1);
-        }
+        table.update(ply, mv2);
+        let (primary, secondary) = if mv2 == EMPTY_MOVE || mv2 == mv1 {
+            (mv1, EMPTY_MOVE)
+        } else {
+            (mv2, mv1)
+        };
+        prop_assert_eq!(table.primary(ply), primary);
+        prop_assert_eq!(table.secondary(ply), secondary);
 
-        if mv1 != mv2 {
-            table.update(ply, mv2);
-            if ply < crate::board::MAX_PLY {
-                prop_assert_eq!(table.primary(ply), mv2);
-                prop_assert_eq!(table.secondary(ply), mv1);
-            }
-        }
+        table.update(ply, EMPTY_MOVE);
+        prop_assert_eq!(table.primary(ply), primary);
+        prop_assert_eq!(table.secondary(ply), secondary);
     }
 
     /// Property: history scores are non-negative after updates

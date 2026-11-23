@@ -157,10 +157,6 @@ fn same_colored_promoted_bishops_are_insufficient_material() {
 fn two_knights_against_a_bare_king_can_have_mate_in_one() {
     let mut board = Board::from_fen("8/8/8/8/8/2N5/8/k1K1N3 w - - 0 1");
     assert!(!board.is_theoretical_draw());
-    assert_eq!(
-        board.two_knights_vs_bare_king_side(),
-        Some(crate::board::Color::White)
-    );
 
     apply_uci(&mut board, "e1c2");
     assert!(board.is_checkmate());

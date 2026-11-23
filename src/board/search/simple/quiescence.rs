@@ -1,8 +1,9 @@
-use super::super::constants::{MAX_QSEARCH_DEPTH, SCORE_INFINITE};
+use super::super::constants::{MAX_QSEARCH_DEPTH, QSEARCH_CHECK_EXTENSION, SCORE_INFINITE};
 use super::super::move_order::piece_value;
 use super::super::MATE_SCORE;
 use super::SimpleSearchContext;
-use crate::board::{Move, ScoredMoveList, EMPTY_MOVE};
+use crate::board::draw::FIFTY_MOVE_RULE_HALFMOVES;
+use crate::board::{Move, MoveList, Piece, ScoredMoveList, EMPTY_MOVE};
 
 /// Delta pruning safety margin (centipawns)
 const DELTA_MARGIN: i32 = 200;
@@ -27,31 +28,30 @@ impl SimpleSearchContext<'_> {
     fn should_prune_quiescence_capture(
         &self,
         m: Move,
+        attacker: Piece,
         stand_pat: i32,
         alpha: i32,
         qdepth: i32,
     ) -> bool {
-        // SEE and delta pruning value only the captured piece. A promotion
-        // also changes the moving pawn into a stronger piece, so treating a
-        // capture-promotion as an ordinary capture can incorrectly prune a
-        // decisive promotion before it is searched.
+        // Delta pruning counts only the victim, and coordinate-based SEE
+        // assumes a queen promotion. Search every promotion directly.
         if !m.is_capture() || m.is_promotion() {
             return false;
         }
 
-        let captured_value = if m.is_en_passant() {
-            piece_value(crate::board::Piece::Pawn)
-        } else if let Some((_, captured)) = self.board.piece_at(m.to()) {
-            piece_value(captured)
+        let victim = if m.is_en_passant() {
+            Piece::Pawn
+        } else if let Some((_, victim)) = self.board.piece_at(m.to()) {
+            victim
         } else {
-            0
+            return false;
         };
         let margin = if qdepth <= SEE_SHALLOW_DEPTH {
             DELTA_MARGIN
         } else {
             DELTA_MARGIN + DELTA_MARGIN_DEEP
         };
-        if stand_pat + captured_value + margin < alpha {
+        if stand_pat + piece_value(victim) + margin < alpha {
             return true;
         }
 
@@ -62,70 +62,20 @@ impl SimpleSearchContext<'_> {
         } else {
             SEE_THRESHOLD_DEEP
         };
-        self.board.see(m.from(), m.to()) < see_threshold
+        let exchange = if m.is_en_passant() {
+            self.board.see(m.from(), m.to())
+        } else {
+            self.board
+                .see_with_pieces(m.from(), m.to(), attacker, victim)
+        };
+        exchange < see_threshold
     }
 
-    /// Quiescence search for tactical stability with SEE and delta pruning.
-    /// `ply` is the total ply from root (for correct mate score adjustment).
-    pub fn quiesce(&mut self, mut alpha: i32, beta: i32, ply: usize, qdepth: i32) -> i32 {
-        if self.should_stop() {
-            return 0;
+    fn order_quiescence_moves(&self, moves: &mut MoveList) {
+        if moves.len() <= 3 {
+            return;
         }
 
-        if ply < crate::board::MAX_PLY {
-            self.line_hashes[ply] = self.board.hash;
-        }
-
-        // Quiescence is also entered directly at alpha-beta leaves, so it
-        // must honor draw rules independently of the full-width search.
-        // In particular, a TT entry cannot safely stand in for this check:
-        // repetition history and the halfmove clock are not in its key.
-        if self.is_repetition(ply) || self.board.is_theoretical_draw() {
-            return 0;
-        }
-
-        if let Some(score) = self.two_knights_vs_bare_king_score(ply) {
-            return score;
-        }
-
-        // Alpha-beta can arrive here after a long extension sequence.  Do
-        // not let quiescence recurse beyond the fixed search-state stacks.
-        if ply >= crate::board::MAX_PLY || qdepth >= MAX_QSEARCH_DEPTH {
-            return self.score_at_search_limit(ply);
-        }
-
-        let stand_pat = self.evaluate_simple(ply);
-        let in_check = self.board.is_in_check(self.board.side_to_move());
-
-        let mut best_score = if in_check { -SCORE_INFINITE } else { stand_pat };
-
-        // Generate moves: all moves if in check, captures only otherwise
-        let moves = if in_check {
-            let moves = self.board.generate_moves();
-            if moves.is_empty() {
-                return -MATE_SCORE + ply as i32; // Checkmate (ply-adjusted)
-            }
-            moves
-        } else {
-            // Stand pat
-            if stand_pat >= beta {
-                return if self.board.has_legal_move() {
-                    stand_pat
-                } else {
-                    0
-                };
-            }
-            if alpha < stand_pat {
-                alpha = stand_pat;
-            }
-            let tactical_moves = self.board.generate_tactical_moves();
-            if tactical_moves.is_empty() && !self.board.has_legal_move() {
-                return 0;
-            }
-            tactical_moves
-        };
-
-        // Probe TT for move ordering only (not cutoff - depth semantics differ)
         let tt_move = self
             .state
             .tables
@@ -133,10 +83,8 @@ impl SimpleSearchContext<'_> {
             .probe(self.board.hash)
             .and_then(|e| e.best_move())
             .unwrap_or(EMPTY_MOVE);
-
-        // Sort captures by MVV-LVA, with TT move first (using stack-allocated list)
         let mut sorted_moves = ScoredMoveList::new();
-        for m in &moves {
+        for m in moves.iter() {
             let score = if *m == tt_move {
                 1_000_000 // TT move first
             } else {
@@ -144,11 +92,79 @@ impl SimpleSearchContext<'_> {
             };
             sorted_moves.push(*m, score);
         }
-        if sorted_moves.len() > 3 {
-            sorted_moves.sort_by_score_desc();
+        sorted_moves.sort_by_score_desc();
+        for (mv, sorted) in moves.iter_mut().zip(sorted_moves.iter()) {
+            *mv = sorted.mv;
+        }
+    }
+
+    /// Quiescence search for tactical stability with SEE and delta pruning.
+    /// `ply` is the total ply from root (for correct mate score adjustment).
+    pub fn quiesce(&mut self, mut alpha: i32, beta: i32, ply: usize, qdepth: i32) -> i32 {
+        if !self.try_visit_node(ply) {
+            return 0;
         }
 
-        for scored in sorted_moves.iter() {
+        // Quiescence is also entered directly at alpha-beta leaves, so it
+        // must honor draw rules independently of the full-width search.
+        // In particular, a TT entry cannot safely stand in for this check:
+        // repetition history and the halfmove clock are not in its key.
+        if self.is_search_draw(ply) {
+            return 0;
+        }
+
+        if let Some(score) = self.exact_endgame_score(ply) {
+            return score;
+        }
+
+        let in_check = self.board.is_in_check(self.board.side_to_move());
+        let claim_next_move = self.board.halfmove_clock() == FIFTY_MOVE_RULE_HALFMOVES - 1;
+        let depth_limit = MAX_QSEARCH_DEPTH + if in_check { QSEARCH_CHECK_EXTENSION } else { 0 };
+        // Keep searching evasions briefly past the capture horizon. The
+        // full-width search can already have reached the fixed stack limit.
+        if ply >= crate::board::MAX_PLY || qdepth >= depth_limit {
+            return self.score_at_search_limit(ply);
+        }
+
+        // At the fifty-move boundary, quiet moves can force a draw,
+        // deliver mate before the claim, or reset the clock with a pawn.
+        let search_all_moves = in_check || claim_next_move;
+        let stand_pat = if search_all_moves {
+            -SCORE_INFINITE
+        } else {
+            self.evaluate_static(ply)
+        };
+        let mut best_score = stand_pat;
+
+        if !search_all_moves && stand_pat >= beta {
+            return if self.board.has_legal_move_out_of_check() {
+                stand_pat
+            } else {
+                0
+            };
+        }
+        alpha = alpha.max(stand_pat);
+
+        let mut moves = MoveList::new();
+        if in_check {
+            self.board.generate_evasions_into(&mut moves);
+        } else if claim_next_move {
+            self.board.generate_moves_into(&mut moves);
+        } else {
+            self.board.generate_tactical_moves_into(&mut moves);
+        }
+        if moves.is_empty() {
+            return if in_check {
+                -MATE_SCORE + ply as i32
+            } else if !search_all_moves && self.board.has_legal_move_out_of_check() {
+                stand_pat
+            } else {
+                0
+            };
+        }
+
+        self.order_quiescence_moves(&mut moves);
+        for &m in &moves {
             if self.should_stop() {
                 // `best_score` is negative infinity while in check. Returning
                 // it on interruption can poison the parent search with a
@@ -157,34 +173,31 @@ impl SimpleSearchContext<'_> {
                 return 0;
             }
 
-            let m = scored.mv;
-
             // Skip non-capture moves in quiescence (shouldn't happen but be safe)
-            if !in_check && !m.is_capture() && !m.is_promotion() {
+            if !search_all_moves && !m.is_tactical() {
                 continue;
             }
 
-            let prune_capture =
-                !in_check && self.should_prune_quiescence_capture(m, stand_pat, alpha, qdepth);
-
-            // Update NNUE accumulator before make_move
-            if let Some((_, piece)) = self.board.piece_at(m.from()) {
-                self.update_accumulator_for_move(ply, m, piece, self.board.side_to_move());
-            }
-
-            let info = self.board.make_move(m);
-            // Exchange and material estimates cannot reject a checking
-            // sacrifice, including mate protected by an absolute pin.
-            if prune_capture && !self.board.is_in_check(self.board.side_to_move()) {
-                self.board.unmake_move(m, info);
+            let Some((_, piece)) = self.board.piece_at(m.from()) else {
                 continue;
+            };
+            // A checking sacrifice or immediate draw can succeed even when
+            // the material estimate predicts that the capture loses.
+            if !search_all_moves
+                && self.should_prune_quiescence_capture(m, piece, stand_pat, alpha, qdepth)
+            {
+                let saves_draw = alpha < 0
+                    && !m.is_en_passant()
+                    && self.board.is_insufficient_material_without(m.to());
+                if !saves_draw && !self.board.capture_gives_check(m, piece) {
+                    continue;
+                }
             }
-            if !self.try_visit_node() {
-                self.board.unmake_move(m, info);
-                return 0;
-            }
+
+            let info = self.board.make_search_move(m);
             // Prefetch TT for child position
             self.state.tables.tt.prefetch(self.board.hash);
+            self.update_accumulator_for_move(ply, m, piece, info.captured_piece_info);
             let score = -self.quiesce(-beta, -alpha, ply + 1, qdepth + 1);
             self.board.unmake_move(m, info);
 
@@ -206,12 +219,29 @@ impl SimpleSearchContext<'_> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicBool;
-    use std::time::Instant;
 
-    use crate::board::nnue::NnueAccumulator;
-    use crate::board::{Board, SearchState, EMPTY_MOVE, MAX_PLY};
+    use crate::board::{Board, SearchState};
 
-    use super::{SimpleSearchContext, MATE_SCORE, MAX_QSEARCH_DEPTH, SCORE_INFINITE};
+    use super::{MATE_SCORE, MAX_QSEARCH_DEPTH, SCORE_INFINITE};
+
+    #[test]
+    fn quiescence_searches_quiet_moves_at_the_fifty_move_boundary() {
+        for (fen, expected) in [
+            ("7k/8/8/8/8/8/2B5/K5R1 w - - 99 1", 0),
+            ("7k/8/8/8/8/8/1B6/K5R1 b - - 99 1", 0),
+            ("7k/5K2/8/8/8/8/B7/R7 w - - 99 1", MATE_SCORE - 2),
+        ] {
+            let mut board = Board::from_fen(fen);
+            let mut state = SearchState::new(1);
+            let stop = AtomicBool::new(false);
+            let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
+            assert_eq!(
+                ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 1, 0),
+                expected,
+                "{fen}"
+            );
+        }
+    }
 
     #[test]
     fn quiescence_keeps_checkmating_capture_despite_delta_pruning() {
@@ -232,34 +262,30 @@ mod tests {
     }
 
     #[test]
+    fn en_passant_capture_can_discover_check_through_both_removed_pawns() {
+        let mut board = Board::from_fen("8/8/8/R4pPk/8/8/8/K7 w - f6 0 1");
+        let mv = board.parse_move("g5f6").unwrap();
+
+        assert!(board.capture_gives_check(mv, crate::board::Piece::Pawn));
+    }
+
+    #[test]
+    fn quiescence_searches_capture_that_secures_insufficient_material_draw() {
+        let mut board = Board::from_fen("7k/8/8/8/5b2/6b1/pK6/8 w - - 0 1");
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
+        ctx.init_accumulator(1);
+
+        assert_eq!(ctx.quiesce(-1, 0, 1, 0), 0);
+    }
+
+    #[test]
     fn quiescence_recognizes_checkmate_at_depth_limit() {
         let mut board = Board::from_fen("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1");
         let mut state = SearchState::new(1);
         let stop = AtomicBool::new(false);
-        let mut ctx = SimpleSearchContext {
-            board: &mut board,
-            state: &mut state,
-            stop: &stop,
-            start_time: Instant::now(),
-            time_limit_ms: 0,
-            hard_time_limit_ms: 0,
-            clock: None,
-            time_share: 1,
-            node_limit: 0,
-            nodes: 0,
-            futility_margin: 0,
-            initial_depth: 1,
-            static_eval: [0; MAX_PLY],
-            previous_move: [EMPTY_MOVE; MAX_PLY],
-            previous_piece: [None; MAX_PLY],
-            line_hashes: [0; MAX_PLY],
-            info_callback: None,
-            root_moves: Vec::new(),
-            root_moves_restricted: false,
-            root_best_move: None,
-            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-        };
+        let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
 
         assert_eq!(
             ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 0, MAX_QSEARCH_DEPTH),
@@ -268,34 +294,23 @@ mod tests {
     }
 
     #[test]
+    fn quiescence_can_capture_a_checking_piece_at_the_capture_horizon() {
+        let mut board = Board::from_fen("7k/8/8/8/8/8/4r3/4K3 w - - 0 1");
+        let mut state = SearchState::new(1);
+        let stop = AtomicBool::new(false);
+        let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
+        assert_eq!(
+            ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 1, MAX_QSEARCH_DEPTH),
+            0
+        );
+    }
+
+    #[test]
     fn quiescence_returns_draw_score_for_fifty_move_position() {
         let mut board = Board::from_fen("7k/8/8/8/8/8/3Q4/K7 w - - 100 1");
         let mut state = SearchState::new(1);
         let stop = AtomicBool::new(false);
-        let mut ctx = SimpleSearchContext {
-            board: &mut board,
-            state: &mut state,
-            stop: &stop,
-            start_time: Instant::now(),
-            time_limit_ms: 0,
-            hard_time_limit_ms: 0,
-            clock: None,
-            time_share: 1,
-            node_limit: 0,
-            nodes: 0,
-            futility_margin: 0,
-            initial_depth: 1,
-            static_eval: [0; MAX_PLY],
-            previous_move: [EMPTY_MOVE; MAX_PLY],
-            previous_piece: [None; MAX_PLY],
-            line_hashes: [0; MAX_PLY],
-            info_callback: None,
-            root_moves: Vec::new(),
-            root_moves_restricted: false,
-            root_best_move: None,
-            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-        };
+        let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
 
         assert_eq!(ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 0, 0), 0);
     }
@@ -314,7 +329,7 @@ mod tests {
         let mut state = SearchState::new(1);
         let stop = AtomicBool::new(false);
         let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
-        ctx.line_hashes[0] = repeated_hash;
+        ctx.line.hashes[0] = repeated_hash;
 
         assert_eq!(ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 4, 0), 0);
     }
@@ -324,30 +339,7 @@ mod tests {
         let mut board = Board::from_fen("k7/8/1QK5/8/8/8/8/8 b - - 0 1");
         let mut state = SearchState::new(1);
         let stop = AtomicBool::new(false);
-        let mut ctx = SimpleSearchContext {
-            board: &mut board,
-            state: &mut state,
-            stop: &stop,
-            start_time: Instant::now(),
-            time_limit_ms: 0,
-            hard_time_limit_ms: 0,
-            clock: None,
-            time_share: 1,
-            node_limit: 0,
-            nodes: 0,
-            futility_margin: 0,
-            initial_depth: 1,
-            static_eval: [0; MAX_PLY],
-            previous_move: [EMPTY_MOVE; MAX_PLY],
-            previous_piece: [None; MAX_PLY],
-            line_hashes: [0; MAX_PLY],
-            info_callback: None,
-            root_moves: Vec::new(),
-            root_moves_restricted: false,
-            root_best_move: None,
-            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-        };
+        let mut ctx = super::super::test_context(&mut board, &mut state, &stop);
 
         assert_eq!(ctx.quiesce(-SCORE_INFINITE, SCORE_INFINITE, 0, 0), 0);
     }
@@ -365,31 +357,14 @@ mod tests {
             .expect("capture promotion");
         let mut state = SearchState::new(1);
         let stop = AtomicBool::new(false);
-        let ctx = SimpleSearchContext {
-            board: &mut board,
-            state: &mut state,
-            stop: &stop,
-            start_time: Instant::now(),
-            time_limit_ms: 0,
-            hard_time_limit_ms: 0,
-            clock: None,
-            time_share: 1,
-            node_limit: 0,
-            nodes: 0,
-            futility_margin: 0,
-            initial_depth: 1,
-            static_eval: [0; MAX_PLY],
-            previous_move: [EMPTY_MOVE; MAX_PLY],
-            previous_piece: [None; MAX_PLY],
-            line_hashes: [0; MAX_PLY],
-            info_callback: None,
-            root_moves: Vec::new(),
-            root_moves_restricted: false,
-            root_best_move: None,
-            acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-            static_acc_stack: vec![NnueAccumulator::default(); MAX_PLY + 16].into_boxed_slice(),
-        };
+        let ctx = super::super::test_context(&mut board, &mut state, &stop);
 
-        assert!(!ctx.should_prune_quiescence_capture(promotion, -1_000, 0, 0));
+        assert!(!ctx.should_prune_quiescence_capture(
+            promotion,
+            crate::board::Piece::Pawn,
+            -1_000,
+            0,
+            0
+        ));
     }
 }

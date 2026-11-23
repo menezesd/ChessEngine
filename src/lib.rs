@@ -63,13 +63,13 @@
 //! # Features
 //!
 //! - `serde` - Enable serialization for `Piece`, `Color`, `Square`, `Move`, and `CastlingRights`
-//! - `logging` - Enable optional debug logging via the `log` crate
+//! - `logging` - Retained for compatibility with older build commands
 
 // Enable pedantic lints with sensible domain-specific exceptions
 #![warn(clippy::pedantic)]
 // Bitboard hex literals are clearer without separators (bit patterns visible)
 #![allow(clippy::unreadable_literal)]
-// Chess engines have intentionally similar names (eval_mg/eval_eg, etc.)
+// Variables for middlegame and endgame scores often differ by one letter.
 #![allow(clippy::similar_names)]
 // Index casts are ubiquitous and safe in chess (board indices, square indices)
 #![allow(clippy::cast_possible_truncation)]

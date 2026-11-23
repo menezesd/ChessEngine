@@ -54,3 +54,29 @@ fn test_endgame_patterns_symmetry() {
         "symmetric kings should have near-zero eg: {eg}"
     );
 }
+
+#[test]
+fn single_pawn_rook_eval_is_color_symmetric() {
+    let white_pawn: Board = "4r3/R7/4P3/8/8/7k/3K4/8 w - - 0 1".parse().unwrap();
+    let black_pawn: Board = "8/3k4/7K/8/8/4p3/r7/4R3 b - - 0 1".parse().unwrap();
+    let white_score = white_pawn.single_pawn_rook_eval().unwrap();
+    assert_eq!(black_pawn.single_pawn_rook_eval(), Some(-white_score));
+    assert_eq!(white_pawn.evaluate_simple(), black_pawn.evaluate_simple());
+}
+
+#[test]
+fn single_pawn_rook_eval_requires_a_rook_on_each_side() {
+    let board: Board = "8/R7/4P3/8/8/7k/3K3R/8 w - - 0 1".parse().unwrap();
+    assert_eq!(board.single_pawn_rook_eval(), None);
+}
+
+#[test]
+fn rook_versus_pawn_accounts_for_supported_promotion_threats() {
+    let slower = Board::from_fen("7k/7r/1K6/8/P7/8/8/8 w - - 0 1");
+    let advanced = Board::from_fen("7k/7r/PK6/8/8/8/8/8 w - - 0 1");
+    let mirrored = Board::from_fen("8/8/8/8/8/pk6/7R/7K b - - 0 1");
+    let slower = slower.single_pawn_rook_eval().unwrap();
+    let advanced = advanced.single_pawn_rook_eval().unwrap();
+    assert!(slower < advanced);
+    assert_eq!(mirrored.single_pawn_rook_eval(), Some(-advanced));
+}

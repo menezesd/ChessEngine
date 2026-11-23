@@ -37,7 +37,7 @@ def parse_epd(line):
     operations = board.set_epd(line)
     if not operations.get("bm"):
         return None, None, None
-    return board.fen(), [board.san(move) for move in operations["bm"]], operations.get("id", "unknown")
+    return board.fen(en_passant="fen"), [board.san(move) for move in operations["bm"]], operations.get("id", "unknown")
 
 
 def iter_epd(path, limit):
@@ -46,7 +46,7 @@ def iter_epd(path, limit):
         for line in source:
             if total >= limit:
                 break
-            if not line.strip():
+            if not line.strip() or line.lstrip().startswith("#"):
                 continue
             parsed = parse_epd(line)
             if parsed[0] is not None:

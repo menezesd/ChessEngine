@@ -113,7 +113,7 @@ fn aspiration_search_resolves_a_mate_bound_before_reporting_its_distance() {
 
 #[test]
 fn multipv_does_not_replace_the_unrestricted_root_score() {
-    let mut board = Board::from_fen("7k/8/8/8/3q4/8/3R4/6K1 w - - 0 1");
+    let mut board = Board::from_fen("7k/8/8/8/3q4/8/P2R4/6K1 w - - 0 1");
     let mut state = SearchState::new(1);
     let stop = AtomicBool::new(false);
     let reports = Arc::new(Mutex::new(Vec::new()));
@@ -152,6 +152,23 @@ fn multipv_does_not_replace_the_unrestricted_root_score() {
     state.new_search();
     let result = search(&mut board, &mut state, SearchConfig::depth(3), &stop);
     assert_eq!(result.best_move.unwrap().to_string(), "d2d4");
+}
+
+#[test]
+fn iterative_search_finishes_as_soon_as_it_proves_mate_in_one() {
+    let mut board = Board::from_fen("6k1/5ppp/8/8/8/8/8/4Q2K w - - 0 1");
+    let mut state = SearchState::new(1);
+    let mating_move = board.parse_move("e1e8").unwrap();
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let received = Arc::clone(&reports);
+    let config = SearchConfig::depth(12).with_info_callback(Arc::new(move |info| {
+        received.lock().unwrap().push((info.depth, info.mate_in));
+    }));
+
+    let result = search(&mut board, &mut state, config, &AtomicBool::new(false));
+
+    assert_eq!(result.best_move, Some(mating_move));
+    assert_eq!(*reports.lock().unwrap(), vec![(1, Some(1))]);
 }
 
 #[test]
@@ -443,6 +460,60 @@ fn interrupted_first_iteration_does_not_report_an_unsearched_score() {
 }
 
 #[test]
+fn iteration_that_uses_exactly_the_node_budget_is_kept() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let reference = search(&mut board, &mut state, SearchConfig::depth(1), &stop);
+    let nodes_at_depth_one = state.stats.nodes;
+    assert!(nodes_at_depth_one > 1);
+
+    for (nodes, expected_depth) in [
+        (nodes_at_depth_one - 1, None),
+        (nodes_at_depth_one, Some(1)),
+    ] {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&reports);
+        let mut state = SearchState::new(1);
+        let config = SearchConfig::depth(6)
+            .with_nodes(nodes)
+            .with_info_callback(Arc::new(move |info| {
+                seen.lock().unwrap().push(info.depth);
+            }));
+        let result = search(&mut board, &mut state, config, &stop);
+        assert_eq!(reports.lock().unwrap().last().copied(), expected_depth);
+        assert_eq!(state.stats.nodes, nodes);
+        if expected_depth.is_some() {
+            assert_eq!(result.best_move, reference.best_move);
+        }
+    }
+}
+
+#[test]
+fn stopped_search_uses_a_legal_cached_root_move_when_allowed() {
+    let mut board = Board::new();
+    let cached = board.parse_move("e2e4").unwrap();
+    let restricted = board.parse_move("d2d4").unwrap();
+    let mut state = SearchState::new(1);
+    state.tables.tt.store(
+        board.hash(),
+        8,
+        10,
+        crate::tt::BoundType::Exact,
+        Some(cached),
+        0,
+    );
+    let stop = AtomicBool::new(true);
+
+    let result = search(&mut board, &mut state, SearchConfig::depth(6), &stop);
+    assert_eq!(result.best_move, Some(cached));
+    let config = SearchConfig::depth(6).with_root_moves(vec![restricted]);
+    let result = search(&mut board, &mut state, config, &stop);
+    assert_eq!(result.best_move, Some(restricted));
+    assert_eq!(state.stats.nodes, 0);
+}
+
+#[test]
 fn multipv_respects_an_expired_live_clock() {
     let mut board = Board::new();
     let mut state = SearchState::new(1);
@@ -483,8 +554,14 @@ fn multipv_observes_deadlines_installed_during_search() {
 
     assert!(result.best_move.is_some_and(|mv| board.is_legal_move(mv)));
     let reports = reports.lock().unwrap();
-    assert!(state.stats.total_nodes <= reports[0].nodes + 1024);
-    assert!(reports.iter().all(|info| info.multipv == 1));
+    assert_eq!(state.stats.total_nodes, reports[0].nodes);
+    assert_eq!(
+        reports
+            .iter()
+            .map(|info| (info.depth, info.multipv))
+            .collect::<Vec<_>>(),
+        vec![(1, 1), (1, 2), (1, 3)]
+    );
 }
 
 #[test]
@@ -498,21 +575,48 @@ fn multipv_info_callback_reports_each_requested_line() {
         callback_lines
             .lock()
             .expect("callback mutex poisoned")
-            .push(info.multipv);
+            .push((info.depth, info.multipv));
     });
 
     let _ = search(
         &mut board,
         &mut state,
-        SearchConfig::depth(1)
+        SearchConfig::depth(2)
             .with_multi_pv(2)
             .with_info_callback(callback),
         &stop,
     );
 
     let reported = reported.lock().expect("callback mutex poisoned");
-    assert!(reported.contains(&1), "first PV line was not reported");
-    assert!(reported.contains(&2), "second PV line was not reported");
+    assert_eq!(&*reported, &[(1, 1), (1, 2), (2, 1), (2, 2)]);
+}
+
+#[test]
+fn multipv_keeps_completed_depth_when_the_next_group_is_interrupted() {
+    let mut board = Board::new();
+    let mut state = SearchState::new(1);
+    let stop = AtomicBool::new(false);
+    let config = SearchConfig::depth(1).with_multi_pv(3);
+    let first = search(&mut board, &mut state, config, &stop);
+    let node_limit = state.stats.nodes + 20;
+
+    let mut state = SearchState::new(1);
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
+    let config = SearchConfig::depth(3)
+        .with_multi_pv(3)
+        .with_nodes(node_limit)
+        .with_info_callback(Arc::new(move |info| {
+            callback_reports
+                .lock()
+                .unwrap()
+                .push((info.depth, info.multipv));
+        }));
+    let result = search(&mut board, &mut state, config, &stop);
+
+    assert_eq!(result.best_move, first.best_move);
+    assert_eq!(state.stats.nodes, node_limit);
+    assert_eq!(*reports.lock().unwrap(), vec![(1, 1), (1, 2), (1, 3)]);
 }
 
 #[test]
@@ -554,7 +658,7 @@ fn root_move_restrictions_apply_to_interrupted_and_empty_searches() {
 
 #[test]
 fn restricted_search_preserves_the_unrestricted_transposition_score() {
-    let mut board = Board::from_fen("7k/8/8/8/3q4/8/3R4/6K1 w - - 0 1");
+    let mut board = Board::from_fen("7k/8/8/8/3q4/8/P2R4/6K1 w - - 0 1");
     let mut state = SearchState::new(1);
     let stop = AtomicBool::new(false);
     let capture = board.parse_move("d2d4").unwrap();

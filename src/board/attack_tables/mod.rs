@@ -8,105 +8,88 @@
 
 mod tables;
 
-pub(crate) use tables::{KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS};
-
-use std::sync::LazyLock;
+pub(crate) use tables::{pawn_attacks_from_bitboard, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS};
 
 // File mask for column A
-const FILE_A: u64 = 0x0101010101010101;
+const FILE_A: u64 = 0x0101_0101_0101_0101;
 
-/// Diagonal masks for each square (bottom-left to top-right direction)
-static DIAG_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
-    let mut masks = [0u64; 64];
-    for sq in 0..64 {
-        let rank = sq / 8;
-        let file = sq % 8;
-        let mut mask = 0u64;
-        // Go in both directions along the diagonal
-        let mut r = rank as isize;
-        let mut f = file as isize;
-        while r < 8 && f < 8 {
-            mask |= 1u64 << (r * 8 + f);
-            r += 1;
-            f += 1;
+static DIAG_MASKS: [u64; 64] = diagonal_masks(1);
+static ANTI_MASKS: [u64; 64] = diagonal_masks(-1);
+static DIAGONAL_RAYS: [u64; 64] = rays(true);
+static STRAIGHT_RAYS: [u64; 64] = rays(false);
+static RANK_ATTACKS: [u8; 512] = rank_attack_table();
+
+const fn diagonal_masks(file_step: isize) -> [u64; 64] {
+    let mut masks = [0; 64];
+    let mut square = 0;
+    while square < 64 {
+        let rank = (square / 8) as isize;
+        let file = (square % 8) as isize;
+        let mut row = 0;
+        let mut mask = 0;
+        while row < 8 {
+            let column = file + (row - rank) * file_step;
+            if column >= 0 && column < 8 {
+                mask |= 1 << (row * 8 + column);
+            }
+            row += 1;
         }
-        r = rank as isize - 1;
-        f = file as isize - 1;
-        while r >= 0 && f >= 0 {
-            mask |= 1u64 << (r * 8 + f);
-            r -= 1;
-            f -= 1;
-        }
-        masks[sq] = mask;
+        masks[square] = mask;
+        square += 1;
     }
     masks
-});
+}
 
-/// Anti-diagonal masks for each square (top-left to bottom-right direction)
-static ANTI_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
-    let mut masks = [0u64; 64];
-    for sq in 0..64 {
-        let rank = sq / 8;
-        let file = sq % 8;
-        let mut mask = 0u64;
-        // Go in both directions along the anti-diagonal
-        let mut r = rank as isize;
-        let mut f = file as isize;
-        while r < 8 && f >= 0 {
-            mask |= 1u64 << (r * 8 + f);
-            r += 1;
-            f -= 1;
-        }
-        r = rank as isize - 1;
-        f = file as isize + 1;
-        while r >= 0 && f < 8 {
-            mask |= 1u64 << (r * 8 + f);
-            r -= 1;
-            f += 1;
-        }
-        masks[sq] = mask;
+const fn rays(diagonal: bool) -> [u64; 64] {
+    let mut masks = [0; 64];
+    let mut square = 0;
+    while square < 64 {
+        let lines = if diagonal {
+            DIAG_MASKS[square] | ANTI_MASKS[square]
+        } else {
+            (FILE_A << (square % 8)) | (0xff << (square & 0b11_1000))
+        };
+        masks[square] = lines & !(1 << square);
+        square += 1;
     }
     masks
-});
+}
 
-/// File masks for each square
-static FILE_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
-    let mut masks = [0u64; 64];
-    for sq in 0..64 {
-        let file = sq % 8;
-        masks[sq] = FILE_A << file;
-    }
-    masks
-});
-
-/// Rank attack lookup table: `[8 * occupancy_6bit + file]` -> attacks on that rank
-/// Only stores attacks for file positions, shifted to rank 0
-static RANK_ATTACKS: LazyLock<[u64; 512]> = LazyLock::new(|| {
-    let mut attacks = [0u64; 512];
-    for occ_6bit in 0..64 {
-        for file in 0..8 {
-            let mut attack = 0u64;
-            // Attacks to the right (increasing file)
-            for f in (file + 1)..8 {
-                attack |= 1u64 << f;
-                // Check if blocked (occupancy is bits 1-6, representing files b-g)
-                if (1..=6).contains(&f) && (occ_6bit & (1 << (f - 1))) != 0 {
+/// Each entry is a rank-zero attack mask. Only files b-g can block a
+/// ray before its edge, so six occupancy bits identify the attack.
+const fn rank_attack_table() -> [u8; 512] {
+    let mut attacks = [0; 512];
+    let mut occupancy = 0;
+    while occupancy < 64 {
+        let mut file = 0;
+        while file < 8 {
+            let blockers = (occupancy as u8) << 1;
+            let mut attack = 0;
+            let mut right = file + 1;
+            while right < 8 {
+                let target = 1 << right;
+                attack |= target;
+                if blockers & target != 0 {
+                    break;
+                }
+                right += 1;
+            }
+            let mut left = file;
+            while left > 0 {
+                left -= 1;
+                let target = 1 << left;
+                attack |= target;
+                if blockers & target != 0 {
                     break;
                 }
             }
-            // Attacks to the left (decreasing file)
-            for f in (0..file).rev() {
-                attack |= 1u64 << f;
-                // Check if blocked
-                if (1..=6).contains(&f) && (occ_6bit & (1 << (f - 1))) != 0 {
-                    break;
-                }
-            }
-            attacks[8 * occ_6bit + file] = attack;
+            attacks[8 * occupancy + file] = attack;
+            file += 1;
         }
+        occupancy += 1;
     }
     attacks
-});
+}
 
 /// Byteswap - reverses the order of bytes (flips board vertically)
 #[inline(always)]
@@ -141,7 +124,7 @@ fn anti_attacks(occupied: u64, square: usize) -> u64 {
 /// File attacks (vertical)
 #[inline(always)]
 fn file_attacks(occupied: u64, square: usize) -> u64 {
-    hyp_quint(occupied, FILE_MASKS[square], square)
+    hyp_quint(occupied, FILE_A << (square % 8), square)
 }
 
 /// Rank attacks (horizontal) - uses lookup table since byteswap doesn't help
@@ -152,7 +135,7 @@ fn rank_attacks(occupied: u64, square: usize) -> u64 {
     let rank_occ = occupied >> (rank * 8);
     // Extract bits 1-6 (files b-g) as the relevant occupancy
     let occ_6bit = ((rank_occ >> 1) & 63) as usize;
-    RANK_ATTACKS[8 * occ_6bit + file] << (rank * 8)
+    u64::from(RANK_ATTACKS[8 * occ_6bit + file]) << (rank * 8)
 }
 
 /// Get sliding attacks for a piece.
@@ -183,6 +166,18 @@ pub(crate) fn rook_attacks(square: usize, occupancy: u64) -> u64 {
 #[inline]
 pub(crate) fn queen_attacks(square: usize, occupancy: u64) -> u64 {
     bishop_attacks(square, occupancy) | rook_attacks(square, occupancy)
+}
+
+/// Squares geometrically aligned with a bishop, before accounting for blockers.
+#[inline]
+pub(crate) fn diagonal_rays(square: usize) -> u64 {
+    DIAGONAL_RAYS[square]
+}
+
+/// Squares geometrically aligned with a rook, before accounting for blockers.
+#[inline]
+pub(crate) fn straight_rays(square: usize) -> u64 {
+    STRAIGHT_RAYS[square]
 }
 
 #[cfg(test)]

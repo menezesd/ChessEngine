@@ -9,9 +9,14 @@
 /// Maximum quiescence search depth to prevent explosion
 /// Higher values find more tactics but increase nodes searched
 pub const MAX_QSEARCH_DEPTH: i32 = 12;
+/// Extra plies at the quiescence horizon for positions in check.
+pub const QSEARCH_CHECK_EXTENSION: i32 = 2;
 
 /// Default full-width search depth when no explicit depth is supplied.
 pub const DEFAULT_MAX_DEPTH: u32 = 64;
+
+/// Stack space for recursive searches and their move lists.
+pub(crate) const SEARCH_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 /// Scores with absolute value >= this are considered checkmate scores
 pub const MATE_THRESHOLD: i32 = 28000;
@@ -29,7 +34,7 @@ pub const SCORE_NEAR_MATE: i32 = 20000;
 // ============================================================================
 // MOVE ORDERING PRIORITIES
 // ============================================================================
-// Higher scores = tried earlier. Ordered: TT > killers > counter > captures > quiet
+// Higher scores = tried earlier. Ordered: TT > captures > killers > counter > quiet
 
 /// Hash move (from transposition table) - highest priority
 pub const TT_MOVE_SCORE: i32 = 1 << 20;

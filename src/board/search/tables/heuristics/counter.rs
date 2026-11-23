@@ -1,7 +1,7 @@
 use crate::board::{Move, Piece, EMPTY_MOVE};
 
 const BOARD_SQUARES: usize = 64;
-const HISTORY_OUTER_SIZE: usize = 384;
+const HISTORY_OUTER_SIZE: usize = Piece::ALL.len() * BOARD_SQUARES;
 const HISTORY_INNER_SIZE: usize = BOARD_SQUARES * BOARD_SQUARES;
 const HISTORY_MAX: i16 = 16000;
 
@@ -52,7 +52,7 @@ impl CounterMoveTable {
 /// We use 6 piece types * 64 squares = 384 outer slots, each with 4096 inner entries.
 pub struct ContinuationHistory {
     /// [piece * 64 + to] -> [from * 64 + to] -> score
-    entries: Box<[[i16; HISTORY_INNER_SIZE]; HISTORY_OUTER_SIZE]>,
+    entries: Box<[[i16; HISTORY_INNER_SIZE]]>,
 }
 
 impl Default for ContinuationHistory {
@@ -65,7 +65,7 @@ impl ContinuationHistory {
     #[must_use]
     pub fn new() -> Self {
         ContinuationHistory {
-            entries: Box::new([[0i16; HISTORY_INNER_SIZE]; HISTORY_OUTER_SIZE]),
+            entries: vec![[0i16; HISTORY_INNER_SIZE]; HISTORY_OUTER_SIZE].into_boxed_slice(),
         }
     }
 
@@ -113,14 +113,11 @@ impl ContinuationHistory {
     }
 }
 
-/// Countermove history table - tracks what responses work well against opponent moves.
-///
-/// Unlike continuation history (which uses our previous move), this uses the opponent's
-/// previous move (`prev_piece`, `prev_to`) and our current move's piece type.
+/// Countermove history groups replies by moving piece and destination square.
 /// Indexed by `[opp_piece * 64 + opp_to][our_piece * 64 + our_to]`.
 pub struct CountermoveHistory {
     /// `[prev_piece * 64 + prev_to]` -> `[piece * 64 + to]` -> score
-    entries: Box<[[i16; HISTORY_INNER_SIZE]; HISTORY_OUTER_SIZE]>,
+    entries: Box<[[i16; HISTORY_OUTER_SIZE]]>,
 }
 
 impl Default for CountermoveHistory {
@@ -133,7 +130,7 @@ impl CountermoveHistory {
     #[must_use]
     pub fn new() -> Self {
         CountermoveHistory {
-            entries: Box::new([[0i16; HISTORY_INNER_SIZE]; HISTORY_OUTER_SIZE]),
+            entries: vec![[0i16; HISTORY_OUTER_SIZE]; HISTORY_OUTER_SIZE].into_boxed_slice(),
         }
     }
 

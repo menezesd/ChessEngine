@@ -172,6 +172,25 @@ impl Move {
         self.flag() == flags::CASTLE_QUEENSIDE
     }
 
+    pub(in crate::board) const fn castling_rook_squares(self) -> (Square, Square) {
+        debug_assert!(self.is_castling());
+        let rank = self.from().rank();
+        if self.is_castle_kingside() {
+            (Square::new(rank, 7), Square::new(rank, 5))
+        } else {
+            (Square::new(rank, 0), Square::new(rank, 3))
+        }
+    }
+
+    /// Square vacated by a capture, including the pawn taken en passant.
+    pub(in crate::board) const fn capture_square(self) -> Square {
+        if self.is_en_passant() {
+            Square::new(self.from().rank(), self.to().file())
+        } else {
+            self.to()
+        }
+    }
+
     /// Returns true if this move is a double pawn push
     #[inline]
     #[must_use]

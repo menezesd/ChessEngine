@@ -19,13 +19,6 @@ pub(super) struct TTSlot {
 }
 
 impl TTSlot {
-    fn new() -> Self {
-        TTSlot {
-            key_xor: AtomicU64::new(0),
-            data: AtomicU64::new(0),
-        }
-    }
-
     pub(super) fn store(&self, hash: u64, packed: u64) {
         self.data.store(packed, Ordering::Relaxed);
         self.key_xor.store(hash ^ packed, Ordering::Relaxed);
@@ -46,43 +39,33 @@ impl TTSlot {
         self.data.load(Ordering::Relaxed) == 0
     }
 
-    pub(super) fn generation(&self) -> u8 {
+    fn replacement_priority(&self, generation: u8) -> i32 {
         let data = self.data.load(Ordering::Relaxed);
-        if data == 0 {
-            0
-        } else {
-            let bound_gen = ((data >> BOUND_GEN_SHIFT) & BYTE_MASK) as u8;
-            (bound_gen >> GENERATION_SHIFT) & GENERATION_MASK
-        }
-    }
-
-    pub(super) fn depth(&self) -> u8 {
-        let data = self.data.load(Ordering::Relaxed);
-        ((data >> DEPTH_SHIFT) & BYTE_MASK) as u8
+        let bound_gen = ((data >> BOUND_GEN_SHIFT) & BYTE_MASK) as u8;
+        let entry_generation = (bound_gen >> GENERATION_SHIFT) & GENERATION_MASK;
+        let age = generation.wrapping_sub(entry_generation) & GENERATION_MASK;
+        let depth = ((data >> DEPTH_SHIFT) & BYTE_MASK) as i32;
+        depth * 2 - i32::from(age)
     }
 
     pub(super) fn clear(&self) {
-        self.key_xor.store(0, Ordering::Relaxed);
-        self.data.store(0, Ordering::Relaxed);
+        if !self.is_empty() {
+            self.key_xor.store(0, Ordering::Relaxed);
+            self.data.store(0, Ordering::Relaxed);
+        }
     }
 }
 
 /// Number of slots per bucket for collision resolution.
 pub(super) const BUCKET_SIZE: usize = 4;
 
-/// A bucket containing multiple slots.
+/// Four 16-byte slots with the atomic fields' natural alignment.
 #[repr(C)]
 pub(super) struct TTBucket {
     pub(super) slots: [TTSlot; BUCKET_SIZE],
 }
 
 impl TTBucket {
-    pub(super) fn new() -> Self {
-        TTBucket {
-            slots: [TTSlot::new(), TTSlot::new(), TTSlot::new(), TTSlot::new()],
-        }
-    }
-
     pub(super) fn probe(&self, hash: u64) -> Option<TTEntry> {
         for slot in &self.slots {
             if let Some(entry) = slot.probe(hash) {
@@ -94,7 +77,9 @@ impl TTBucket {
 
     pub(super) fn store(&self, hash: u64, packed: u64, generation: u8) {
         let slot = self
-            .available_slot(hash)
+            .slots
+            .iter()
+            .find(|slot| slot.is_empty() || slot.probe(hash).is_some())
             .unwrap_or_else(|| self.replacement_slot(generation));
         slot.store(hash, packed);
     }
@@ -109,21 +94,10 @@ impl TTBucket {
         }
     }
 
-    fn available_slot(&self, hash: u64) -> Option<&TTSlot> {
-        self.slots
-            .iter()
-            .find(|slot| slot.is_empty() || slot.probe(hash).is_some())
-    }
-
     fn replacement_slot(&self, generation: u8) -> &TTSlot {
         self.slots
             .iter()
-            .min_by_key(|slot| replacement_priority(slot, generation))
+            .min_by_key(|slot| slot.replacement_priority(generation))
             .expect("TT bucket has at least one slot")
     }
-}
-
-fn replacement_priority(slot: &TTSlot, generation: u8) -> i32 {
-    let age = generation.wrapping_sub(slot.generation()) & 0x3F;
-    (slot.depth() as i32) * 2 - (age as i32)
 }

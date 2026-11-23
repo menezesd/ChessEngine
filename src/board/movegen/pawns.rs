@@ -1,4 +1,5 @@
-use super::super::{Board, Color, Move, MoveList, Piece, Square, PROMOTION_PIECES};
+use super::super::attack_tables::PAWN_ATTACKS;
+use super::super::{Bitboard, Board, Color, Move, MoveList, Piece, Square, PROMOTION_PIECES};
 
 impl Board {
     /// Add promotion moves for a pawn reaching the back rank
@@ -14,101 +15,76 @@ impl Board {
         from: Square,
         color: Color,
         promotion_rank: usize,
+        targets: u64,
         moves: &mut MoveList,
     ) {
-        let dir = color.pawn_direction();
-        let r = from.rank() as isize;
-        let f = from.file() as isize;
-        let forward_r = r + dir;
-
-        if !(0..8).contains(&forward_r) {
-            return;
-        }
-
-        for df in [-1, 1] {
-            let capture_f = f + df;
-            if !(0..8).contains(&capture_f) {
-                continue;
-            }
-
-            let target_sq = Square::new(forward_r as usize, capture_f as usize);
-
-            if let Some((target_color, _)) = self.piece_at(target_sq) {
-                if target_color != color {
-                    if target_sq.rank() == promotion_rank {
-                        self.add_promotions(from, target_sq, moves);
-                    } else {
-                        moves.push(self.create_simple_move(from, target_sq));
-                    }
+        let enemy = self.occupied_by(color.opponent()).0;
+        let en_passant = self
+            .en_passant_target
+            .map_or(0, |square| (1 << square.index()) & !self.all_occupied.0);
+        // En passant can remove a checker from a square other than the target.
+        let captures = PAWN_ATTACKS[color.index()][from.index()] & ((enemy & targets) | en_passant);
+        for to in Bitboard(captures).iter() {
+            if enemy & (1 << to.index()) != 0 {
+                if to.rank() == promotion_rank {
+                    self.add_promotions(from, to, moves);
+                } else {
+                    moves.push(Move::capture(from, to));
                 }
-            } else if Some(target_sq) == self.en_passant_target {
-                // A FEN en-passant square is only actionable when the pawn
-                // that just double-pushed is still beside the capturer. This
-                // is guaranteed in game play but must be checked for
-                // externally supplied FENs.
-                let captured_sq = Square::new(from.rank(), target_sq.file());
-                if self.piece_at(captured_sq) == Some((color.opponent(), Piece::Pawn)) {
-                    moves.push(Move::en_passant(from, target_sq));
+            } else {
+                // A FEN target is usable only with the captured pawn present.
+                let mv = Move::en_passant(from, to);
+                if self.piece_at(mv.capture_square()) == Some((color.opponent(), Piece::Pawn)) {
+                    moves.push(mv);
                 }
             }
         }
     }
 
-    pub(crate) fn generate_pawn_moves(&self, from: Square) -> MoveList {
+    pub(super) fn generate_pawn_moves(&self, from: Square, moves: &mut MoveList) {
+        self.generate_pawn_moves_to(from, u64::MAX, moves);
+    }
+
+    pub(super) fn generate_pawn_moves_to(&self, from: Square, targets: u64, moves: &mut MoveList) {
         let color = self.side_to_move();
-        let mut moves = MoveList::new();
-        let dir = color.pawn_direction();
-        let start_rank = color.pawn_start_rank();
+        let white = color == Color::White;
         let promotion_rank = color.pawn_promotion_rank();
 
-        let r = from.rank() as isize;
-        let f = from.file() as isize;
-
-        // Forward moves
-        let forward_r = r + dir;
-        if (0..8).contains(&forward_r) {
-            let forward_sq = Square::new(forward_r as usize, f as usize);
-            if self.is_empty(forward_sq) {
-                if forward_sq.rank() == promotion_rank {
-                    self.add_promotions(from, forward_sq, &mut moves);
-                } else {
-                    moves.push(self.create_simple_move(from, forward_sq));
-                    // Double push from starting rank
-                    if r == start_rank as isize {
-                        let double_forward_r = r + 2 * dir;
-                        let double_forward_sq = Square::new(double_forward_r as usize, f as usize);
-                        if self.is_empty(double_forward_sq) {
-                            moves.push(Move::double_pawn_push(from, double_forward_sq));
-                        }
+        if let Some(to) = from.forward(white).filter(|&to| self.is_empty(to)) {
+            let single_allowed = targets & (1 << to.index()) != 0;
+            if to.rank() == promotion_rank {
+                if single_allowed {
+                    self.add_promotions(from, to, moves);
+                }
+            } else {
+                if single_allowed {
+                    moves.push(Move::quiet(from, to));
+                }
+                if from.rank() == color.pawn_start_rank() {
+                    let double = to
+                        .forward(white)
+                        .expect("pawn double push stays on the board");
+                    if targets & (1 << double.index()) != 0 && self.is_empty(double) {
+                        moves.push(Move::double_pawn_push(from, double));
                     }
                 }
             }
         }
 
         // Captures (including en passant)
-        self.generate_pawn_captures(from, color, promotion_rank, &mut moves);
-
-        moves
+        self.generate_pawn_captures(from, color, promotion_rank, targets, moves);
     }
 
     pub(crate) fn generate_pawn_tactical_moves(&self, from: Square, moves: &mut MoveList) {
         let color = self.side_to_move();
-        let dir = color.pawn_direction();
         let promotion_rank = color.pawn_promotion_rank();
-
-        let r = from.rank() as isize;
-        let f = from.file() as isize;
-        let forward_r = r + dir;
-
-        // Forward promotion (non-capture)
-        if (0..8).contains(&forward_r) {
-            let forward_sq = Square::new(forward_r as usize, f as usize);
-            if forward_sq.rank() == promotion_rank && self.is_empty(forward_sq) {
-                self.add_promotions(from, forward_sq, moves);
+        if let Some(to) = from.forward(color == Color::White) {
+            if to.rank() == promotion_rank && self.is_empty(to) {
+                self.add_promotions(from, to, moves);
             }
         }
 
         // Captures (including en passant and capture-promotions)
-        self.generate_pawn_captures(from, color, promotion_rank, moves);
+        self.generate_pawn_captures(from, color, promotion_rank, u64::MAX, moves);
     }
 }

@@ -108,9 +108,21 @@ impl TimeControl {
         increment_sec: u32,
         moves_per_session: Option<u32>,
     ) -> Self {
+        Self::from_xboard_time_ms(
+            engine_time_cs,
+            seconds_to_ms(increment_sec),
+            moves_per_session,
+        )
+    }
+
+    pub(crate) fn from_xboard_time_ms(
+        engine_time_cs: u64,
+        inc_ms: u64,
+        moves_per_session: Option<u32>,
+    ) -> Self {
         TimeControl::Incremental {
             time_left_ms: centiseconds_to_ms(engine_time_cs),
-            inc_ms: seconds_to_ms(increment_sec),
+            inc_ms,
             movestogo: moves_per_session.map(u64::from),
         }
     }

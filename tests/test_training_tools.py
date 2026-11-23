@@ -1,5 +1,6 @@
 """Regression tests for training-data sampling and UCI label collection."""
 
+from collections import Counter
 from itertools import chain, repeat
 from pathlib import Path
 import importlib
@@ -14,6 +15,7 @@ import chess.pgn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import collect_hard_pairs
+import fit_joint_hce_pst
 import label_positions_engine
 import label_positions_static_eval
 import label_root_children_teacher
@@ -24,6 +26,7 @@ import label_epd_children_sf
 import label_stockfish_fens
 import stockfish_label
 import blunder_scan
+import wac_eval
 import wac_eval_nnue
 import test_checkpoint_wac
 import analyze_wac_nnue_disagreements
@@ -60,9 +63,31 @@ def scripted_engine(module, searches, stopped=()):
 
 
 class TrainingToolTests(unittest.TestCase):
+    def test_hce_fit_mirrors_black_piece_squares_by_rank(self):
+        balance = Counter()
+        for index, sign in fit_joint_hce_pst.fen_signed_squares(FEN):
+            balance[index] += sign
+        self.assertTrue(balance)
+        self.assertTrue(all(value == 0 for value in balance.values()))
+
+        squares = fit_joint_hce_pst.fen_signed_squares(
+            "7k/pn6/8/8/8/8/8/K7 b - - 0 1"
+        )
+        self.assertIn((8, -1), squares)
+        self.assertIn((64 + 9, -1), squares)
+
+    def test_hce_fit_keeps_duplicate_positions_out_of_both_splits(self):
+        same_position = " ".join(FEN.split()[:4]) + " 4 10"
+        other_position = "7k/pn6/8/8/8/8/8/K7 b - - 0 1"
+        train, validation = fit_joint_hce_pst.split_positions(
+            [FEN, other_position, same_position], 0.5, seed=19
+        )
+        self.assertEqual({tuple(train), tuple(validation)}, {(0, 2), (1,)})
+
     def test_wac_epd_parser_respects_operation_boundaries_and_quoted_ids(self):
-        epd = " ".join(FEN.split()[:4]) + ' bm e4; am d4; id "opening position one"; hmvc 17; fmvn 42;'
+        epd = " ".join(FEN.split()[:4]) + ' bm e4;am d4;id "opening position one"; hmvc 17; fmvn 42;'
         expected_fen = " ".join(FEN.split()[:4]) + " 17 42"
+        self.assertEqual(wac_eval.parse_epd_line(epd), (expected_fen, ["e4"], "opening position one"))
         self.assertEqual(wac_eval_nnue.parse_epd(epd), (expected_fen, ["e4"], "opening position one"))
         self.assertEqual(test_checkpoint_wac.parse_epd(epd), (expected_fen, ["e4"]))
 
@@ -71,7 +96,7 @@ class TrainingToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             epd = Path(directory) / "positions.epd"
             row = " ".join(FEN.split()[:4]) + ' bm e4; id "opening";\n'
-            epd.write_text("\n" + row + "\n" + row)
+            epd.write_text("\n# Test positions\n" + row + "\n" + row)
             for module in modules:
                 for failure in (False, True):
                     with self.subTest(tool=module.__name__, failure=failure):
@@ -177,6 +202,21 @@ class TrainingToolTests(unittest.TestCase):
                 if isinstance(score, tuple):
                     score = score[0]
                 self.assertLess(score, 0)
+
+    def test_selective_relabelling_preserves_scores_below_the_screen_threshold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "labels.txt"
+            source.write_text(f"{FEN} | 1.0\n{FEN} | 22.5 | 0.5\n")
+            unlabelled, previous = label_stockfish_fens.parse_rows(source, 0)
+
+        search = label_stockfish_fens.LabelSearch(18, 2000, 14, 40)
+        evaluator = Mock()
+        evaluator.evaluate.side_effect = [(62, False), (63, False), (110, False), (35, False)]
+        self.assertEqual(label_stockfish_fens.label_row(evaluator, previous, search), previous)
+        changed = label_stockfish_fens.label_row(evaluator, previous, search)
+        self.assertEqual((changed.score, changed.result), (110, "0.5"))
+        self.assertEqual(label_stockfish_fens.label_row(evaluator, unlabelled, search).score, 35)
+        self.assertEqual([call.args[1] for call in evaluator.evaluate.call_args_list], [14, 14, 18, 18])
 
     def test_pgn_reservoir_uses_all_seen_positions(self):
         with tempfile.TemporaryDirectory() as directory:

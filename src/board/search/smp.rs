@@ -14,15 +14,15 @@ mod worker;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
-use crate::board::Board;
+use crate::board::{draw::FIFTY_MOVE_RULE_HALFMOVES, Board};
 
 use super::{
-    constants::DEFAULT_MAX_DEPTH,
-    simple::{immediate_root_result, RootSearchResolution},
-    SearchConfig, SearchInfoCallback, SearchResult, SearchState,
+    constants::{DEFAULT_MAX_DEPTH, MATE_THRESHOLD},
+    SearchConfig, SearchInfoCallback, SearchResult, SearchState, SEARCH_THREAD_STACK_SIZE,
 };
-use worker::{run_worker, WorkerSearchConfig};
+use worker::{run_worker, WorkerOutcome};
 pub use worker::{SharedSearchState, WorkerResult};
 
 /// Configuration for SMP search
@@ -91,18 +91,6 @@ impl SmpConfig {
         }
     }
 
-    /// Extract worker search config from SMP config
-    fn to_worker_config(&self) -> WorkerSearchConfig {
-        WorkerSearchConfig {
-            max_depth: self.max_depth,
-            time_limit_ms: self.time_limit_ms,
-            hard_time_limit_ms: self.hard_time_limit_ms,
-            clock: self.clock.clone(),
-            node_limit: self.node_limit,
-            info_callback: self.info_callback.clone(),
-        }
-    }
-
     /// Set max depth
     #[must_use]
     pub fn depth(mut self, max_depth: u32) -> Self {
@@ -132,16 +120,18 @@ impl SmpConfig {
     }
 }
 
-/// Return the number of workers that can receive a non-zero node budget.
+/// Each worker searches its own tree. Small node limits work better when a
+/// single worker can finish a useful iteration.
+const MIN_SMP_NODES_PER_WORKER: u64 = 8_000;
+
 fn active_worker_count(requested_threads: usize, node_limit: u64) -> usize {
     let requested_threads = requested_threads.max(1);
     if node_limit == 0 {
         return requested_threads;
     }
 
-    usize::try_from(node_limit).map_or(requested_threads, |nodes| {
-        requested_threads.min(nodes.max(1))
-    })
+    let affordable = (node_limit / MIN_SMP_NODES_PER_WORKER).max(1);
+    requested_threads.min(usize::try_from(affordable).unwrap_or(usize::MAX))
 }
 
 /// Split a global node budget between workers without exceeding it in total.
@@ -158,21 +148,25 @@ fn worker_node_limit(node_limit: u64, worker_id: usize, worker_count: usize) -> 
     base + u64::from(receives_remainder)
 }
 
-/// Search thread stack size (32 MB to handle deep recursion)
-const SEARCH_STACK_SIZE: usize = 32 * 1024 * 1024;
-
-fn best_worker_move(results: &[WorkerResult]) -> Option<crate::board::Move> {
-    let main_result = results
+fn best_worker(results: &[WorkerOutcome]) -> Option<&WorkerOutcome> {
+    // A completed forced win is stronger than a centipawn score. Keep the
+    // shortest available mate even if another worker found it first.
+    let forced_mate = results
         .iter()
-        .find(|r| r.worker_id == 0 && r.best_move.is_some() && r.depth > 0);
-    let best_result = main_result.or_else(|| {
+        .filter(|outcome| {
+            let r = &outcome.result;
+            r.best_move.is_some() && r.depth > 0 && r.score >= MATE_THRESHOLD
+        })
+        .max_by_key(|outcome| (outcome.result.score, outcome.result.worker_id == 0));
+    forced_mate.or_else(|| {
         results
             .iter()
-            .filter(|r| r.best_move.is_some())
-            .max_by_key(|r| (r.depth, r.worker_id == 0))
-    });
-
-    best_result.and_then(|r| r.best_move)
+            .filter(|outcome| outcome.result.best_move.is_some())
+            .max_by_key(|outcome| {
+                let r = &outcome.result;
+                (r.worker_id == 0 && r.depth > 0, r.depth, r.worker_id == 0)
+            })
+    })
 }
 
 fn extract_smp_ponder_move(
@@ -182,15 +176,7 @@ fn extract_smp_ponder_move(
 ) -> Option<crate::board::Move> {
     best_move.and_then(|mv| {
         let mut temp_board = board.clone();
-        let info = temp_board.make_move(mv);
-        let legal_moves = temp_board.generate_moves();
-        let ponder = shared
-            .tt
-            .probe(temp_board.hash)
-            .and_then(|entry| entry.best_move())
-            .filter(|pmv| legal_moves.iter().any(|legal| legal == pmv));
-        temp_board.unmake_move(mv, info);
-        ponder
+        super::extract_ponder_move(&mut temp_board, &shared.tt, mv)
     })
 }
 
@@ -207,30 +193,28 @@ pub fn smp_search(
     stop: Arc<AtomicBool>,
 ) -> SearchResult {
     let num_threads = active_worker_count(config.num_threads, config.node_limit);
+    let mut root_board = board.clone();
 
-    // For single-threaded, use the existing path
-    if num_threads == 1 {
-        let mut board_clone = board.clone();
-        return super::search(&mut board_clone, state, config.to_search_config(), &stop);
+    // Tablebase roots need a single ranking pass.
+    if num_threads == 1 || super::endgame::probe(board).is_some() {
+        return super::search(&mut root_board, state, config.to_search_config(), &stop);
     }
 
-    // Avoid spawning worker threads for terminal, proven-draw, and exact
-    // K+NN-versus-K roots. The single-thread path performs this same check
-    // internally; SMP needs it here to avoid thread setup entirely.
-    let mut root_board = board.clone();
-    if let RootSearchResolution::Resolved(best_move) = immediate_root_result(&mut root_board) {
-        if config.info_callback.is_some() {
-            // Share terminal score reporting and forced-move analysis with
-            // the single-thread path, without creating idle helper workers.
-            state.stats.reset_search();
-            return super::search(&mut root_board, state, config.to_search_config(), &stop);
-        }
-        state.generation = state.generation.wrapping_add(1);
+    // These roots can be handled by the single-thread path without starting
+    // helpers or generating a second root move list for ordinary positions.
+    if board.halfmove_clock() >= FIFTY_MOVE_RULE_HALFMOVES - 1
+        || board.is_theoretical_draw()
+        || !board.has_multiple_legal_moves()
+    {
         state.stats.reset_search();
-        return SearchResult {
-            best_move,
-            ponder_move: None,
-        };
+        let mut root_config = config.to_search_config();
+        root_config.extract_ponder = root_config.info_callback.is_some();
+        return super::search(&mut root_board, state, root_config, &stop);
+    }
+
+    #[cfg(feature = "syzygy")]
+    if let Some(result) = try_syzygy(&mut root_board, state, &config, &stop) {
+        return result;
     }
 
     // Increment generation for new search
@@ -244,28 +228,19 @@ pub fn smp_search(
         state.generation,
     ));
 
-    let worker_config = config.to_worker_config();
+    let start = Instant::now();
+    let handles = spawn_workers(
+        board,
+        &shared,
+        &config,
+        num_threads,
+        #[cfg(feature = "syzygy")]
+        state.syzygy.as_ref(),
+    );
 
-    // Spawn worker threads
-    let mut handles: Vec<JoinHandle<WorkerResult>> = Vec::with_capacity(num_threads);
-
-    for worker_id in 0..num_threads {
-        let board_clone = board.clone();
-        let shared_clone = Arc::clone(&shared);
-        let mut worker_cfg = worker_config.clone();
-        worker_cfg.node_limit = worker_node_limit(config.node_limit, worker_id, num_threads);
-        // Only main worker reports info
-        if worker_id != 0 {
-            worker_cfg.info_callback = None;
-        }
-
-        let handle = thread::Builder::new()
-            .name(format!("search-{worker_id}"))
-            .stack_size(SEARCH_STACK_SIZE)
-            .spawn(move || run_worker(worker_id, board_clone, shared_clone, worker_cfg))
-            .expect("failed to spawn search worker");
-
-        handles.push(handle);
+    if handles.is_empty() {
+        state.generation = state.generation.wrapping_sub(1);
+        return super::search(&mut root_board, state, config.to_search_config(), &stop);
     }
 
     // Join the main worker first: it defines search completion. Helpers
@@ -274,7 +249,7 @@ pub fn smp_search(
     // tree. The stop flag is created fresh for each search, so setting it
     // cannot leak into a later search. Ponder and infinite searches must
     // leave it untouched: the controller waits for `ponderhit` or `stop`.
-    let mut results: Vec<WorkerResult> = Vec::with_capacity(num_threads);
+    let mut results: Vec<WorkerOutcome> = Vec::with_capacity(handles.len());
     let mut handles = handles.into_iter();
     if let Some(main_handle) = handles.next() {
         if let Ok(result) = main_handle.join() {
@@ -294,14 +269,107 @@ pub fn smp_search(
     state.stats.nodes = shared.total_nodes.load(Ordering::Relaxed);
     state.stats.total_nodes = state.stats.nodes;
     state.stats.seldepth = shared.max_seldepth.load(Ordering::Relaxed) as u32;
+    state.stats.tt_hits = results
+        .iter()
+        .fold(0u64, |sum, outcome| sum.saturating_add(outcome.tt_hits));
 
-    let best_move = best_worker_move(&results);
+    let selected = best_worker(&results);
+    let best_move = selected.and_then(|outcome| outcome.result.best_move);
+    if let (Some(callback), Some(outcome)) = (&config.info_callback, selected) {
+        if outcome.result.worker_id != 0 {
+            if let Some(mut info) = outcome.last_iteration.clone() {
+                info.nodes = state.stats.nodes;
+                info.seldepth = state.stats.seldepth;
+                info.tt_hits = state.stats.tt_hits;
+                info.time_ms = start.elapsed().as_millis() as u64;
+                info.nps = info
+                    .nodes
+                    .saturating_mul(1000)
+                    .checked_div(info.time_ms)
+                    .unwrap_or(0);
+                callback(&info);
+            }
+        }
+    }
     let ponder_move = extract_smp_ponder_move(board, &shared, best_move);
 
     SearchResult {
         best_move,
         ponder_move,
     }
+}
+
+fn spawn_workers(
+    board: &Board,
+    shared: &Arc<SharedSearchState>,
+    config: &SmpConfig,
+    num_threads: usize,
+    #[cfg(feature = "syzygy")] syzygy: Option<&Arc<super::syzygy::Tablebases>>,
+) -> Vec<JoinHandle<WorkerOutcome>> {
+    let worker_config = config.to_search_config();
+
+    let mut handles = Vec::new();
+
+    for worker_id in 0..num_threads {
+        let board_clone = board.clone();
+        let shared_clone = Arc::clone(shared);
+        let mut worker_cfg = worker_config.clone();
+        worker_cfg.node_limit = worker_node_limit(config.node_limit, worker_id, num_threads);
+        // Only main worker reports info
+        if worker_id != 0 {
+            worker_cfg.info_callback = None;
+        }
+
+        #[cfg(feature = "syzygy")]
+        let syzygy = syzygy.cloned();
+        let handle = thread::Builder::new()
+            .name(format!("search-{worker_id}"))
+            .stack_size(SEARCH_THREAD_STACK_SIZE)
+            .spawn(move || {
+                run_worker(
+                    worker_id,
+                    board_clone,
+                    shared_clone,
+                    worker_cfg,
+                    #[cfg(feature = "syzygy")]
+                    syzygy,
+                )
+            });
+
+        let Ok(handle) = handle else {
+            // If the system cannot create another worker, keep the ones
+            // already running. Their assigned budgets still fit the limit.
+            break;
+        };
+        handles.push(handle);
+    }
+    handles
+}
+
+#[cfg(feature = "syzygy")]
+fn try_syzygy(
+    board: &mut Board,
+    state: &mut SearchState,
+    config: &SmpConfig,
+    stop: &AtomicBool,
+) -> Option<SearchResult> {
+    if !state.syzygy.as_ref()?.may_cover(board) {
+        return None;
+    }
+    let moves = board.generate_moves();
+    let best_move = super::simple::try_syzygy_root(
+        board,
+        state,
+        &config.to_search_config(),
+        moves.as_slice(),
+        stop,
+    )?;
+    state.generation = state.generation.wrapping_add(1);
+    state.stats.reset_search();
+    Some(SearchResult {
+        best_move: Some(best_move),
+        ponder_move: None,
+    })
 }
 
 #[cfg(test)]
@@ -334,9 +402,44 @@ mod tests {
                 depth: 2,
                 nodes: 100,
             },
-        ];
+        ]
+        .map(|result| super::WorkerOutcome {
+            result,
+            last_iteration: None,
+            tt_hits: 0,
+        });
 
-        assert_eq!(super::best_worker_move(&results), Some(searched));
+        assert_eq!(
+            super::best_worker(&results).unwrap().result.best_move,
+            Some(searched)
+        );
+    }
+
+    #[test]
+    fn helper_with_shorter_proven_mate_supplies_the_result() {
+        use super::super::MATE_SCORE;
+        let mut board = Board::new();
+        let moves = ["a2a3", "e2e4", "d2d4"].map(|uci| board.parse_move(uci).unwrap());
+        let results = [MATE_SCORE - 7, MATE_SCORE - 5, 1000]
+            .into_iter()
+            .enumerate()
+            .map(|(worker_id, score)| super::WorkerOutcome {
+                result: super::WorkerResult {
+                    worker_id,
+                    best_move: Some(moves[worker_id]),
+                    score,
+                    depth: 6 + worker_id as u32,
+                    nodes: 1_000,
+                },
+                last_iteration: None,
+                tt_hits: 0,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            super::best_worker(&results).unwrap().result.best_move,
+            Some(moves[1])
+        );
     }
 
     #[test]
@@ -348,11 +451,30 @@ mod tests {
     }
 
     #[test]
-    fn node_limited_search_uses_no_more_workers_than_nodes() {
+    fn workers_store_entries_in_the_search_generation() {
+        let board = Board::new();
+        let mut state = SearchState::new(1);
+        state.generation = 62;
+        let result = smp_search(
+            &board,
+            &mut state,
+            SmpConfig::with_threads(2).depth(2),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert!(result.best_move.is_some());
+        assert_eq!(state.generation, 63);
+        assert_eq!(state.tables.tt.probe(board.hash()).unwrap().generation, 63);
+    }
+
+    #[test]
+    fn node_limited_search_keeps_enough_nodes_per_worker() {
         assert_eq!(active_worker_count(4, 0), 4);
         assert_eq!(active_worker_count(4, 1), 1);
-        assert_eq!(active_worker_count(4, 3), 3);
-        assert_eq!(active_worker_count(4, 10), 4);
+        assert_eq!(active_worker_count(4, 15_999), 1);
+        assert_eq!(active_worker_count(4, 16_000), 2);
+        assert_eq!(active_worker_count(4, 24_000), 3);
+        assert_eq!(active_worker_count(4, 80_000), 4);
     }
 
     #[test]

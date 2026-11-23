@@ -52,13 +52,18 @@ impl KillerTable {
     }
 
     pub fn update(&mut self, ply: usize, mv: Move) {
-        if ply >= MAX_PLY {
+        if mv == EMPTY_MOVE {
             return;
         }
-        if self.slots[ply][PRIMARY_SLOT] != mv {
-            self.slots[ply][TERTIARY_SLOT] = self.slots[ply][SECONDARY_SLOT];
-            self.slots[ply][SECONDARY_SLOT] = self.slots[ply][PRIMARY_SLOT];
-            self.slots[ply][PRIMARY_SLOT] = mv;
+        let Some(slots) = self.slots.get_mut(ply) else {
+            return;
+        };
+        if slots[PRIMARY_SLOT] != mv {
+            if slots[SECONDARY_SLOT] != mv {
+                slots[TERTIARY_SLOT] = slots[SECONDARY_SLOT];
+            }
+            slots[SECONDARY_SLOT] = slots[PRIMARY_SLOT];
+            slots[PRIMARY_SLOT] = mv;
         }
     }
 

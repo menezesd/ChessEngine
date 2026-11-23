@@ -4,11 +4,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::board::nnue::NnueNetwork;
-use crate::board::{Board, Move};
+use crate::board::{Board, Move, SearchIterationInfo};
 use crate::tt::TranspositionTable;
 
-use super::super::simple::simple_search;
-use super::super::{HceOptions, SearchInfoCallback, SearchParams, SearchState, StaticEvalOptions};
+use super::super::simple::simple_search_multipv;
+use super::super::{
+    HceOptions, SearchConfig, SearchParams, SearchState, StaticEvalOptions, DEFAULT_MAX_DEPTH,
+};
 
 /// Shared state across all worker threads.
 pub struct SharedSearchState {
@@ -71,34 +73,20 @@ impl SharedSearchState {
 
     /// Update seldepth if this value is higher.
     pub fn update_seldepth(&self, seldepth: u32) {
-        let mut current = self.max_seldepth.load(Ordering::Relaxed);
-        while seldepth as u64 > current {
-            match self.max_seldepth.compare_exchange_weak(
-                current,
-                seldepth as u64,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(c) => current = c,
-            }
-        }
+        self.max_seldepth
+            .fetch_max(u64::from(seldepth), Ordering::Relaxed);
     }
 
     /// Add nodes to global counter.
     pub fn add_nodes(&self, nodes: u64) {
         let mut current = self.total_nodes.load(Ordering::Relaxed);
-        loop {
-            let next = current.saturating_add(nodes);
-            match self.total_nodes.compare_exchange_weak(
-                current,
-                next,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(observed) => current = observed,
-            }
+        while let Err(observed) = self.total_nodes.compare_exchange_weak(
+            current,
+            current.saturating_add(nodes),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            current = observed;
         }
     }
 }
@@ -107,6 +95,8 @@ impl SharedSearchState {
 #[derive(Debug, Clone)]
 pub struct WorkerResult {
     pub worker_id: usize,
+    /// The best playable move, including a verified improvement after the
+    /// last completed iteration.
     pub best_move: Option<Move>,
     /// Score of the last completed iteration, or zero for an unsearched fallback.
     pub score: i32,
@@ -115,15 +105,10 @@ pub struct WorkerResult {
     pub nodes: u64,
 }
 
-/// Configuration passed to each worker thread.
-#[derive(Clone)]
-pub(super) struct WorkerSearchConfig {
-    pub(super) max_depth: u32,
-    pub(super) time_limit_ms: u64,
-    pub(super) hard_time_limit_ms: u64,
-    pub(super) clock: Option<Arc<super::super::SearchClock>>,
-    pub(super) node_limit: u64,
-    pub(super) info_callback: Option<SearchInfoCallback>,
+pub(super) struct WorkerOutcome {
+    pub(super) result: WorkerResult,
+    pub(super) last_iteration: Option<SearchIterationInfo>,
+    pub(super) tt_hits: u64,
 }
 
 /// Get depth offset for a worker thread.
@@ -168,51 +153,59 @@ pub(super) fn run_worker(
     worker_id: usize,
     mut board: Board,
     shared: Arc<SharedSearchState>,
-    config: WorkerSearchConfig,
-) -> WorkerResult {
+    mut config: SearchConfig,
+    #[cfg(feature = "syzygy")] syzygy: Option<Arc<super::super::syzygy::Tablebases>>,
+) -> WorkerOutcome {
     let mut local_state = new_worker_state(&shared);
+    #[cfg(feature = "syzygy")]
+    {
+        local_state.syzygy = syzygy;
+    }
 
-    local_state.tables.history.decay();
-    local_state.tables.killer_moves.reset();
-    local_state.tables.counter_moves.reset();
-
-    let search_depth = worker_search_depth(config.max_depth, worker_id);
-    let completed = Arc::new(Mutex::new((0, 0)));
+    let search_depth =
+        worker_search_depth(config.max_depth.unwrap_or(DEFAULT_MAX_DEPTH), worker_id);
+    let completed = Arc::new(Mutex::new(None));
     let last_iteration = Arc::clone(&completed);
-    let callback = config.info_callback;
+    let callback = config.info_callback.take();
     let record_iteration = Arc::new(move |info: &crate::board::SearchIterationInfo| {
-        *last_iteration.lock() = (info.depth, info.score);
+        *last_iteration.lock() = Some(info.clone());
         if let Some(callback) = &callback {
             callback(info);
         }
     });
 
-    let move_result = simple_search(
+    config.max_depth = Some(search_depth);
+    config.info_callback = Some(record_iteration);
+    let move_result = simple_search_multipv(
         &mut board,
         &mut local_state,
-        search_depth,
-        config.time_limit_ms,
-        config.hard_time_limit_ms,
-        config.clock,
-        config.node_limit,
+        &config,
         &shared.stop,
-        Some(record_iteration),
+        worker_id,
     );
 
     shared.add_nodes(local_state.stats.nodes);
     shared.update_seldepth(local_state.stats.seldepth);
 
-    let best_move = move_result;
     // Another worker can replace the root TT entry at any time. Its score
     // and requested depth do not describe this worker's selected move.
-    let (depth, score) = *completed.lock();
+    // Partial recovery is disabled after a completed mate score, so worker
+    // selection can use that score to compare forced mates.
+    let last_iteration = completed.lock().take();
+    let (depth, score) = last_iteration
+        .as_ref()
+        .map_or((0, 0), |info| (info.depth, info.score));
 
-    WorkerResult {
-        worker_id,
-        best_move,
-        score,
-        depth,
-        nodes: local_state.stats.total_nodes,
+    WorkerOutcome {
+        result: WorkerResult {
+            worker_id,
+            best_move: move_result,
+            score,
+            depth,
+            nodes: local_state.stats.total_nodes,
+        },
+        last_iteration,
+        tt_hits: local_state.stats.tt_hits,
     }
 }
 
@@ -225,7 +218,7 @@ mod tests {
     use crate::board::SearchState;
 
     use super::{
-        new_worker_state, run_worker, worker_search_depth, SharedSearchState, WorkerSearchConfig,
+        new_worker_state, run_worker, worker_search_depth, SearchConfig, SharedSearchState,
     };
 
     #[test]
@@ -245,16 +238,17 @@ mod tests {
             Arc::new(AtomicBool::new(true)),
             0,
         ));
-        let config = WorkerSearchConfig {
-            max_depth: 20,
-            time_limit_ms: 0,
-            hard_time_limit_ms: 0,
-            clock: None,
-            node_limit: 0,
-            info_callback: None,
-        };
+        let config = SearchConfig::depth(20);
 
-        let result = run_worker(1, board, shared, config);
+        let result = run_worker(
+            1,
+            board,
+            shared,
+            config,
+            #[cfg(feature = "syzygy")]
+            None,
+        )
+        .result;
 
         assert!(result.best_move.is_some());
         assert_eq!(result.nodes, 0);
@@ -270,21 +264,25 @@ mod tests {
         let shared = Arc::new(SharedSearchState::new(&state, Arc::clone(&stop), 0));
         let reported = Arc::new(parking_lot::Mutex::new(None));
         let received = Arc::clone(&reported);
-        let config = WorkerSearchConfig {
-            max_depth: 20,
-            time_limit_ms: 0,
-            hard_time_limit_ms: 0,
-            clock: None,
-            node_limit: 0,
+        let config = SearchConfig {
             info_callback: Some(Arc::new(move |info| {
                 *received.lock() = Some(info.clone());
                 if info.depth == 2 {
                     stop.store(true, Ordering::Relaxed);
                 }
             })),
+            ..SearchConfig::depth(20)
         };
 
-        let result = run_worker(0, board, shared, config);
+        let result = run_worker(
+            0,
+            board,
+            shared,
+            config,
+            #[cfg(feature = "syzygy")]
+            None,
+        )
+        .result;
 
         let reported = reported.lock();
         let reported = reported.as_ref().unwrap();
@@ -302,6 +300,32 @@ mod tests {
         assert_eq!(worker_search_depth(6, 1), 7);
         assert_eq!(worker_search_depth(6, 2), 6);
         assert_eq!(worker_search_depth(6, 3), 7);
+    }
+
+    #[test]
+    fn helper_can_start_at_a_different_depth_from_the_main_worker() {
+        let board = crate::board::Board::new();
+        let state = SearchState::new(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(SharedSearchState::new(&state, Arc::clone(&stop), 0));
+        let callback_stop = Arc::clone(&stop);
+        let config = SearchConfig {
+            info_callback: Some(Arc::new(move |_| {
+                callback_stop.store(true, Ordering::Relaxed);
+            })),
+            ..SearchConfig::depth(3)
+        };
+
+        let result = run_worker(
+            1,
+            board,
+            shared,
+            config,
+            #[cfg(feature = "syzygy")]
+            None,
+        )
+        .result;
+        assert_eq!(result.depth, 2);
     }
 
     #[test]
